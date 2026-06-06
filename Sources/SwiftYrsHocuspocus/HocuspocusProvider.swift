@@ -44,6 +44,8 @@ public actor HocuspocusProvider {
     private var awarenessObservation: Observation?
     private var suppressedRemoteUpdates = Set<Data>()
     private let awarenessObservationGate = AwarenessObservationGate()
+    private var retryAttempt = 0
+    private var disconnectRequested = false
 
     public init(
         url: URL,
@@ -105,33 +107,43 @@ public actor HocuspocusProvider {
     }
 
     public func connect() async throws {
+        disconnectRequested = false
+        retryAttempt = 0
+        try await openWebSocket()
+    }
+
+    public func disconnect() {
+        disconnectRequested = true
+        receiveTask?.cancel()
+        receiveTask = nil
+        documentObservation?.cancel()
+        documentObservation = nil
+        awarenessObservation?.cancel()
+        awarenessObservation = nil
+        clearRemoteAwarenessStates()
+        webSocket?.close()
+        webSocket = nil
+        connectionStatusContinuation.yield(.disconnected)
+    }
+
+    static func reconnectDelay(attempt: Int, initialDelay: Duration, maxDelay: Duration) -> Duration {
+        var delay = initialDelay
+        guard attempt > 0 else {
+            return min(delay, maxDelay)
+        }
+        for _ in 0..<attempt {
+            delay = min(delay + delay, maxDelay)
+        }
+        return delay
+    }
+
+    private func openWebSocket() async throws {
         connectionStatusContinuation.yield(.connecting)
         let webSocket = webSocketFactory(url)
         self.webSocket = webSocket
         webSocket.resume()
         connectionStatusContinuation.yield(.connected)
-        documentObservation = try document.observeUpdates { [weak self] event in
-            guard let update = Self.update(from: event) else {
-                return
-            }
-            Task {
-                await self?.sendLocalUpdate(update)
-            }
-        }
-        if let awareness {
-            awarenessObservation = try awareness.observeUpdate { [weak self, awarenessObservationGate, awareness] event in
-                guard !awarenessObservationGate.isApplyingRemote else {
-                    return
-                }
-                let clientIDs = Self.awarenessClientIDs(from: event)
-                guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
-                    return
-                }
-                Task {
-                    await self?.sendAwareness(update)
-                }
-            }
-        }
+        try startObservingIfNeeded()
         if token != nil {
             try await sendAuthToken(on: webSocket)
         }
@@ -150,19 +162,6 @@ public actor HocuspocusProvider {
         }
     }
 
-    public func disconnect() {
-        receiveTask?.cancel()
-        receiveTask = nil
-        documentObservation?.cancel()
-        documentObservation = nil
-        awarenessObservation?.cancel()
-        awarenessObservation = nil
-        clearRemoteAwarenessStates()
-        webSocket?.close()
-        webSocket = nil
-        connectionStatusContinuation.yield(.disconnected)
-    }
-
     private func receiveLoop() async {
         guard let webSocket else {
             return
@@ -174,7 +173,62 @@ public actor HocuspocusProvider {
             }
         } catch is CancellationError {
         } catch {
-            connectionStatusContinuation.yield(.disconnected)
+            await reconnectAfterUnexpectedDisconnect()
+        }
+    }
+
+    private func reconnectAfterUnexpectedDisconnect() async {
+        guard !disconnectRequested else {
+            return
+        }
+        webSocket?.close()
+        webSocket = nil
+        connectionStatusContinuation.yield(.disconnected)
+        guard retryAttempt < maxRetries else {
+            return
+        }
+        let delay = Self.reconnectDelay(
+            attempt: retryAttempt,
+            initialDelay: initialDelay,
+            maxDelay: maxDelay
+        )
+        retryAttempt += 1
+        do {
+            try await Task.sleep(for: delay)
+            guard !disconnectRequested else {
+                return
+            }
+            try await openWebSocket()
+        } catch is CancellationError {
+        } catch {
+            await reconnectAfterUnexpectedDisconnect()
+        }
+    }
+
+    private func startObservingIfNeeded() throws {
+        if documentObservation == nil {
+            documentObservation = try document.observeUpdates { [weak self] event in
+                guard let update = Self.update(from: event) else {
+                    return
+                }
+                Task {
+                    await self?.sendLocalUpdate(update)
+                }
+            }
+        }
+        if awarenessObservation == nil, let awareness {
+            awarenessObservation = try awareness.observeUpdate { [weak self, awarenessObservationGate, awareness] event in
+                guard !awarenessObservationGate.isApplyingRemote else {
+                    return
+                }
+                let clientIDs = Self.awarenessClientIDs(from: event)
+                guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
+                    return
+                }
+                Task {
+                    await self?.sendAwareness(update)
+                }
+            }
         }
     }
 

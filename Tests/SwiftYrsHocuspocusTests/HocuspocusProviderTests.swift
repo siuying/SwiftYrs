@@ -3,6 +3,9 @@ import Testing
 import SwiftYrs
 @testable import SwiftYrsHocuspocus
 
+@Suite(.serialized)
+struct HocuspocusProviderTests {
+
 @Test
 func providerConnectsSendsSyncStepOneAndAppliesSyncStepTwo() async throws {
     let serverDocument = YDoc(clientID: 1)
@@ -185,6 +188,78 @@ func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async thro
     #expect(try localAwareness.localState() != nil)
 }
 
+@Test
+func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
+    let document = YDoc(clientID: 8)
+    let awareness = YAwareness(document: document)
+    try awareness.setLocalState(["name": "reconnect"])
+    let firstSocket = FakeHocuspocusWebSocket()
+    let secondSocket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([firstSocket, secondSocket])
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: document,
+        awareness: awareness,
+        maxRetries: 1,
+        initialDelay: .milliseconds(5),
+        maxDelay: .milliseconds(20),
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    var statusIterator = provider.connectionStatus.makeAsyncIterator()
+
+    try await provider.connect()
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await firstSocket.requireSentMessage()
+    _ = try await firstSocket.requireSentMessage()
+
+    firstSocket.failReceive()
+
+    #expect(await statusIterator.next() == .disconnected)
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    let reconnectMessages = [
+        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
+        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
+    ]
+    #expect(reconnectMessages.contains { message in
+        if case .sync(documentName: "room-1", .syncStep1) = message {
+            return true
+        }
+        return false
+    })
+    #expect(reconnectMessages.contains { message in
+        if case .awareness(documentName: "room-1", _) = message {
+            return true
+        }
+        return false
+    })
+
+    await provider.disconnect()
+}
+
+@Test
+func providerBackoffDelayIsExponentialAndCapped() {
+    #expect(HocuspocusProvider.reconnectDelay(
+        attempt: 0,
+        initialDelay: .milliseconds(10),
+        maxDelay: .milliseconds(100)
+    ) == .milliseconds(10))
+    #expect(HocuspocusProvider.reconnectDelay(
+        attempt: 3,
+        initialDelay: .milliseconds(10),
+        maxDelay: .milliseconds(100)
+    ) == .milliseconds(80))
+    #expect(HocuspocusProvider.reconnectDelay(
+        attempt: 6,
+        initialDelay: .milliseconds(10),
+        maxDelay: .milliseconds(100)
+    ) == .milliseconds(100))
+}
+
+}
+
 private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeHocuspocusWebSocket")
     private var sentMessages: [Data] = []
@@ -224,6 +299,17 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
         }
         for continuation in continuations {
             continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    func failReceive() {
+        let continuations = queue.sync {
+            let continuations = receiveContinuations
+            receiveContinuations.removeAll()
+            return continuations
+        }
+        for continuation in continuations {
+            continuation.resume(throwing: TestWebSocketError())
         }
     }
 
@@ -285,6 +371,30 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
 }
 
 private struct TimeoutError: Error {}
+private struct TestWebSocketError: Error {}
+
+private final class FakeSocketFactory: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "FakeSocketFactory")
+    private var sockets: [FakeHocuspocusWebSocket]
+    private var created = 0
+
+    init(_ sockets: [FakeHocuspocusWebSocket]) {
+        self.sockets = sockets
+    }
+
+    func next() -> FakeHocuspocusWebSocket {
+        queue.sync {
+            created += 1
+            return sockets.removeFirst()
+        }
+    }
+
+    func createdCount() -> Int {
+        queue.sync {
+            created
+        }
+    }
+}
 
 private func expectEventually(_ predicate: @escaping () throws -> Bool) async throws {
     for _ in 0..<50 {
