@@ -15,6 +15,7 @@ public enum HocuspocusAuthMessage: Equatable {
 
 public enum HocuspocusMessage: Equatable {
     case sync(documentName: String, YSyncMessage)
+    case syncMessages(documentName: String, [YSyncMessage])
     case awareness(documentName: String, YAwarenessUpdate)
     case auth(documentName: String, HocuspocusAuthMessage)
     case queryAwareness(documentName: String)
@@ -28,7 +29,13 @@ public enum HocuspocusMessage: Equatable {
         case let .sync(documentName, message):
             encoder.writeString(documentName)
             encoder.writeVarUint(0)
-            encoder.writeData(message.payload)
+            encoder.writeData(Self.hocuspocusSyncPayload(from: message.payload))
+        case let .syncMessages(documentName, messages):
+            encoder.writeString(documentName)
+            encoder.writeVarUint(0)
+            for message in messages {
+                encoder.writeData(Self.hocuspocusSyncPayload(from: message.payload))
+            }
         case let .awareness(documentName, update):
             encoder.writeString(documentName)
             encoder.writeVarUint(1)
@@ -72,13 +79,16 @@ public enum HocuspocusMessage: Equatable {
         let documentName = try decoder.readString()
         let messageType = try decoder.readVarUint()
         switch messageType {
-        case 0:
-            let payload = decoder.readRemainingData()
+        case 0, 4:
+            let payload = try Self.ySyncPayload(fromHocuspocusPayload: decoder.readRemainingData())
             let messages = try YSyncMessage.decodePayload(payload)
-            guard messages.count == 1, let message = messages.first else {
+            guard !messages.isEmpty else {
                 throw HocuspocusCodecError.malformedMessage
             }
-            return .sync(documentName: documentName, message)
+            if messages.count == 1, let message = messages.first {
+                return .sync(documentName: documentName, message)
+            }
+            return .syncMessages(documentName: documentName, messages)
         case 1:
             let update = try YAwarenessUpdate(decoder.readBytes())
             try decoder.requireEnd()
@@ -101,7 +111,7 @@ public enum HocuspocusMessage: Equatable {
         case 3:
             try decoder.requireEnd()
             return .queryAwareness(documentName: documentName)
-        case 5:
+        case 5, 6:
             let payload = try decoder.readString()
             try decoder.requireEnd()
             return .stateless(documentName: documentName, payload: payload)
@@ -116,6 +126,31 @@ public enum HocuspocusMessage: Equatable {
         default:
             throw HocuspocusCodecError.unsupportedMessageType(messageType)
         }
+    }
+
+    private static func hocuspocusSyncPayload(from payload: Data) -> Data {
+        guard payload.first == 0 else {
+            return payload
+        }
+        return payload.dropFirst()
+    }
+
+    private static func ySyncPayload(fromHocuspocusPayload payload: Data) throws -> Data {
+        var decoder = HocuspocusDecoder(data: payload)
+        var result = Data()
+        while !decoder.isAtEnd {
+            let start = decoder.position
+            let type = try decoder.readVarUint()
+            switch type {
+            case 0, 1, 2:
+                _ = try decoder.readBytes()
+            default:
+                throw HocuspocusCodecError.malformedMessage
+            }
+            result.append(0)
+            result.append(payload[start..<decoder.position])
+        }
+        return result
     }
 }
 
@@ -158,6 +193,14 @@ struct HocuspocusDecoder {
 
     init(data: Data) {
         self.data = data
+    }
+
+    var position: Int {
+        offset
+    }
+
+    var isAtEnd: Bool {
+        offset >= data.count
     }
 
     mutating func readVarUint() throws -> UInt64 {

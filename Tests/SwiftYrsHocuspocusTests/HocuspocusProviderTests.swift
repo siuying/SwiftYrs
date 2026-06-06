@@ -32,6 +32,10 @@ func providerConnectsSendsSyncStepOneAndAppliesSyncStepTwo() async throws {
     #expect(await statusIterator.next() == .connecting)
     #expect(await statusIterator.next() == .connected)
 
+    #expect(try HocuspocusMessage.decode(try await socket.requireSentMessage()) == .auth(
+        documentName: "room-1",
+        .token("", version: HocuspocusProvider.productName)
+    ))
     let sentMessage = try await socket.requireSentMessage()
     let decodedSentMessage = try HocuspocusMessage.decode(sentMessage)
     if case .sync(documentName: "room-1", .syncStep1) = decodedSentMessage {} else {
@@ -65,6 +69,7 @@ func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
     )
 
     try await provider.connect()
+    _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
 
     try localDocument.write { transaction in
@@ -160,6 +165,7 @@ func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async thro
 
     try await provider.connect()
     _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
     let initialAwarenessFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
     #expect(try HocuspocusMessage.decode(initialAwarenessFrame) == .awareness(
         documentName: "room-1",
@@ -189,6 +195,40 @@ func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async thro
 }
 
 @Test
+func providerAnswersAwarenessQueriesWithKnownStates() async throws {
+    let document = YDoc(clientID: 11)
+    let awareness = YAwareness(document: document)
+    try awareness.setLocalState(["name": "swift"])
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: document,
+        awareness: awareness,
+        webSocketFactory: { _ in socket }
+    )
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+
+    socket.receive(HocuspocusMessage.queryAwareness(documentName: "room-1").encoded())
+
+    let response = try HocuspocusMessage.decode(try await socket.requireSentMessage(timeout: .milliseconds(100)))
+    if case let .awareness(documentName: "room-1", update) = response {
+        let remoteAwareness = YAwareness(document: YDoc(clientID: 12))
+        try remoteAwareness.applyUpdate(update)
+        let state = try #require(remoteAwareness.state(for: awareness.clientID) as? [String: Any])
+        #expect(state["name"] as? String == "swift")
+    } else {
+        Issue.record("Expected awareness response")
+    }
+
+    await provider.disconnect()
+}
+
+@Test
 func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
     let document = YDoc(clientID: 8)
     let awareness = YAwareness(document: document)
@@ -213,6 +253,7 @@ func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
     #expect(await statusIterator.next() == .connected)
     _ = try await firstSocket.requireSentMessage()
     _ = try await firstSocket.requireSentMessage()
+    _ = try await firstSocket.requireSentMessage()
 
     firstSocket.failReceive()
 
@@ -222,7 +263,14 @@ func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
     let reconnectMessages = [
         try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
         try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
+        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
     ]
+    #expect(reconnectMessages.contains { message in
+        if case .auth(documentName: "room-1", .token("", version: HocuspocusProvider.productName)) = message {
+            return true
+        }
+        return false
+    })
     #expect(reconnectMessages.contains { message in
         if case .sync(documentName: "room-1", .syncStep1) = message {
             return true
@@ -270,6 +318,7 @@ func providerSendsAndReceivesStatelessMessages() async throws {
     var statelessIterator = provider.stateless.makeAsyncIterator()
 
     try await provider.connect()
+    _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
 
     await provider.sendStateless("client-ping")

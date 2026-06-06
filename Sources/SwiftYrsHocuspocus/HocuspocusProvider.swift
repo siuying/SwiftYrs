@@ -159,9 +159,7 @@ public actor HocuspocusProvider {
         webSocket.resume()
         connectionStatusContinuation.yield(.connected)
         try startObservingIfNeeded()
-        if token != nil {
-            try await sendAuthToken(on: webSocket)
-        }
+        try await sendAuthToken(on: webSocket)
 
         let syncStep1 = try YSyncMessage.syncStep1(document.stateVector())
         try await webSocket.send(HocuspocusMessage.sync(documentName: name, syncStep1).encoded())
@@ -251,11 +249,17 @@ public actor HocuspocusProvider {
         let message = try HocuspocusMessage.decode(data)
         switch message {
         case let .sync(_, syncMessage):
-            try handle(syncMessage)
+            try await handle(syncMessage)
+        case let .syncMessages(_, syncMessages):
+            for syncMessage in syncMessages {
+                try await handle(syncMessage)
+            }
         case let .auth(_, auth):
             try await handle(auth)
         case let .awareness(_, update):
             try applyAwareness(update)
+        case .queryAwareness:
+            try await sendKnownAwarenessStates()
         case let .stateless(_, payload):
             statelessContinuation.yield(payload)
         default:
@@ -263,8 +267,17 @@ public actor HocuspocusProvider {
         }
     }
 
-    private func handle(_ syncMessage: YSyncMessage) throws {
+    private func handle(_ syncMessage: YSyncMessage) async throws {
         switch syncMessage {
+        case let .syncStep1(stateVector, _):
+            guard let webSocket else {
+                return
+            }
+            let update = try document.encodeStateAsUpdateV1(from: stateVector)
+            try await webSocket.send(HocuspocusMessage.sync(
+                documentName: name,
+                YSyncMessage.syncStep2(update)
+            ).encoded())
         case let .syncStep2(update, _):
             try applyRemote(update)
             isSyncedContinuation.yield(true)
@@ -290,10 +303,7 @@ public actor HocuspocusProvider {
     }
 
     private func sendAuthToken(on webSocket: any HocuspocusWebSocket) async throws {
-        guard let token else {
-            return
-        }
-        let value = try await token()
+        let value = try await token?() ?? ""
         try await webSocket.send(HocuspocusMessage.auth(
             documentName: name,
             .token(value, version: Self.productName)
@@ -320,6 +330,20 @@ public actor HocuspocusProvider {
         do {
             try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
         } catch {}
+    }
+
+    private func sendKnownAwarenessStates() async throws {
+        guard let webSocket, let awareness else {
+            return
+        }
+        let clientIDs = try awareness.states().map(\.clientID)
+        guard !clientIDs.isEmpty else {
+            return
+        }
+        try await webSocket.send(HocuspocusMessage.awareness(
+            documentName: name,
+            awareness.encodeUpdate(for: clientIDs)
+        ).encoded())
     }
 
     private func applyRemote(_ update: YUpdate) throws {

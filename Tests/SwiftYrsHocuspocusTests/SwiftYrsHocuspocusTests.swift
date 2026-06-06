@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import SwiftYrs
-import SwiftYrsHocuspocus
+@testable import SwiftYrsHocuspocus
 
 @Test
 func hocuspocusProviderPackageScaffoldIsAvailable() {
@@ -17,6 +17,36 @@ func hocuspocusMessageRoundTripsSyncPayloads() throws {
     let decoded = try HocuspocusMessage.decode(message.encoded())
 
     #expect(decoded == message)
+}
+
+@Test
+func hocuspocusMessageDecodesSyncReplyAsSyncPayload() throws {
+    let document = YDoc(clientID: 1)
+    let syncMessage = try YSyncMessage.syncStep1(document.stateVector())
+    var encoder = HocuspocusEncoder()
+    encoder.writeString("room-1")
+    encoder.writeVarUint(4)
+    encoder.writeData(syncMessage.payload.dropFirst())
+
+    let decoded = try HocuspocusMessage.decode(encoder.data)
+
+    #expect(decoded == .sync(documentName: "room-1", syncMessage))
+}
+
+@Test
+func hocuspocusMessageDecodesBatchedSyncReplyPayloads() throws {
+    let document = YDoc(clientID: 1)
+    let syncStep2 = try YSyncMessage.syncStep2(document.encodeStateAsUpdateV1())
+    let syncStep1 = try YSyncMessage.syncStep1(document.stateVector())
+    var encoder = HocuspocusEncoder()
+    encoder.writeString("room-1")
+    encoder.writeVarUint(4)
+    encoder.writeData(syncStep2.payload.dropFirst())
+    encoder.writeData(syncStep1.payload.dropFirst())
+
+    let decoded = try HocuspocusMessage.decode(encoder.data)
+
+    #expect(decoded == .syncMessages(documentName: "room-1", [syncStep2, syncStep1]))
 }
 
 @Test
