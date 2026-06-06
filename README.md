@@ -321,7 +321,7 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | `Y.Map` weak links | ✅ | ✅ | ✅ | `YWeakLink`, `YMap` link/deref APIs |
 | `Y.Array` insert / delete | ✅ | ✅ | ✅ | `insert(_:into:at:)` / `remove(from:at:length:)` |
 | `Y.Array` / `Y.Text` quotations | ✅ | ✅ | ✅ | Weak-range quote APIs |
-| `Y.Array` move | ✅ | ❌ removed | ❌ | Removed in y-crdt commit `2d52291`; deferred |
+| `Y.Array` move | ✅ | ❌ removed | ❌ | Removed in y-crdt ; [see](https://www.bartoszsypytkowski.com/replacing-yjs-move-feature/) |
 | `Y.XmlFragment` | ✅ | ✅ | ✅ | `YXmlFragment` child insert/remove/read |
 | `Y.XmlElement` | ✅ | ✅ | ✅ | `YXmlElement` tag, attributes, children |
 | `Y.XmlText` | ✅ | ✅ | ✅ | `YXmlText` insert/remove/attributes |
@@ -340,10 +340,6 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | Awareness | ✅ | ✅ (shim) | ✅ | `YAwareness`, `YAwarenessUpdate` — implemented via project-owned Rust shim |
 | Sync protocol messages | ✅ | ✅ (shim) | ✅ | `YSyncMessage` encode/decode — syncStep1/2, update, awareness, auth — via Rust shim |
 | Recursive nesting | ✅ | ✅ | ✅ | `YValue` enum covers all shared-type variants |
-| `Y.Array` move | ✅ | ❌ | ❌ | Not in current y-crdt; will add if upstream restores |
-| CocoaPods / Carthage | — | — | ❌ | SwiftPM only |
-| Intel macOS / Intel iOS Simulator | — | — | ❌ | arm64 only in initial release |
-| Linux (x86_64 / arm64) | — | — | ✅ | Build from source via `scripts/build-linux.sh` |
 
 ---
 
