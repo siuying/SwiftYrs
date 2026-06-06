@@ -47,6 +47,56 @@ func providerConnectsSendsSyncStepOneAndAppliesSyncStepTwo() async throws {
     #expect(await statusIterator.next() == .disconnected)
 }
 
+@Test
+func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
+    let localDocument = YDoc(clientID: 3)
+    let localText = try localDocument.text(named: "body")
+    let remoteDocument = YDoc(clientID: 4)
+    let remoteText = try remoteDocument.text(named: "body")
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: localDocument,
+        webSocketFactory: { _ in socket }
+    )
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+
+    try localDocument.write { transaction in
+        try transaction.insert("local", into: localText, at: 0)
+    }
+
+    let localUpdateFrame = try await socket.requireSentMessage()
+    if case let .sync(documentName: "room-1", .update(update, _)) = try HocuspocusMessage.decode(localUpdateFrame) {
+        try remoteDocument.apply(update)
+    } else {
+        Issue.record("Expected local write to be sent as a Sync update")
+    }
+
+    try remoteDocument.write { transaction in
+        try transaction.insert(" remote", into: remoteText, at: 5)
+    }
+    let remoteUpdate = try remoteDocument.encodeStateAsUpdateV1(from: localDocument.stateVector())
+    let remoteUpdateFrame = try HocuspocusMessage.sync(
+        documentName: "room-1",
+        YSyncMessage.update(remoteUpdate)
+    ).encoded()
+    socket.receive(remoteUpdateFrame)
+
+    try await expectEventually {
+        try localDocument.read { transaction in
+            try transaction.string(from: localText) == "local remote"
+        }
+    }
+
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(socket.sentMessageCount() == 0)
+
+    await provider.disconnect()
+}
+
 private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeHocuspocusWebSocket")
     private var sentMessages: [Data] = []
@@ -110,4 +160,20 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
             }
         }
     }
+
+    func sentMessageCount() -> Int {
+        queue.sync {
+            sentMessages.count
+        }
+    }
+}
+
+private func expectEventually(_ predicate: @escaping () throws -> Bool) async throws {
+    for _ in 0..<50 {
+        if try predicate() {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(try predicate())
 }
