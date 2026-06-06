@@ -1,0 +1,15 @@
+{
+  "name": "swift-yrs",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "lib0": "^0.2.117",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.31"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}

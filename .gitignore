@@ -1,0 +1,5 @@
+.DS_Store
+.build
+Artifacts
+native/yrs-bridge/target
+node_modules

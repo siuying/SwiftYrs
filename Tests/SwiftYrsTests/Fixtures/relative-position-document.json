@@ -1,0 +1,14 @@
+{
+  "stateVector": "AQMF",
+  "updateV1": "AQEDAAQBBGJvZHkFaGVsbG8A",
+  "updateV2": "AAABAwAAAQQMCWJvZHloZWxsbwQFAQEAAAEBAAA=",
+  "relativePositionV1": "AAMEAA==",
+  "relativePositionJSON": {
+    "tname": "body",
+    "item": {
+      "client": 3,
+      "clock": 4
+    },
+    "assoc": 0
+  }
+}

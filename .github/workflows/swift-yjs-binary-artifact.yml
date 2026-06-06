@@ -1,0 +1,43 @@
+name: SwiftYrs Binary Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "swift-yjs-*"
+
+jobs:
+  build:
+    name: Build XCFramework ZIP
+    runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Package SwiftPM binary artifact
+        run: scripts/package-binary-artifact.sh
+
+      - name: Verify binary consumer fixture
+        run: scripts/verify-binary-consumer.sh
+
+      - name: Upload artifact ZIP and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: YrsBridge.xcframework
+          path: |
+            Artifacts/YrsBridge.xcframework.zip
+            Artifacts/YrsBridge.xcframework.zip.checksum
+
+      - name: Attach artifact to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Artifacts/YrsBridge.xcframework.zip
+            Artifacts/YrsBridge.xcframework.zip.checksum

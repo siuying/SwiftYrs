@@ -1,0 +1,4 @@
+module YrsBridgeFFI {
+    umbrella header "YrsBridgeFFI.h"
+    export *
+}

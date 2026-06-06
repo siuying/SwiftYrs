@@ -1,0 +1,41 @@
+# Feature Coverage Matrix
+
+This matrix defines the initial completeness target for the Swift binding. It is checked against the local `external/y-crdt` checkout, currently `yrs`/`yffi` 0.27.0.
+
+Status values:
+
+- `ffi-covered` — `yrs` supports the feature and current `yffi` exposes enough symbols for the Swift shim to wrap.
+- `shim-gap` — `yrs` supports the feature, but current `yffi` does not expose enough symbols; the project-owned Rust shim must call `yrs` directly or extend/fork `yffi`.
+- `upstream-removed` — the feature existed in older `y-crdt` history but was removed from the checked-out upstream; do not expose it in the initial Swift API unless the project explicitly restores it.
+- `unresolved` — the feature is claimed by the README but could not be found in the checked-out `yrs`/`yffi` source.
+
+## Test Authority
+
+Every completed row needs Swift API tests. Rows involving encoded updates, state vectors, snapshots, awareness payloads, or sync protocol messages also need cross-language interop fixtures, with JavaScript Yjs treated as the compatibility authority. Rust/Yrs or yffi-level fixtures should be used to isolate native bridge behavior when a Swift failure could be either wrapper logic or FFI behavior.
+
+| Feature | y-crdt README parity row | yrs support | current yffi support | Swift API target | FFI gap? | Tests required | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| YText insert/delete | YText: insert/delete | yes: `Text` supports insert/remove range | yes: `ytext_insert`, `ytext_remove_range`, `ytext_string`, `ytext_len` | `YText.insert`, `YText.remove` | no | API behavior, UTF offset mode, update roundtrip, Yjs fixture | ffi-covered |
+| YText formatting and deltas | YText: formatting attributes and deltas | yes: formatting attrs, deltas, chunks | yes: `ytext_format`, `ytext_insert_delta`, `ydelta_input_*`, `ytext_chunks`, text event deltas | format attributes, delta input/output | no | formatting, delta events, chunk reads, Yjs fixture | ffi-covered |
+| YText embeds | YText: embedded elements | yes: `Text::insert_embed` | yes: `ytext_insert_embed` with `YInput` | embed `YValue` into text | no | embed insert/read/chunk/update roundtrip, nested shared-type embed | ffi-covered |
+| YMap update/delete | YMap: update/delete | yes: `Map::insert`, `Map::remove` | yes: `ymap_insert`, `ymap_remove`, `ymap_get`, iterators, event keys | `YMap.set`, `YMap.remove`, lookup | no | scalar values, shared-type values, key events, Yjs fixture | ffi-covered |
+| YMap weak links | YMap: weak links | yes with `weak` feature: `Map::link` | yes: `ymap_link`, `yweak_deref`, `yweak_observe`, `yinput_weak` | weak map links | no | link/deref after source update/delete, observer events, Yjs fixture | ffi-covered |
+| YArray insert/delete | YArray: insert/delete | yes: `Array::insert`, `insert_range`, `remove_range` | yes: `yarray_insert_range`, `yarray_remove_range`, `yarray_get`, iterators, event deltas | `YArray.insert`, `YArray.remove` | no | ordering, mixed values, nested shared types, update roundtrip | ffi-covered |
+| YArray and YText quotations | YArray & YText quotations | yes with `weak` feature: `Quotable` for `ArrayRef` and `TextRef` | yes: `yarray_quote`, `ytext_quote`, `yweak_iter`, `yweak_string`, `yweak_read` | quote/weak range APIs | no | quote read after insert/delete, inclusive/exclusive boundaries, Yjs fixture | ffi-covered |
+| YArray move | YArray: move | removed from this checkout: older history had `Array::move_to`/`move_range_to`, but commit `2d52291` removed the feature | removed from current `yffi`: older history had `yarray_move`, but commit `2d52291` removed it | no initial Swift API; track as a deferred upstream-removed feature | yes/deferred | add only if `y-crdt` restores it or this project intentionally reimplements move semantics with interop fixtures | upstream-removed |
+| XML types | XML Element, Fragment and Text | yes: `XmlElementRef`, `XmlFragmentRef`, `XmlTextRef`; attrs, children, text formatting | yes: root `yxmlfragment`, element/text insert/remove, attrs, siblings, tree walker, XML text ops/events | `YXmlElement`, `YXmlFragment`, `YXmlText` | no | tree edits, attrs, XML text formatting, serialization, Yjs fixture | ffi-covered |
+| Subdocuments | Sub-documents | yes: `Doc` as prelim/subdoc, subdoc events, load/destroy | yes: `yinput_ydoc`, `youtput_read_ydoc`, `ydoc_observe_subdocs`, `ytransaction_subdocs`, `ydoc_load`, `ydoc_clear` | nested `YDoc` values and subdoc events | no | add/remove/load/clear, subdoc observe, update propagation | ffi-covered |
+| Shared collection observers | Shared collections: observers | yes: `Observable` and event types for text/array/map/XML/weak | yes: `ytext_observe`, `yarray_observe`, `ymap_observe`, `yxmlelem_observe`, `yxmltext_observe`, `yweak_observe`, event delta/key/path accessors | observation tokens and event streams | no | callback lifetime, cancellation, deltas, keys, paths, async stream bridge | ffi-covered |
+| Recursive nesting | Shared collections: recursive nesting | yes: prelim/input/output supports nested shared refs | yes: `YInput`/`YOutput` variants for arrays/maps/text/XML/doc/weak plus nested JSON arrays/maps | nested `YValue` shared types | no | nested insert/read/update, event path through nested containers | ffi-covered |
+| Document observers | Document observers | yes: update, transaction cleanup, subdoc, destroy observers | yes: `ydoc_observe_updates_v1/v2`, `ydoc_observe_after_transaction`, `ydoc_observe_subdocs`, `ydoc_observe_clear` | doc update/transaction/subdoc observers | no | observer events, before/after state, cancellation, v1/v2 updates | ffi-covered |
+| Transaction origins | Transaction: origins | yes: `transact_mut_with`/origins and UndoManager origin filtering | yes: `ydoc_write_transaction(origin_len, origin)`, undo manager origin include/exclude | `transact(origin:)` with typed origin bytes | no | origin filtering, observer origin exposure if shim adds it, undo interaction | ffi-covered |
+| Snapshots | Snapshots | yes: `Snapshot`, encode state from snapshot | yes: `ytransaction_snapshot`, `ytransaction_encode_state_from_snapshot_v1/v2` | `YSnapshot`, encode state from snapshot | no | snapshot encode/read, state-from-snapshot, Yjs fixture | ffi-covered |
+| Sticky indexes | Sticky indexes | yes: `StickyIndex` | yes: `ysticky_index_from_index`, encode/decode/json/read/destroy | `YRelativePosition`/sticky index | no | position stability across edits, JSON/binary roundtrip, Yjs RelativePosition fixture | ffi-covered |
+| Undo manager | Undo Manager | yes: `UndoManager` scopes, origins, undo/redo, events | yes: `yundo_manager_*` scope/origin/clear/stop/undo/redo/stack/event exports | `YUndoManager` | no | undo/redo stacks, origins, scopes, events, transaction interaction | ffi-covered |
+| Awareness | Awareness | yes: `yrs::sync::Awareness` and `AwarenessUpdate` | no: no awareness C exports; yffi README table also marks yffi Awareness unsupported | `YAwareness`, `YAwarenessUpdate` | yes: Rust shim must expose awareness state/update/event APIs | local/remote states, encode/apply update, events, Yjs awareness fixture | shim-gap |
+| Sync protocol messages | Network provider protocol payloads | yes: `yrs::sync::Protocol`, `Message`, `SyncMessage`, `MessageReader` | no: no y-sync protocol C exports | `YSyncMessage`, `YUpdate`, `YStateVector`, `YAwarenessUpdate` | yes: Rust shim must expose message encode/decode/handle helpers or direct typed payload constructors | protocol roundtrip, multi-message payloads, Yjs/y-protocols interop fixtures | shim-gap |
+
+## Follow-up Work
+
+- Define the Rust Shim Crate exports for Awareness and sync protocol payloads. These are confirmed `yrs` features, but current `yffi` does not expose them.
+- Do not expose YArray move in the initial Swift API. The local README claims support, but the current checkout explicitly removed the feature in commit `2d52291` after earlier `move_to`/`yarray_move` implementations existed. Revisit only if upstream restores it or this project intentionally takes on move semantics as new Rust work.
