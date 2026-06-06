@@ -25,6 +25,7 @@ public actor HocuspocusProvider {
     public nonisolated let connectionStatus: AsyncStream<ConnectionStatus>
     public nonisolated let isSynced: AsyncStream<Bool>
     public nonisolated let authStatus: AsyncStream<AuthStatus>
+    public nonisolated let stateless: AsyncStream<String>
 
     private let url: URL
     private let name: String
@@ -38,6 +39,7 @@ public actor HocuspocusProvider {
     private let connectionStatusContinuation: AsyncStream<ConnectionStatus>.Continuation
     private let isSyncedContinuation: AsyncStream<Bool>.Continuation
     private let authStatusContinuation: AsyncStream<AuthStatus>.Continuation
+    private let statelessContinuation: AsyncStream<String>.Continuation
     private var webSocket: (any HocuspocusWebSocket)?
     private var receiveTask: Task<Void, Never>?
     private var documentObservation: Observation?
@@ -104,6 +106,10 @@ public actor HocuspocusProvider {
         let authStatusPair = AsyncStream.makeStream(of: AuthStatus.self)
         self.authStatus = authStatusPair.stream
         self.authStatusContinuation = authStatusPair.continuation
+
+        let statelessPair = AsyncStream.makeStream(of: String.self)
+        self.stateless = statelessPair.stream
+        self.statelessContinuation = statelessPair.continuation
     }
 
     public func connect() async throws {
@@ -124,6 +130,15 @@ public actor HocuspocusProvider {
         webSocket?.close()
         webSocket = nil
         connectionStatusContinuation.yield(.disconnected)
+    }
+
+    public func sendStateless(_ payload: String) async {
+        guard let webSocket else {
+            return
+        }
+        do {
+            try await webSocket.send(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded())
+        } catch {}
     }
 
     static func reconnectDelay(attempt: Int, initialDelay: Duration, maxDelay: Duration) -> Duration {
@@ -241,6 +256,8 @@ public actor HocuspocusProvider {
             try await handle(auth)
         case let .awareness(_, update):
             try applyAwareness(update)
+        case let .stateless(_, payload):
+            statelessContinuation.yield(payload)
         default:
             return
         }
