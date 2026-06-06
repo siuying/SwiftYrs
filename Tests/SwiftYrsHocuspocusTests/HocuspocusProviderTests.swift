@@ -97,6 +97,48 @@ func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
     await provider.disconnect()
 }
 
+@Test
+func providerSendsFreshAuthTokenAndEmitsAuthStatuses() async throws {
+    let socket = FakeHocuspocusWebSocket()
+    let tokenCounter = TokenCounter()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: YDoc(clientID: 5),
+        token: {
+            await tokenCounter.next()
+        },
+        webSocketFactory: { _ in socket }
+    )
+    var authIterator = provider.authStatus.makeAsyncIterator()
+
+    try await provider.connect()
+
+    let authFrame = try await socket.requireSentMessage()
+    #expect(try HocuspocusMessage.decode(authFrame) == .auth(
+        documentName: "room-1",
+        .token("token-1", version: HocuspocusProvider.productName)
+    ))
+    _ = try await socket.requireSentMessage()
+
+    socket.receive(HocuspocusMessage.auth(documentName: "room-1", .authenticated(scope: "read-write")).encoded())
+    #expect(await authIterator.next() == .authenticated(scope: "read-write"))
+
+    socket.receive(HocuspocusMessage.auth(documentName: "room-1", .permissionDenied(reason: "expired")).encoded())
+    #expect(await authIterator.next() == .denied(reason: "expired"))
+
+    await provider.disconnect()
+    try await provider.connect()
+
+    let secondAuthFrame = try await socket.requireSentMessage()
+    #expect(try HocuspocusMessage.decode(secondAuthFrame) == .auth(
+        documentName: "room-1",
+        .token("token-2", version: HocuspocusProvider.productName)
+    ))
+
+    await provider.disconnect()
+}
+
 private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeHocuspocusWebSocket")
     private var sentMessages: [Data] = []
@@ -176,4 +218,13 @@ private func expectEventually(_ predicate: @escaping () throws -> Bool) async th
         try await Task.sleep(for: .milliseconds(10))
     }
     #expect(try predicate())
+}
+
+private actor TokenCounter {
+    private var value = 0
+
+    func next() -> String {
+        value += 1
+        return "token-\(value)"
+    }
 }

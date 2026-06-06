@@ -7,6 +7,11 @@ public enum ConnectionStatus: Equatable, Sendable {
     case disconnected
 }
 
+public enum AuthStatus: Equatable, Sendable {
+    case authenticated(scope: String)
+    case denied(reason: String)
+}
+
 protocol HocuspocusWebSocket: Sendable {
     func resume()
     func send(_ data: Data) async throws
@@ -19,6 +24,7 @@ public actor HocuspocusProvider {
 
     public nonisolated let connectionStatus: AsyncStream<ConnectionStatus>
     public nonisolated let isSynced: AsyncStream<Bool>
+    public nonisolated let authStatus: AsyncStream<AuthStatus>
 
     private let url: URL
     private let name: String
@@ -31,6 +37,7 @@ public actor HocuspocusProvider {
     private let webSocketFactory: @Sendable (URL) -> any HocuspocusWebSocket
     private let connectionStatusContinuation: AsyncStream<ConnectionStatus>.Continuation
     private let isSyncedContinuation: AsyncStream<Bool>.Continuation
+    private let authStatusContinuation: AsyncStream<AuthStatus>.Continuation
     private var webSocket: (any HocuspocusWebSocket)?
     private var receiveTask: Task<Void, Never>?
     private var documentObservation: Observation?
@@ -89,6 +96,10 @@ public actor HocuspocusProvider {
         let isSyncedPair = AsyncStream.makeStream(of: Bool.self)
         self.isSynced = isSyncedPair.stream
         self.isSyncedContinuation = isSyncedPair.continuation
+
+        let authStatusPair = AsyncStream.makeStream(of: AuthStatus.self)
+        self.authStatus = authStatusPair.stream
+        self.authStatusContinuation = authStatusPair.continuation
     }
 
     public func connect() async throws {
@@ -104,6 +115,9 @@ public actor HocuspocusProvider {
             Task {
                 await self?.sendLocalUpdate(update)
             }
+        }
+        if token != nil {
+            try await sendAuthToken(on: webSocket)
         }
 
         let syncStep1 = try YSyncMessage.syncStep1(document.stateVector())
@@ -131,7 +145,7 @@ public actor HocuspocusProvider {
         do {
             while !Task.isCancelled {
                 let data = try await webSocket.receive()
-                try handle(data)
+                try await handle(data)
             }
         } catch is CancellationError {
         } catch {
@@ -139,11 +153,19 @@ public actor HocuspocusProvider {
         }
     }
 
-    private func handle(_ data: Data) throws {
+    private func handle(_ data: Data) async throws {
         let message = try HocuspocusMessage.decode(data)
-        guard case let .sync(_, syncMessage) = message else {
+        switch message {
+        case let .sync(_, syncMessage):
+            try handle(syncMessage)
+        case let .auth(_, auth):
+            try await handle(auth)
+        default:
             return
         }
+    }
+
+    private func handle(_ syncMessage: YSyncMessage) throws {
         switch syncMessage {
         case let .syncStep2(update, _):
             try applyRemote(update)
@@ -153,6 +175,31 @@ public actor HocuspocusProvider {
         default:
             return
         }
+    }
+
+    private func handle(_ auth: HocuspocusAuthMessage) async throws {
+        switch auth {
+        case .token:
+            guard let webSocket else {
+                return
+            }
+            try await sendAuthToken(on: webSocket)
+        case let .permissionDenied(reason):
+            authStatusContinuation.yield(.denied(reason: reason))
+        case let .authenticated(scope):
+            authStatusContinuation.yield(.authenticated(scope: scope))
+        }
+    }
+
+    private func sendAuthToken(on webSocket: any HocuspocusWebSocket) async throws {
+        guard let token else {
+            return
+        }
+        let value = try await token()
+        try await webSocket.send(HocuspocusMessage.auth(
+            documentName: name,
+            .token(value, version: Self.productName)
+        ).encoded())
     }
 
     private func sendLocalUpdate(_ update: YUpdate) async {
