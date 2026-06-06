@@ -8,11 +8,34 @@ let ffiTarget: Target = .systemLibrary(
     path: "LinuxSupport",
     pkgConfig: "yrs-bridge"
 )
+
+let hocuspocusProducts: [Product] = []
+
+let hocuspocusTargets: [Target] = []
 #else
 let ffiTarget: Target = .binaryTarget(
     name: "YrsBridgeFFI",
     path: "Artifacts/YrsBridge.xcframework"
 )
+
+let hocuspocusProducts: [Product] = [
+    .library(name: "SwiftYrsHocuspocus", targets: ["SwiftYrsHocuspocus"]),
+]
+
+let hocuspocusTargets: [Target] = [
+    .target(
+        name: "SwiftYrsHocuspocus",
+        dependencies: ["SwiftYrs"]
+    ),
+    .testTarget(
+        name: "SwiftYrsHocuspocusTests",
+        dependencies: ["SwiftYrsHocuspocus"],
+        exclude: [
+            "hocuspocus-peer.ts",
+            "hocuspocus-server.ts",
+        ]
+    ),
+]
 #endif
 
 let package = Package(
@@ -20,33 +43,21 @@ let package = Package(
     platforms: [
         .macOS(.v14),
         .iOS(.v17),
+        .custom("linux", versionString: "1"),
     ],
     products: [
         .library(name: "SwiftYrs", targets: ["SwiftYrs"]),
-        .library(name: "SwiftYrsHocuspocus", targets: ["SwiftYrsHocuspocus"]),
-    ],
+    ] + hocuspocusProducts,
     targets: [
         ffiTarget,
         .target(
             name: "SwiftYrs",
             dependencies: ["YrsBridgeFFI"]
         ),
-        .target(
-            name: "SwiftYrsHocuspocus",
-            dependencies: ["SwiftYrs"]
-        ),
         .testTarget(
             name: "SwiftYrsTests",
             dependencies: ["SwiftYrs"],
             resources: [.process("Fixtures")]
         ),
-        .testTarget(
-            name: "SwiftYrsHocuspocusTests",
-            dependencies: ["SwiftYrsHocuspocus"],
-            exclude: [
-                "hocuspocus-peer.ts",
-                "hocuspocus-server.ts",
-            ]
-        ),
-    ]
+    ] + hocuspocusTargets,
 )

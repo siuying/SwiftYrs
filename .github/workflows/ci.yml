@@ -40,3 +40,43 @@ jobs:
         run: |
           export PKG_CONFIG_PATH="$PWD/Artifacts/linux/pkgconfig"
           swift test
+
+  test-macos:
+    name: Test on macOS
+    runs-on: macos-15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/yrs-bridge/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('native/yrs-bridge/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build XCFramework
+        run: scripts/build-xcframework.sh
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install JavaScript dependencies
+        run: bun install
+
+      - name: Run Swift tests
+        run: swift test
