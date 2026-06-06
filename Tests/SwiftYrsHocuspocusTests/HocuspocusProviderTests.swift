@@ -106,6 +106,56 @@ func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
 }
 
 @Test
+func providerDoesNotEchoRemoteUpdatesButStillSendsLocalEdits() async throws {
+    let localDocument = YDoc(clientID: 14)
+    let localText = try localDocument.text(named: "body")
+    let remoteDocument = YDoc(clientID: 15)
+    let remoteText = try remoteDocument.text(named: "body")
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: localDocument,
+        webSocketFactory: { _ in socket }
+    )
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+
+    // Apply several remote updates; none of them must be echoed back, regardless
+    // of how yrs re-encodes the observed update bytes.
+    var expected = ""
+    for fragment in ["one", "two", "three"] {
+        let base = try remoteDocument.read { try $0.length(of: remoteText) }
+        try remoteDocument.write { transaction in
+            try transaction.insert(fragment, into: remoteText, at: base)
+        }
+        expected += fragment
+        let remoteUpdate = try remoteDocument.encodeStateAsUpdateV1(from: localDocument.stateVector())
+        socket.receive(try HocuspocusMessage.sync(documentName: "room-1", YSyncMessage.update(remoteUpdate)).encoded())
+        let snapshot = expected
+        try await expectEventually {
+            try localDocument.read { transaction in
+                try transaction.string(from: localText) == snapshot
+            }
+        }
+    }
+    try await socket.expectNoSentMessage(for: .milliseconds(20))
+
+    // A genuine local edit must still be propagated (the gate resets correctly).
+    try localDocument.write { transaction in
+        try transaction.insert("!", into: localText, at: 0)
+    }
+    let localFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    if case .sync(documentName: "room-1", .update) = try HocuspocusMessage.decode(localFrame) {} else {
+        Issue.record("Expected local edit to be sent as a Sync update")
+    }
+
+    await provider.disconnect()
+}
+
+@Test
 func providerSendsFreshAuthTokenAndEmitsAuthStatuses() async throws {
     let socket = FakeHocuspocusWebSocket()
     let tokenCounter = TokenCounter()
