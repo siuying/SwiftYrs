@@ -182,6 +182,10 @@ public actor HocuspocusProvider {
         do {
             while !Task.isCancelled {
                 let data = try await webSocket.receive()
+                // A received frame proves the connection is healthy, so reset the
+                // backoff counter; otherwise transient drops accumulate across
+                // independent outages and eventually exhaust maxRetries.
+                retryAttempt = 0
                 try await handle(data)
             }
         } catch is CancellationError {

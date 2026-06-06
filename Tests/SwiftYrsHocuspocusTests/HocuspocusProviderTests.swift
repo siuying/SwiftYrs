@@ -288,6 +288,55 @@ func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
 }
 
 @Test
+func providerResetsBackoffAfterHealthyReconnect() async throws {
+    let firstSocket = FakeHocuspocusWebSocket()
+    let secondSocket = FakeHocuspocusWebSocket()
+    let thirdSocket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([firstSocket, secondSocket, thirdSocket])
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: YDoc(clientID: 13),
+        maxRetries: 1,
+        initialDelay: .milliseconds(5),
+        maxDelay: .milliseconds(20),
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    var statusIterator = provider.connectionStatus.makeAsyncIterator()
+    var statelessIterator = provider.stateless.makeAsyncIterator()
+
+    try await provider.connect()
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await firstSocket.requireSentMessage()
+    _ = try await firstSocket.requireSentMessage()
+
+    // A frame on the first socket proves the connection is healthy.
+    firstSocket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "ping-1").encoded())
+    #expect(await statelessIterator.next() == "ping-1")
+
+    firstSocket.failReceive()
+    #expect(await statusIterator.next() == .disconnected)
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await secondSocket.requireSentMessage()
+    _ = try await secondSocket.requireSentMessage()
+
+    // A frame on the second socket again proves health, which must reset the
+    // backoff counter so the next drop still reconnects despite maxRetries == 1.
+    secondSocket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "ping-2").encoded())
+    #expect(await statelessIterator.next() == "ping-2")
+
+    secondSocket.failReceive()
+    #expect(await statusIterator.next() == .disconnected)
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await thirdSocket.requireSentMessage(timeout: .milliseconds(100))
+
+    await provider.disconnect()
+}
+
+@Test
 func providerBackoffDelayIsExponentialAndCapped() {
     #expect(HocuspocusProvider.reconnectDelay(
         attempt: 0,
