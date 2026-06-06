@@ -258,6 +258,32 @@ func providerBackoffDelayIsExponentialAndCapped() {
     ) == .milliseconds(100))
 }
 
+@Test
+func providerSendsAndReceivesStatelessMessages() async throws {
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: YDoc(clientID: 10),
+        webSocketFactory: { _ in socket }
+    )
+    var statelessIterator = provider.stateless.makeAsyncIterator()
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+
+    await provider.sendStateless("client-ping")
+    #expect(try HocuspocusMessage.decode(try await socket.requireSentMessage()) == .stateless(
+        documentName: "room-1",
+        payload: "client-ping"
+    ))
+
+    socket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "server-pong").encoded())
+    #expect(await statelessIterator.next() == "server-pong")
+
+    await provider.disconnect()
+}
+
 }
 
 private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sendable {
