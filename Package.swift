@@ -2,6 +2,19 @@
 
 import PackageDescription
 
+#if os(Linux)
+let ffiTarget: Target = .systemLibrary(
+    name: "YrsBridgeFFI",
+    path: "LinuxSupport",
+    pkgConfig: "yrs-bridge"
+)
+#else
+let ffiTarget: Target = .binaryTarget(
+    name: "YrsBridgeFFI",
+    path: "Artifacts/YrsBridge.xcframework"
+)
+#endif
+
 let package = Package(
     name: "SwiftYrs",
     platforms: [
@@ -12,10 +25,7 @@ let package = Package(
         .library(name: "SwiftYrs", targets: ["SwiftYrs"]),
     ],
     targets: [
-        .binaryTarget(
-            name: "YrsBridgeFFI",
-            path: "Artifacts/YrsBridge.xcframework"
-        ),
+        ffiTarget,
         .target(
             name: "SwiftYrs",
             dependencies: ["YrsBridgeFFI"]

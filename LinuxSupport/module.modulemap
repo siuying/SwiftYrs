@@ -1,0 +1,5 @@
+module YrsBridgeFFI [system] {
+    header "../native/include/YrsBridgeFFI.h"
+    link "yrs_bridge"
+    export *
+}
