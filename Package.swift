@@ -42,7 +42,11 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftYrsHocuspocusTests",
-            dependencies: ["SwiftYrsHocuspocus"]
+            dependencies: ["SwiftYrsHocuspocus"],
+            exclude: [
+                "hocuspocus-peer.ts",
+                "hocuspocus-server.ts",
+            ]
         ),
     ]
 )

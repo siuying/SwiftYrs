@@ -11,5 +11,9 @@
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "@hocuspocus/provider": "^4.1.0",
+    "@hocuspocus/server": "^4.1.0"
   }
 }
