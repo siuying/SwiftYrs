@@ -23,6 +23,7 @@ let package = Package(
     ],
     products: [
         .library(name: "SwiftYrs", targets: ["SwiftYrs"]),
+        .library(name: "SwiftYrsHocuspocus", targets: ["SwiftYrsHocuspocus"]),
     ],
     targets: [
         ffiTarget,
@@ -30,10 +31,18 @@ let package = Package(
             name: "SwiftYrs",
             dependencies: ["YrsBridgeFFI"]
         ),
+        .target(
+            name: "SwiftYrsHocuspocus",
+            dependencies: ["SwiftYrs"]
+        ),
         .testTarget(
             name: "SwiftYrsTests",
             dependencies: ["SwiftYrs"],
             resources: [.process("Fixtures")]
+        ),
+        .testTarget(
+            name: "SwiftYrsHocuspocusTests",
+            dependencies: ["SwiftYrsHocuspocus"]
         ),
     ]
 )
