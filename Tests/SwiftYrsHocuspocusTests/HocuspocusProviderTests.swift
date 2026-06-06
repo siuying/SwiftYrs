@@ -139,6 +139,52 @@ func providerSendsFreshAuthTokenAndEmitsAuthStatuses() async throws {
     await provider.disconnect()
 }
 
+@Test
+func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async throws {
+    let localDocument = YDoc(clientID: 6)
+    let localAwareness = YAwareness(document: localDocument)
+    try localAwareness.setLocalState(["name": "local"])
+    let remoteAwareness = YAwareness(document: YDoc(clientID: 7))
+    try remoteAwareness.setLocalState(["name": "remote"])
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: localDocument,
+        awareness: localAwareness,
+        webSocketFactory: { _ in socket }
+    )
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+    let initialAwarenessFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    #expect(try HocuspocusMessage.decode(initialAwarenessFrame) == .awareness(
+        documentName: "room-1",
+        try localAwareness.encodeUpdate(for: [localAwareness.clientID])
+    ))
+
+    socket.receive(HocuspocusMessage.awareness(documentName: "room-1", try remoteAwareness.encodeUpdate()).encoded())
+    try await expectEventually {
+        let state = try localAwareness.state(for: remoteAwareness.clientID) as? [String: Any]
+        return state?["name"] as? String == "remote"
+    }
+    try await socket.expectNoSentMessage(for: .milliseconds(20))
+
+    try localAwareness.setLocalState(["name": "changed"])
+    let changedFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    if case let .awareness(documentName: "room-1", update) = try HocuspocusMessage.decode(changedFrame) {
+        try remoteAwareness.applyUpdate(update)
+    } else {
+        Issue.record("Expected local awareness update")
+    }
+    let remoteLocalState = try #require(remoteAwareness.state(for: localAwareness.clientID) as? [String: Any])
+    #expect(remoteLocalState["name"] as? String == "changed")
+
+    await provider.disconnect()
+    #expect(try localAwareness.state(for: remoteAwareness.clientID) == nil)
+    #expect(try localAwareness.localState() != nil)
+}
+
 private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeHocuspocusWebSocket")
     private var sentMessages: [Data] = []
@@ -192,8 +238,30 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
         continuation?.resume(returning: data)
     }
 
-    func requireSentMessage() async throws -> Data {
-        if let data = queue.sync(execute: { sentMessages.isEmpty ? nil : sentMessages.removeFirst() }) {
+    func requireSentMessage(timeout: Duration = .seconds(1)) async throws -> Data {
+        if timeout == .seconds(1) {
+            return await requireSentMessage()
+        }
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let data = dequeueSentMessage() {
+                return data
+            }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw TimeoutError()
+    }
+
+    func expectNoSentMessage(for duration: Duration) async throws {
+        do {
+            _ = try await requireSentMessage(timeout: duration)
+            Issue.record("Expected no sent message")
+        } catch is TimeoutError {
+        }
+    }
+
+    private func requireSentMessage() async -> Data {
+        if let data = dequeueSentMessage() {
             return data
         }
         return await withCheckedContinuation { continuation in
@@ -203,12 +271,20 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
         }
     }
 
+    private func dequeueSentMessage() -> Data? {
+        queue.sync {
+            sentMessages.isEmpty ? nil : sentMessages.removeFirst()
+        }
+    }
+
     func sentMessageCount() -> Int {
         queue.sync {
             sentMessages.count
         }
     }
 }
+
+private struct TimeoutError: Error {}
 
 private func expectEventually(_ predicate: @escaping () throws -> Bool) async throws {
     for _ in 0..<50 {

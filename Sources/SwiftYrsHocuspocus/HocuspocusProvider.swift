@@ -41,7 +41,9 @@ public actor HocuspocusProvider {
     private var webSocket: (any HocuspocusWebSocket)?
     private var receiveTask: Task<Void, Never>?
     private var documentObservation: Observation?
+    private var awarenessObservation: Observation?
     private var suppressedRemoteUpdates = Set<Data>()
+    private let awarenessObservationGate = AwarenessObservationGate()
 
     public init(
         url: URL,
@@ -116,12 +118,32 @@ public actor HocuspocusProvider {
                 await self?.sendLocalUpdate(update)
             }
         }
+        if let awareness {
+            awarenessObservation = try awareness.observeUpdate { [weak self, awarenessObservationGate, awareness] event in
+                guard !awarenessObservationGate.isApplyingRemote else {
+                    return
+                }
+                let clientIDs = Self.awarenessClientIDs(from: event)
+                guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
+                    return
+                }
+                Task {
+                    await self?.sendAwareness(update)
+                }
+            }
+        }
         if token != nil {
             try await sendAuthToken(on: webSocket)
         }
 
         let syncStep1 = try YSyncMessage.syncStep1(document.stateVector())
         try await webSocket.send(HocuspocusMessage.sync(documentName: name, syncStep1).encoded())
+        if let awareness, try awareness.localState() != nil {
+            try await webSocket.send(HocuspocusMessage.awareness(
+                documentName: name,
+                awareness.encodeUpdate(for: [awareness.clientID])
+            ).encoded())
+        }
 
         receiveTask = Task { [weak self] in
             await self?.receiveLoop()
@@ -133,6 +155,9 @@ public actor HocuspocusProvider {
         receiveTask = nil
         documentObservation?.cancel()
         documentObservation = nil
+        awarenessObservation?.cancel()
+        awarenessObservation = nil
+        clearRemoteAwarenessStates()
         webSocket?.close()
         webSocket = nil
         connectionStatusContinuation.yield(.disconnected)
@@ -160,6 +185,8 @@ public actor HocuspocusProvider {
             try handle(syncMessage)
         case let .auth(_, auth):
             try await handle(auth)
+        case let .awareness(_, update):
+            try applyAwareness(update)
         default:
             return
         }
@@ -215,6 +242,15 @@ public actor HocuspocusProvider {
         } catch {}
     }
 
+    private func sendAwareness(_ update: YAwarenessUpdate) async {
+        guard let webSocket else {
+            return
+        }
+        do {
+            try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
+        } catch {}
+    }
+
     private func applyRemote(_ update: YUpdate) throws {
         suppressedRemoteUpdates.insert(update.data)
         do {
@@ -224,6 +260,24 @@ public actor HocuspocusProvider {
         } catch {
             suppressedRemoteUpdates.remove(update.data)
             throw error
+        }
+    }
+
+    private func applyAwareness(_ update: YAwarenessUpdate) throws {
+        guard let awareness else {
+            return
+        }
+        try awarenessObservationGate.withApplyingRemote {
+            try awareness.applyUpdate(update)
+        }
+    }
+
+    private func clearRemoteAwarenessStates() {
+        guard let awareness, let states = try? awareness.states() else {
+            return
+        }
+        for state in states where state.clientID != awareness.clientID {
+            awareness.removeState(for: state.clientID)
         }
     }
 
@@ -241,6 +295,38 @@ public actor HocuspocusProvider {
             return nil
         }
         return .v1(Data(bytes))
+    }
+
+    private nonisolated static func awarenessClientIDs(from event: YObservationEvent) -> [UInt64] {
+        (event.array("added") + event.array("updated") + event.array("removed")).compactMap { value in
+            if let value = value as? UInt64 {
+                return value
+            }
+            return (value as? NSNumber)?.uint64Value
+        }
+    }
+}
+
+private final class AwarenessObservationGate: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "SwiftYrsHocuspocus.AwarenessObservationGate")
+    private var applyingRemote = false
+
+    var isApplyingRemote: Bool {
+        queue.sync {
+            applyingRemote
+        }
+    }
+
+    func withApplyingRemote<T>(_ body: () throws -> T) rethrows -> T {
+        queue.sync {
+            applyingRemote = true
+        }
+        defer {
+            queue.sync {
+                applyingRemote = false
+            }
+        }
+        return try body()
     }
 }
 
