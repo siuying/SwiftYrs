@@ -106,6 +106,56 @@ func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
 }
 
 @Test
+func providerDoesNotEchoRemoteUpdatesButStillSendsLocalEdits() async throws {
+    let localDocument = YDoc(clientID: 14)
+    let localText = try localDocument.text(named: "body")
+    let remoteDocument = YDoc(clientID: 15)
+    let remoteText = try remoteDocument.text(named: "body")
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: localDocument,
+        webSocketFactory: { _ in socket }
+    )
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+
+    // Apply several remote updates; none of them must be echoed back, regardless
+    // of how yrs re-encodes the observed update bytes.
+    var expected = ""
+    for fragment in ["one", "two", "three"] {
+        let base = try remoteDocument.read { try $0.length(of: remoteText) }
+        try remoteDocument.write { transaction in
+            try transaction.insert(fragment, into: remoteText, at: base)
+        }
+        expected += fragment
+        let remoteUpdate = try remoteDocument.encodeStateAsUpdateV1(from: localDocument.stateVector())
+        socket.receive(try HocuspocusMessage.sync(documentName: "room-1", YSyncMessage.update(remoteUpdate)).encoded())
+        let snapshot = expected
+        try await expectEventually {
+            try localDocument.read { transaction in
+                try transaction.string(from: localText) == snapshot
+            }
+        }
+    }
+    try await socket.expectNoSentMessage(for: .milliseconds(20))
+
+    // A genuine local edit must still be propagated (the gate resets correctly).
+    try localDocument.write { transaction in
+        try transaction.insert("!", into: localText, at: 0)
+    }
+    let localFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    if case .sync(documentName: "room-1", .update) = try HocuspocusMessage.decode(localFrame) {} else {
+        Issue.record("Expected local edit to be sent as a Sync update")
+    }
+
+    await provider.disconnect()
+}
+
+@Test
 func providerSendsFreshAuthTokenAndEmitsAuthStatuses() async throws {
     let socket = FakeHocuspocusWebSocket()
     let tokenCounter = TokenCounter()
@@ -288,6 +338,55 @@ func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
 }
 
 @Test
+func providerResetsBackoffAfterHealthyReconnect() async throws {
+    let firstSocket = FakeHocuspocusWebSocket()
+    let secondSocket = FakeHocuspocusWebSocket()
+    let thirdSocket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([firstSocket, secondSocket, thirdSocket])
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: YDoc(clientID: 13),
+        maxRetries: 1,
+        initialDelay: .milliseconds(5),
+        maxDelay: .milliseconds(20),
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    var statusIterator = provider.connectionStatus.makeAsyncIterator()
+    var statelessIterator = provider.stateless.makeAsyncIterator()
+
+    try await provider.connect()
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await firstSocket.requireSentMessage()
+    _ = try await firstSocket.requireSentMessage()
+
+    // A frame on the first socket proves the connection is healthy.
+    firstSocket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "ping-1").encoded())
+    #expect(await statelessIterator.next() == "ping-1")
+
+    firstSocket.failReceive()
+    #expect(await statusIterator.next() == .disconnected)
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await secondSocket.requireSentMessage()
+    _ = try await secondSocket.requireSentMessage()
+
+    // A frame on the second socket again proves health, which must reset the
+    // backoff counter so the next drop still reconnects despite maxRetries == 1.
+    secondSocket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "ping-2").encoded())
+    #expect(await statelessIterator.next() == "ping-2")
+
+    secondSocket.failReceive()
+    #expect(await statusIterator.next() == .disconnected)
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await thirdSocket.requireSentMessage(timeout: .milliseconds(100))
+
+    await provider.disconnect()
+}
+
+@Test
 func providerBackoffDelayIsExponentialAndCapped() {
     #expect(HocuspocusProvider.reconnectDelay(
         attempt: 0,
@@ -341,6 +440,7 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     private var receiveMessages: [Data] = []
     private var sendContinuations: [CheckedContinuation<Data, Never>] = []
     private var receiveContinuations: [CheckedContinuation<Data, Error>] = []
+    private var pendingError: Error?
 
     func resume() {}
 
@@ -356,35 +456,44 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     }
 
     func receive() async throws -> Data {
-        if let data = queue.sync(execute: { receiveMessages.isEmpty ? nil : receiveMessages.removeFirst() }) {
-            return data
-        }
-        return try await withCheckedThrowingContinuation { continuation in
-            queue.sync {
+        try await withCheckedThrowingContinuation { continuation in
+            let outcome: Result<Data, Error>? = queue.sync {
+                if !receiveMessages.isEmpty {
+                    return .success(receiveMessages.removeFirst())
+                }
+                if let pendingError {
+                    return .failure(pendingError)
+                }
                 receiveContinuations.append(continuation)
+                return nil
+            }
+            if let outcome {
+                continuation.resume(with: outcome)
             }
         }
     }
 
     func close() {
-        let continuations = queue.sync {
-            let continuations = receiveContinuations
-            receiveContinuations.removeAll()
-            return continuations
-        }
-        for continuation in continuations {
-            continuation.resume(throwing: CancellationError())
-        }
+        failAllReceives(with: CancellationError())
     }
 
     func failReceive() {
-        let continuations = queue.sync {
+        failAllReceives(with: TestWebSocketError())
+    }
+
+    private func failAllReceives(with error: Error) {
+        let continuations: [CheckedContinuation<Data, Error>] = queue.sync {
+            // Remember the failure so a receive() that hasn't parked yet still observes it,
+            // instead of dropping the signal and hanging forever.
+            if pendingError == nil {
+                pendingError = error
+            }
             let continuations = receiveContinuations
             receiveContinuations.removeAll()
             return continuations
         }
         for continuation in continuations {
-            continuation.resume(throwing: TestWebSocketError())
+            continuation.resume(throwing: error)
         }
     }
 
@@ -422,12 +531,16 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     }
 
     private func requireSentMessage() async -> Data {
-        if let data = dequeueSentMessage() {
-            return data
-        }
-        return await withCheckedContinuation { continuation in
-            queue.sync {
+        await withCheckedContinuation { continuation in
+            let buffered: Data? = queue.sync {
+                if !sentMessages.isEmpty {
+                    return sentMessages.removeFirst()
+                }
                 sendContinuations.append(continuation)
+                return nil
+            }
+            if let buffered {
+                continuation.resume(returning: buffered)
             }
         }
     }

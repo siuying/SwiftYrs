@@ -1,5 +1,9 @@
 # CLAUDE.md
 
+## Development
+
+- Create one PR for each issues.
+
 ## Git
 
 No "Co-Authored-By: Claude" trailer.

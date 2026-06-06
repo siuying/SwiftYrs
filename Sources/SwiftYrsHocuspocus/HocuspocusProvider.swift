@@ -44,8 +44,8 @@ public actor HocuspocusProvider {
     private var receiveTask: Task<Void, Never>?
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
-    private var suppressedRemoteUpdates = Set<Data>()
-    private let awarenessObservationGate = AwarenessObservationGate()
+    private let documentObservationGate = RemoteApplyGate()
+    private let awarenessObservationGate = RemoteApplyGate()
     private var retryAttempt = 0
     private var disconnectRequested = false
 
@@ -182,6 +182,10 @@ public actor HocuspocusProvider {
         do {
             while !Task.isCancelled {
                 let data = try await webSocket.receive()
+                // A received frame proves the connection is healthy, so reset the
+                // backoff counter; otherwise transient drops accumulate across
+                // independent outages and eventually exhaust maxRetries.
+                retryAttempt = 0
                 try await handle(data)
             }
         } catch is CancellationError {
@@ -220,7 +224,10 @@ public actor HocuspocusProvider {
 
     private func startObservingIfNeeded() throws {
         if documentObservation == nil {
-            documentObservation = try document.observeUpdates { [weak self] event in
+            documentObservation = try document.observeUpdates { [weak self, documentObservationGate] event in
+                guard !documentObservationGate.isApplyingRemote else {
+                    return
+                }
                 guard let update = Self.update(from: event) else {
                     return
                 }
@@ -311,9 +318,6 @@ public actor HocuspocusProvider {
     }
 
     private func sendLocalUpdate(_ update: YUpdate) async {
-        if suppressedRemoteUpdates.remove(update.data) != nil {
-            return
-        }
         guard let webSocket else {
             return
         }
@@ -347,14 +351,13 @@ public actor HocuspocusProvider {
     }
 
     private func applyRemote(_ update: YUpdate) throws {
-        suppressedRemoteUpdates.insert(update.data)
-        do {
+        // The update observer fires synchronously during commit; gate it so our
+        // own applied remote update is not echoed back to the server. This is
+        // robust regardless of how yrs re-encodes the update bytes.
+        try documentObservationGate.withApplyingRemote {
             try document.write(origin: "SwiftYrsHocuspocus") { transaction in
                 try transaction.apply(update)
             }
-        } catch {
-            suppressedRemoteUpdates.remove(update.data)
-            throw error
         }
     }
 
@@ -402,8 +405,8 @@ public actor HocuspocusProvider {
     }
 }
 
-private final class AwarenessObservationGate: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "SwiftYrsHocuspocus.AwarenessObservationGate")
+private final class RemoteApplyGate: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "SwiftYrsHocuspocus.RemoteApplyGate")
     private var applyingRemote = false
 
     var isApplyingRemote: Bool {
