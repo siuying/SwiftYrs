@@ -1,8 +1,8 @@
 # SwiftYrs
 
-Swift binding for [Yrs](https://github.com/y-crdt/y-crdt), the Rust port of the [Yjs](https://yjs.dev/) CRDT framework. SwiftYrs lets you build collaborative, offline-first iOS and macOS apps with the same wire-compatible protocol as Yjs.
+Swift binding for [Yrs](https://github.com/y-crdt/y-crdt), the Rust port of the [Yjs](https://yjs.dev/) CRDT framework. SwiftYrs lets you build collaborative, offline-first iOS, macOS, and Linux apps with the same wire-compatible protocol as Yjs.
 
-- **Platforms**: macOS 14+, iOS 17+ (arm64)
+- **Platforms**: macOS 14+, iOS 17+ (arm64), Linux (x86_64 / arm64)
 - **Swift**: Swift 6, SwiftPM only
 - **Wire compatibility**: binary-compatible with Yjs 13.x updates, state vectors, snapshots, and y-protocols sync messages
 
@@ -40,10 +40,15 @@ SwiftYrs/
 
 ## Requirements
 
+**Apple (macOS / iOS)**
 - Xcode with Swift 6 and `xcodebuild`
 - arm64 Mac (Apple Silicon) or arm64 iOS device / simulator
 
-No Rust installation is required for app developers — consume a tagged release that ships a pre-built XCFramework.
+**Linux**
+- Swift 6 toolchain
+- Rust (stable) for building the native library from source
+
+No Rust installation is required for Apple app developers — consume a tagged release that ships a pre-built XCFramework.
 
 ---
 
@@ -74,16 +79,23 @@ Or in Xcode: **File → Add Package Dependencies** and enter the repository URL.
 
 ### Build from source (contributors)
 
-Install the required Rust targets:
+**Apple:**
+
+Install the required Rust targets, build the XCFramework, then run the test suite:
 
 ```sh
 rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+./scripts/build-xcframework.sh
+swift test
 ```
 
-Build the local XCFramework, then run the test suite:
+**Linux:**
+
+Build the native library and generate the pkg-config file, then run the test suite:
 
 ```sh
-./scripts/build-xcframework.sh
+./scripts/build-linux.sh
+export PKG_CONFIG_PATH="$PWD/Artifacts/linux/pkgconfig"
 swift test
 ```
 
@@ -331,18 +343,27 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | `Y.Array` move | ✅ | ❌ | ❌ | Not in current y-crdt; will add if upstream restores |
 | CocoaPods / Carthage | — | — | ❌ | SwiftPM only |
 | Intel macOS / Intel iOS Simulator | — | — | ❌ | arm64 only in initial release |
+| Linux (x86_64 / arm64) | — | — | ✅ | Build from source via `scripts/build-linux.sh` |
 
 ---
 
 ## Contributing
 
-### Build the XCFramework
+### Build the native library
 
-Prerequisites: Xcode (Swift 6), Rust with the arm64 Apple targets.
+**Apple** — prerequisites: Xcode (Swift 6), Rust with the arm64 Apple targets:
 
 ```sh
 rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
 ./scripts/build-xcframework.sh
+swift test
+```
+
+**Linux** — prerequisites: Swift 6 toolchain, Rust (stable):
+
+```sh
+./scripts/build-linux.sh
+export PKG_CONFIG_PATH="$PWD/Artifacts/linux/pkgconfig"
 swift test
 ```
 
