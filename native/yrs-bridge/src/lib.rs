@@ -209,6 +209,50 @@ fn json_from_any(value: &Any) -> serde_json::Value {
     }
 }
 
+/// Maps plain JSON to `Any` the way lib0's `writeAny` treats `JSON.parse` output:
+/// every JSON number is a `number` (`Any::Number`), so small integers encode as
+/// lib0 type 125 (varint) rather than type 122 (bigint). This keeps Swift's
+/// `writeAny` bytes identical to the browser's for y-webrtc signaling.
+fn plain_any_from_json(value: serde_json::Value) -> Any {
+    match value {
+        serde_json::Value::Null => Any::Null,
+        serde_json::Value::Bool(value) => Any::Bool(value),
+        serde_json::Value::Number(value) => Any::Number(value.as_f64().unwrap_or(f64::NAN)),
+        serde_json::Value::String(value) => Any::String(Arc::from(value)),
+        serde_json::Value::Array(values) => Any::Array(Arc::from(
+            values.into_iter().map(plain_any_from_json).collect::<Vec<_>>(),
+        )),
+        serde_json::Value::Object(values) => {
+            let values = values
+                .into_iter()
+                .map(|(key, value)| (key, plain_any_from_json(value)))
+                .collect::<HashMap<_, _>>();
+            Any::Map(Arc::new(values))
+        }
+    }
+}
+
+fn plain_json_from_any(value: &Any) -> serde_json::Value {
+    match value {
+        Any::Undefined | Any::Null => serde_json::Value::Null,
+        Any::Bool(value) => serde_json::Value::Bool(*value),
+        Any::Number(value) => serde_json::json!(value),
+        Any::BigInt(value) => serde_json::json!(value),
+        Any::String(value) => serde_json::Value::String(value.to_string()),
+        Any::Buffer(value) => serde_json::json!(value.as_ref()),
+        Any::Array(values) => {
+            serde_json::Value::Array(values.iter().map(plain_json_from_any).collect())
+        }
+        Any::Map(values) => {
+            let values: serde_json::Map<_, _> = values
+                .iter()
+                .map(|(key, value)| (key.clone(), plain_json_from_any(value)))
+                .collect();
+            serde_json::Value::Object(values)
+        }
+    }
+}
+
 fn json_from_out(value: &Out) -> serde_json::Value {
     match value {
         Out::Any(value) => json_from_any(value),
@@ -3014,5 +3058,48 @@ pub unsafe extern "C" fn yrs_bridge_sync_handle(
             Err(_) => return YRS_BRIDGE_ERR_DECODE,
         };
         write_buffer(encode_sync_messages(responses), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_lib0_encode_any(
+    json: *const c_uchar,
+    json_len: usize,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if json.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let bytes = std::slice::from_raw_parts(json, json_len);
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return YRS_BRIDGE_ERR_DECODE;
+        };
+        let any = plain_any_from_json(value);
+        let mut encoder = EncoderV1::new();
+        encoder.write_any(&any);
+        write_buffer(encoder.to_vec(), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_lib0_decode_any(
+    bytes: *const c_uchar,
+    bytes_len: usize,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if bytes.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let bytes = std::slice::from_raw_parts(bytes, bytes_len);
+        let mut decoder = DecoderV1::new(Cursor::new(bytes));
+        let Ok(any) = decoder.read_any() else {
+            return YRS_BRIDGE_ERR_DECODE;
+        };
+        let Ok(json) = serde_json::to_vec(&plain_json_from_any(&any)) else {
+            return YRS_BRIDGE_ERR_DECODE;
+        };
+        write_buffer(json, out)
     })
 }
