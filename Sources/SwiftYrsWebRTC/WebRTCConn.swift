@@ -163,7 +163,7 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
             self.connection = nil
             dataChannel?.delegate = nil
             connection?.delegate = nil
-            self.teardownQueue.async { [self] in
+            self.teardownQueue.async {
                 dataChannel?.close()
                 connection?.close()
             }
