@@ -1,0 +1,65 @@
+{
+  "cases": [
+    {
+      "name": "string",
+      "value": "hello",
+      "bytes": "dwVoZWxsbw=="
+    },
+    {
+      "name": "emptyString",
+      "value": "",
+      "bytes": "dwA="
+    },
+    {
+      "name": "integer",
+      "value": 42,
+      "bytes": "fSo="
+    },
+    {
+      "name": "zero",
+      "value": 0,
+      "bytes": "fQA="
+    },
+    {
+      "name": "negativeInteger",
+      "value": -7,
+      "bytes": "fUc="
+    },
+    {
+      "name": "float",
+      "value": 3.5,
+      "bytes": "fEBgAAA="
+    },
+    {
+      "name": "boolTrue",
+      "value": true,
+      "bytes": "eA=="
+    },
+    {
+      "name": "boolFalse",
+      "value": false,
+      "bytes": "eQ=="
+    },
+    {
+      "name": "null",
+      "value": null,
+      "bytes": "fg=="
+    },
+    {
+      "name": "array",
+      "value": [
+        1,
+        2,
+        3
+      ],
+      "bytes": "dQN9AX0CfQM="
+    },
+    {
+      "name": "singleKeyMap",
+      "value": {
+        "type": "offer"
+      },
+      "bytes": "dgEEdHlwZXcFb2ZmZXI="
+    }
+  ]
+}

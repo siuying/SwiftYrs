@@ -159,6 +159,9 @@ int yrs_bridge_sync_decode_messages(const unsigned char *_Nonnull payload, unsig
 int yrs_bridge_sync_start(YrsBridgeAwareness *_Nonnull awareness, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_sync_handle(YrsBridgeAwareness *_Nonnull awareness, const unsigned char *_Nonnull payload, unsigned long payload_len, YrsBridgeBuffer *_Nonnull out);
 
+int yrs_bridge_lib0_encode_any(const unsigned char *_Nonnull json, unsigned long json_len, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_lib0_decode_any(const unsigned char *_Nonnull bytes, unsigned long bytes_len, YrsBridgeBuffer *_Nonnull out);
+
 #ifdef __cplusplus
 }
 #endif
