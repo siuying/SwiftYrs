@@ -9,9 +9,9 @@ import { WebrtcProvider } from "y-webrtc";
 import wrtc from "@roamhq/wrtc";
 import * as readline from "node:readline";
 
-const [signalingUrl, room] = process.argv.slice(2);
+const [signalingUrl, room, password] = process.argv.slice(2);
 if (signalingUrl === undefined || room === undefined) {
-  throw new Error("usage: node webrtc-peer.ts <signaling-url> <room>");
+  throw new Error("usage: node webrtc-peer.ts <signaling-url> <room> [password]");
 }
 
 const doc = new Y.Doc();
@@ -23,10 +23,12 @@ function emit(value: unknown) {
 
 const provider = new WebrtcProvider(room, doc, {
   signaling: [signalingUrl],
+  password,
   peerOpts: { wrtc },
   // Keep this peer isolated to the WebRTC mesh; no BroadcastChannel cross-talk.
   filterBcConns: false,
 } as any);
+const providerAwareness = provider.awareness;
 
 provider.on("synced", ({ synced }: { synced: boolean }) => {
   if (synced) {
@@ -50,6 +52,16 @@ rl.on("line", (line) => {
       break;
     case "getText":
       emit({ type: "text", text: text.toString() });
+      break;
+    case "setAwareness":
+      providerAwareness.setLocalState(command.state ?? null);
+      emit({ type: "ok" });
+      break;
+    case "getAwareness":
+      emit({
+        type: "awareness",
+        states: Array.from(providerAwareness.getStates(), ([clientID, state]) => ({ clientID, state })),
+      });
       break;
     case "shutdown":
       provider.destroy();

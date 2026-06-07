@@ -92,10 +92,24 @@ httpServer.listen(0, "127.0.0.1", () => {
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk: string) => {
   for (const line of chunk.split("\n")) {
-    if (line.trim() === "shutdown") {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let command: any = trimmed;
+    try {
+      command = JSON.parse(trimmed);
+    } catch {
+      // Plain command lines are still accepted.
+    }
+    if (command === "shutdown" || command.type === "shutdown") {
       websocketServer.close(() => {
         httpServer.close(() => process.exit(0));
       });
+    } else if (command.type === "closeClients") {
+      for (const socket of websocketServer.clients) {
+        socket.close();
+      }
     }
   }
 });

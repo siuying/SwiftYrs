@@ -9,7 +9,9 @@ actor SignalingConnection {
     private let initialDelay: Duration
     private let maxDelay: Duration
     private let maxRetries: Int
+    private let cipher: SignalingCipher?
     private let onOpen: @Sendable (SignalingConnection) async -> Void
+    private let onClose: @Sendable (SignalingConnection) async -> Void
     private let onMessage: @Sendable (IncomingSignalingMessage) async -> Void
 
     private var task: URLSessionWebSocketTask?
@@ -22,14 +24,18 @@ actor SignalingConnection {
         initialDelay: Duration,
         maxDelay: Duration,
         maxRetries: Int,
+        cipher: SignalingCipher?,
         onOpen: @escaping @Sendable (SignalingConnection) async -> Void,
+        onClose: @escaping @Sendable (SignalingConnection) async -> Void,
         onMessage: @escaping @Sendable (IncomingSignalingMessage) async -> Void
     ) {
         self.url = url
         self.initialDelay = initialDelay
         self.maxDelay = maxDelay
         self.maxRetries = maxRetries
+        self.cipher = cipher
         self.onOpen = onOpen
+        self.onClose = onClose
         self.onMessage = onMessage
     }
 
@@ -86,6 +92,7 @@ actor SignalingConnection {
             session.invalidateAndCancel()
             webRTCDebug("signaling \(url.absoluteString) receive loop ended; reconnecting")
             stopPing()
+            await onClose(self)
             if stopped { break }
             if sawFrame {
                 attempt = 0
@@ -104,7 +111,7 @@ actor SignalingConnection {
                 let frame = try await task.receive()
                 sawFrame = true
                 guard let data = Self.data(from: frame) else { continue }
-                if let message = try? SignalingCodec.decode(data) {
+                if let message = try? SignalingCodec.decode(data, cipher: cipher) {
                     await onMessage(message)
                 }
             } catch {

@@ -21,15 +21,20 @@ enum SignalingCodec {
         encode(["type": "unsubscribe", "topics": topics])
     }
 
-    static func publish(topic: String, data: Any) -> Data {
-        encode(["type": "publish", "topic": topic, "data": data])
+    static func publish(topic: String, data: Any, cipher: SignalingCipher? = nil) throws -> Data {
+        let payload: Any = if let cipher {
+            try cipher.encryptJSON(data)
+        } else {
+            data
+        }
+        return encode(["type": "publish", "topic": topic, "data": payload])
     }
 
     static func ping() -> Data {
         encode(["type": "ping"])
     }
 
-    static func decode(_ data: Data) throws -> IncomingSignalingMessage {
+    static func decode(_ data: Data, cipher: SignalingCipher? = nil) throws -> IncomingSignalingMessage {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = object["type"] as? String else {
             throw WebRTCSignalingError.malformedSignal
@@ -39,7 +44,16 @@ enum SignalingCodec {
             guard let topic = object["topic"] as? String, let payload = object["data"] else {
                 throw WebRTCSignalingError.malformedSignal
             }
-            let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.fragmentsAllowed])
+            let decodedPayload: Any
+            if let cipher {
+                guard let encrypted = payload as? String else {
+                    throw WebRTCSignalingError.malformedSignal
+                }
+                decodedPayload = try cipher.decryptJSON(encrypted)
+            } else {
+                decodedPayload = payload
+            }
+            let payloadData = try JSONSerialization.data(withJSONObject: decodedPayload, options: [.fragmentsAllowed])
             return .publish(topic: topic, data: payloadData)
         case "pong":
             return .pong

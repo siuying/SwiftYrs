@@ -22,13 +22,49 @@ func signalingEncodesUnsubscribe() throws {
 
 @Test
 func signalingEncodesPublishWrappingRoomMessage() throws {
-    let data = SignalingCodec.publish(topic: "room-1", data: RoomMessage.announce(from: "peer-a").jsonObject())
+    let data = try SignalingCodec.publish(topic: "room-1", data: RoomMessage.announce(from: "peer-a").jsonObject())
     let object = try decodeJSON(data)
     #expect(object["type"] as? String == "publish")
     #expect(object["topic"] as? String == "room-1")
     let inner = try #require(object["data"] as? [String: Any])
     #expect(inner["type"] as? String == "announce")
     #expect(inner["from"] as? String == "peer-a")
+}
+
+@Test
+func signalingEncryptsAndDecryptsPasswordProtectedPublishPayloads() throws {
+    let cipher = try SignalingCipher(password: "secret", roomName: "room-1")
+    let data = try SignalingCodec.publish(
+        topic: "room-1",
+        data: RoomMessage.announce(from: "peer-a").jsonObject(),
+        cipher: cipher
+    )
+    let object = try decodeJSON(data)
+    #expect(object["type"] as? String == "publish")
+    #expect(object["topic"] as? String == "room-1")
+    #expect(object["data"] is String)
+
+    guard case let .publish(topic, payload) = try SignalingCodec.decode(data, cipher: cipher) else {
+        Issue.record("expected publish")
+        return
+    }
+    #expect(topic == "room-1")
+    let inner = try JSONSerialization.jsonObject(with: payload)
+    #expect(try RoomMessage(jsonObject: inner) == .announce(from: "peer-a"))
+}
+
+@Test
+func signalingRejectsPasswordProtectedPayloadWithWrongPassword() throws {
+    let writer = try SignalingCipher(password: "secret", roomName: "room-1")
+    let reader = try SignalingCipher(password: "wrong", roomName: "room-1")
+    let data = try SignalingCodec.publish(
+        topic: "room-1",
+        data: RoomMessage.announce(from: "peer-a").jsonObject(),
+        cipher: writer
+    )
+    #expect(throws: Error.self) {
+        _ = try SignalingCodec.decode(data, cipher: reader)
+    }
 }
 
 @Test
