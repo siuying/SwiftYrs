@@ -364,10 +364,10 @@ public actor WebRTCProvider {
 
     private func peerClosed(peerId remotePeerId: String, record: PeerRecord?) {
         guard let record, let current = conns[remotePeerId], current === record else { return }
-        // Dispose through close() even though the peer already closed: it hands the
-        // RTCPeerConnection/RTCDataChannel dealloc (a blocking libwebrtc call) to
-        // the conn's serial queue, so dropping `current` here does not deallocate
-        // libwebrtc objects on the provider-actor thread. See WebRTCConn.close.
+        // Dispose through close() even though the peer already closed: blocking
+        // libwebrtc teardown runs on the conn's teardownQueue (after properties are
+        // nilled on `queue`), so dropping `current` here does not release those
+        // objects on the provider-actor thread. See WebRTCConn.close.
         current.conn.close()
         conns[remotePeerId] = nil
         removeAwarenessStatesIntroduced(by: current)

@@ -12,10 +12,10 @@ import Foundation
 /// race. Outputs are delivered through `@Sendable` closures the provider wires up.
 ///
 /// Boundary rule: libwebrtc calls are *dispatched* onto `queue` and never awaited
-/// back across the provider actor during normal operation. Blocking teardown runs
-/// on a separate `teardownQueue` so `close()`/`closeAndWait()` cannot deadlock
-/// against delegate callbacks posted to `queue`. `destroy()` awaits `closeAndWait()`
-/// so serialized E2E tests do not overlap libwebrtc teardown with the next test.
+/// back across the provider actor. Blocking teardown runs on a separate
+/// `teardownQueue` so `close()` cannot deadlock against delegate callbacks posted
+/// to `queue`. `close()` is fire-and-forget from the provider; `destroy()` stops
+/// signaling first, then closes peers best-effort without awaiting libwebrtc.
 final class WebRTCConn: NSObject, @unchecked Sendable {
     let remotePeerId: String
     let initiator: Bool
@@ -152,8 +152,9 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
 
     /// Tears the connection down, best-effort. libwebrtc's blocking close calls run
     /// on `teardownQueue` so they cannot deadlock delegate work posted to `queue`.
-    /// `teardownQueue` captures `self` until close finishes so `conns.removeAll()`
-    /// on the provider actor does not deallocate libwebrtc objects on the wrong thread.
+    /// Locals retain the libwebrtc handles until `teardownQueue` finishes; properties
+    /// are nilled on `queue` first so `conns.removeAll()` on the provider actor does
+    /// not release those objects on the wrong thread.
     func close() {
         clearCallbacks()
         queue.async {
