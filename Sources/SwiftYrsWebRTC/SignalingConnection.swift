@@ -141,6 +141,9 @@ actor SignalingConnection {
     private static func waitForOpen(_ observer: WebSocketOpenObserver, timeout: Duration = .seconds(5)) async -> Bool {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
+            // Bail out immediately when the receive loop is cancelled (stop/destroy)
+            // so teardown does not block for the full open timeout on a dead server.
+            guard !Task.isCancelled else { return false }
             if let opened = observer.opened {
                 return opened
             }

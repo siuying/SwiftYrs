@@ -206,6 +206,15 @@ public actor WebRTCProvider {
         connectionStatus == .connected
     }
 
+    /// Aggregate signaling state across every configured server: `.connected` if
+    /// any server's socket is open, `.connecting` while the provider is started
+    /// but no server is open yet (all connecting/retrying), and `.disconnected`
+    /// before `connect()` or after `disconnect()`/`destroy()`. Maintained by
+    /// `recomputeSignalingStatus` as individual server sockets open and close.
+    public var signalingStatus: WebRTCConnectionStatus {
+        connectionStatus
+    }
+
     public var connectedPeers: Set<String> {
         Set(conns.filter { $0.value.channelOpen }.keys)
     }
