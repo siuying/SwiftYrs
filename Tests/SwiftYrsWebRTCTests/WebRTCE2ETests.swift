@@ -28,10 +28,14 @@ struct WebRTCE2ETests {
         }
         defer { syncedTask.cancel() }
 
-        async let connectA: Void = providerA.connect()
-        async let connectB: Void = providerB.connect()
-        try await connectA
-        try await connectB
+        try await providerA.connect()
+        try await e2eEventually("provider A connected to signaling", timeout: .seconds(5)) {
+            await providerA.connected
+        }
+        try await providerB.connect()
+        try await e2eEventually("provider B connected to signaling", timeout: .seconds(5)) {
+            await providerB.connected
+        }
         defer {
             Task { await providerA.destroy() }
             Task { await providerB.destroy() }
@@ -89,10 +93,14 @@ struct WebRTCE2ETests {
         let clientID = awarenessA.clientID
         try awarenessA.setLocalState(["name": "swift"])
 
-        async let connectA: Void = providerA.connect()
-        async let connectB: Void = providerB.connect()
-        try await connectA
-        try await connectB
+        try await providerA.connect()
+        try await e2eEventually("provider A connected to signaling", timeout: .seconds(5)) {
+            await providerA.connected
+        }
+        try await providerB.connect()
+        try await e2eEventually("provider B connected to signaling", timeout: .seconds(5)) {
+            await providerB.connected
+        }
         try await e2eEventually("peers connected", timeout: .seconds(5)) {
             let a = await providerA.connectedPeers
             let b = await providerB.connectedPeers

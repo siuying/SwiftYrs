@@ -156,7 +156,7 @@ public actor WebRTCProvider {
         if ownsAwareness {
             await clearOwnedAwareness()
         }
-        await disconnectAndWait()
+        disconnect()
         statusContinuation.finish()
         syncedContinuation.finish()
         peersContinuation.finish()
@@ -168,27 +168,6 @@ public actor WebRTCProvider {
 
     public var connectedPeers: Set<String> {
         Set(conns.filter { $0.value.channelOpen }.keys)
-    }
-
-    private func disconnectAndWait() async {
-        guard started else { return }
-        started = false
-        let signalingConnections = signalingConnections
-        self.signalingConnections.removeAll()
-        for connection in signalingConnections {
-            await connection.stop()
-        }
-        let records = Array(conns.values)
-        conns.removeAll()
-        for record in records {
-            await record.conn.closeAndWait()
-        }
-        documentObservation?.cancel()
-        documentObservation = nil
-        awarenessObservation?.cancel()
-        awarenessObservation = nil
-        emitStatus(.disconnected)
-        emitSynced(false)
     }
 
     // MARK: - Signaling

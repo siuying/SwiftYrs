@@ -28,6 +28,7 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
     private var dataChannel: RTCDataChannel?
     private var remoteDescriptionSet = false
     private var pendingCandidates: [RTCIceCandidate] = []
+    private var didConnect = false
     private var didClose = false
 
     init(remotePeerId: String, initiator: Bool, iceServers: [WebRTCIceServer]) {
@@ -139,20 +140,6 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
         }
     }
 
-    func closeAndWait() async {
-        await withCheckedContinuation { continuation in
-            queue.async { [weak self] in
-                guard let self else {
-                    continuation.resume()
-                    return
-                }
-                self.dataChannel?.close()
-                self.connection.close()
-                continuation.resume()
-            }
-        }
-    }
-
     // MARK: - Queue-confined helpers
 
     private func createAnswer() {
@@ -199,6 +186,12 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
         didClose = true
         onClosed?()
     }
+
+    private func notifyConnectedOnce() {
+        guard !didConnect else { return }
+        didConnect = true
+        onConnected?()
+    }
 }
 
 extension WebRTCConn: RTCPeerConnectionDelegate {
@@ -211,6 +204,9 @@ extension WebRTCConn: RTCPeerConnectionDelegate {
             guard let self else { return }
             dataChannel.delegate = self
             self.dataChannel = dataChannel
+            if dataChannel.readyState == .open {
+                self.notifyConnectedOnce()
+            }
         }
     }
 
@@ -241,7 +237,7 @@ extension WebRTCConn: RTCDataChannelDelegate {
         webRTCDebug("conn \(remotePeerId.prefix(4)) data channel state → \(dataChannel.readyState.rawValue)")
         switch dataChannel.readyState {
         case .open:
-            onConnected?()
+            queue.async { [weak self] in self?.notifyConnectedOnce() }
         case .closed:
             queue.async { [weak self] in self?.notifyClosedOnce() }
         default:
