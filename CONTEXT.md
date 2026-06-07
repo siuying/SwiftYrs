@@ -108,6 +108,22 @@ _Avoid_: Event stream, transaction
 An `AsyncSequence` convenience layer over an Observation. It is ergonomic Swift API, not the primitive native subscription owner.
 _Avoid_: Native subscription, provider
 
+**Signaling Server**:
+A WebSocket pub/sub relay that lets WebRTC peers in the same Room discover each other and exchange connection-establishment messages. It never sees document content or awareness; with a password set, even the relayed messages are encrypted from it.
+_Avoid_: Sync server, Hocuspocus server, backend
+
+**Room**:
+The named channel WebRTC peers join to collaborate on one document. It is the WebRTC transport's identity for a shared document and corresponds to the provider's document name.
+_Avoid_: Channel, topic, session
+
+**Mesh Topology**:
+The WebRTC connection shape where every Peer holds a direct data-channel connection to every other Peer in a Room, bounded by a maximum connection count. It contrasts with the single client-to-server link of the WebSocket transport.
+_Avoid_: Star, hub-and-spoke, client-server
+
+**Peer Signal**:
+A simple-peer-shaped connection-establishment payload (offer, answer, ICE candidate, or renegotiate) relayed through the Signaling Server to bring up a direct WebRTC connection. It is distinct from sync and awareness payloads, which travel over the established data channel.
+_Avoid_: SDP blob, ICE message, sync message
+
 ## Example Dialogue
 
 Dev: "Does the Core Swift Package include WebSocket sync?"
@@ -185,3 +201,11 @@ Domain expert: "No. The Document Handle is synchronous; concurrency is mediated 
 Dev: "Which object unregisters a text observer?"
 
 Domain expert: "The Observation owns that subscription. An Event Stream may use one internally, but the native lifetime belongs to the Observation."
+
+Dev: "Does the Signaling Server ever see the document updates?"
+
+Domain expert: "No. It only relays Peer Signals so peers in a Room can find each other. Sync and awareness travel directly over the Mesh Topology's data channels."
+
+Dev: "Is the Room a different thing from the document name?"
+
+Domain expert: "No. The Room is the WebRTC transport's name for one shared document; it is the same string the provider uses as the document name."
