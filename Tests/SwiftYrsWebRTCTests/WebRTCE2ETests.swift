@@ -58,6 +58,9 @@ struct WebRTCE2ETests {
         try await e2eEventually(timeout: .seconds(5)) {
             await syncedBox.value == true
         }
+
+        await providerA.destroy()
+        await providerB.destroy()
     }
 
     @Test
@@ -78,6 +81,11 @@ struct WebRTCE2ETests {
             Task { await providerB.destroy() }
         }
 
+        let awarenessA = await providerA.awareness
+        let awarenessB = await providerB.awareness
+        let clientID = awarenessA.clientID
+        try awarenessA.setLocalState(["name": "swift"])
+
         try await providerA.connect()
         try await providerB.connect()
         try await e2eEventually(timeout: .seconds(20)) {
@@ -86,10 +94,6 @@ struct WebRTCE2ETests {
             return !a.isEmpty && !b.isEmpty
         }
 
-        let awarenessA = await providerA.awareness
-        let awarenessB = await providerB.awareness
-        let clientID = awarenessA.clientID
-        try awarenessA.setLocalState(["name": "swift"])
         try await e2eEventually(timeout: .seconds(5)) {
             try awarenessB.state(for: clientID) != nil
         }
@@ -99,6 +103,7 @@ struct WebRTCE2ETests {
         try await e2eEventually(timeout: .seconds(5)) {
             try awarenessB.state(for: clientID) == nil
         }
+        await providerB.destroy()
     }
 
     private func loopbackOptions() -> WebRTCProvider.Options {
