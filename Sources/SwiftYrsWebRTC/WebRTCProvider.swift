@@ -152,16 +152,14 @@ public actor WebRTCProvider {
         emitSynced(false)
     }
 
-    public func destroy() {
+    public func destroy() async {
+        if ownsAwareness {
+            await clearOwnedAwareness()
+        }
         disconnect()
         statusContinuation.finish()
         syncedContinuation.finish()
         peersContinuation.finish()
-        if ownsAwareness {
-            // Announce our local state's removal to peers; the awareness object
-            // itself is released when the provider is.
-            awareness.clearLocalState()
-        }
     }
 
     public var connected: Bool {
@@ -362,6 +360,23 @@ public actor WebRTCProvider {
     private func broadcastAwarenessUpdate(_ update: YAwarenessUpdate) {
         guard let payload = try? YSyncMessage.awareness(update).payload else { return }
         broadcast(payload)
+    }
+
+    private func clearOwnedAwareness() async {
+        let clientID = awareness.clientID
+        awareness.clearLocalState()
+        guard let update = try? awareness.encodeUpdate(for: [clientID]),
+              let payload = try? YSyncMessage.awareness(update).payload else { return }
+        await broadcastAndFlush(payload)
+    }
+
+    private func broadcastAndFlush(_ payload: Data) async {
+        let openConns = conns.values.compactMap { record in
+            record.channelOpen ? record.conn : nil
+        }
+        for conn in openConns {
+            _ = await conn.sendAndFlush(payload)
+        }
     }
 
     private func broadcast(_ payload: Data) {

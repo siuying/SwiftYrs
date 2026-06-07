@@ -69,13 +69,15 @@ actor SignalingConnection {
             let task = URLSession.shared.webSocketTask(with: url)
             self.task = task
             task.resume()
-            attempt = 0
             await onOpen(self)
             startPing()
-            await receiveUntilFailure(on: task)
+            let sawFrame = await receiveUntilFailure(on: task)
             webRTCDebug("signaling \(url.absoluteString) receive loop ended; reconnecting")
             stopPing()
             if stopped { break }
+            if sawFrame {
+                attempt = 0
+            }
             guard attempt < maxRetries else { break }
             let delay = Self.reconnectDelay(attempt: attempt, initialDelay: initialDelay, maxDelay: maxDelay)
             attempt += 1
@@ -83,18 +85,21 @@ actor SignalingConnection {
         }
     }
 
-    private func receiveUntilFailure(on task: URLSessionWebSocketTask) async {
+    private func receiveUntilFailure(on task: URLSessionWebSocketTask) async -> Bool {
+        var sawFrame = false
         while !stopped {
             do {
                 let frame = try await task.receive()
+                sawFrame = true
                 guard let data = Self.data(from: frame) else { continue }
                 if let message = try? SignalingCodec.decode(data) {
                     await onMessage(message)
                 }
             } catch {
-                return
+                return sawFrame
             }
         }
+        return sawFrame
     }
 
     private func startPing() {

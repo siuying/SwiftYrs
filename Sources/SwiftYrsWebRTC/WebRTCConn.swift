@@ -116,6 +116,21 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
         }
     }
 
+    func sendAndFlush(_ data: Data, timeout: Duration = .milliseconds(500)) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self,
+                      let channel = self.dataChannel,
+                      channel.readyState == .open,
+                      channel.sendData(RTCDataBuffer(data: data, isBinary: true)) else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                self.resumeWhenFlushed(channel, deadline: ContinuousClock.now + timeout, continuation: continuation)
+            }
+        }
+    }
+
     func close() {
         queue.async { [weak self] in
             guard let self else { return }
@@ -144,6 +159,24 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
         pendingCandidates.removeAll()
         for candidate in candidates {
             connection.add(candidate) { _ in }
+        }
+    }
+
+    private func resumeWhenFlushed(
+        _ channel: RTCDataChannel,
+        deadline: ContinuousClock.Instant,
+        continuation: CheckedContinuation<Bool, Never>
+    ) {
+        if channel.bufferedAmount == 0 {
+            continuation.resume(returning: true)
+            return
+        }
+        guard ContinuousClock.now < deadline, channel.readyState == .open else {
+            continuation.resume(returning: false)
+            return
+        }
+        queue.asyncAfter(deadline: .now() + .milliseconds(10)) {
+            self.resumeWhenFlushed(channel, deadline: deadline, continuation: continuation)
         }
     }
 

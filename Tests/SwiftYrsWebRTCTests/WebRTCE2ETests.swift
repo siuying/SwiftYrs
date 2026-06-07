@@ -60,6 +60,47 @@ struct WebRTCE2ETests {
         }
     }
 
+    @Test
+    func destroyBroadcastsOwnedAwarenessRemoval() async throws {
+        let server = try SignalingServerProcess.start()
+        defer { server.stop() }
+        let ready = try await server.waitForLine { $0["type"] as? String == "ready" }
+        let port = try #require(ready["port"] as? Int)
+        let url = try #require(URL(string: "ws://127.0.0.1:\(port)"))
+
+        let providerA = WebRTCProvider(
+            "room-awareness-removal", doc: YDoc(clientID: 11), signaling: [url], options: loopbackOptions()
+        )
+        let providerB = WebRTCProvider(
+            "room-awareness-removal", doc: YDoc(clientID: 22), signaling: [url], options: loopbackOptions()
+        )
+        defer {
+            Task { await providerB.destroy() }
+        }
+
+        try await providerA.connect()
+        try await providerB.connect()
+        try await e2eEventually(timeout: .seconds(20)) {
+            let a = await providerA.connectedPeers
+            let b = await providerB.connectedPeers
+            return !a.isEmpty && !b.isEmpty
+        }
+
+        let awarenessA = await providerA.awareness
+        let awarenessB = await providerB.awareness
+        let clientID = awarenessA.clientID
+        try awarenessA.setLocalState(["name": "swift"])
+        try await e2eEventually(timeout: .seconds(5)) {
+            try awarenessB.state(for: clientID) != nil
+        }
+
+        await providerA.destroy()
+
+        try await e2eEventually(timeout: .seconds(5)) {
+            try awarenessB.state(for: clientID) == nil
+        }
+    }
+
     private func loopbackOptions() -> WebRTCProvider.Options {
         // No STUN: host candidates over loopback are enough for two local peers.
         WebRTCProvider.Options(iceServers: [])
