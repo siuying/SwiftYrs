@@ -45,17 +45,23 @@ actor SignalingConnection {
     }
 
     func send(_ data: Data) async {
+        guard !stopped else { return }
         try? await task?.send(.data(data))
     }
 
-    func stop() {
+    /// Cancels the receive loop and keepalive, then awaits the loop's actual
+    /// termination so the caller can rely on the connection being fully torn
+    /// down on return — no reconnect can fire after this resumes. Idempotent and
+    /// safe to call concurrently: multiple callers await the same loop task.
+    func stop() async {
         stopped = true
         pinger?.cancel()
         pinger = nil
-        loop?.cancel()
-        loop = nil
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
+        loop?.cancel()
+        await loop?.value
+        loop = nil
     }
 
     static func reconnectDelay(attempt: Int, initialDelay: Duration, maxDelay: Duration) -> Duration {
@@ -86,14 +92,25 @@ actor SignalingConnection {
                 try? await Task.sleep(for: delay)
                 continue
             }
+            guard !stopped else {
+                session.invalidateAndCancel()
+                break
+            }
             await onOpen(self)
+            guard !stopped else {
+                session.invalidateAndCancel()
+                break
+            }
             startPing()
             let sawFrame = await receiveUntilFailure(on: task)
             session.invalidateAndCancel()
-            webRTCDebug("signaling \(url.absoluteString) receive loop ended; reconnecting")
             stopPing()
             await onClose(self)
-            if stopped { break }
+            if stopped {
+                webRTCDebug("signaling \(url.absoluteString) receive loop ended; stopping")
+                break
+            }
+            webRTCDebug("signaling \(url.absoluteString) receive loop ended; reconnecting")
             if sawFrame {
                 attempt = 0
             }

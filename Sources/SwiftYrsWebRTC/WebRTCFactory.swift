@@ -1,13 +1,17 @@
 @preconcurrency import StreamWebRTC
 
-/// Process-lifetime libwebrtc factory. `RTCInitializeSSL()` is called once and
-/// never torn down (no `RTCCleanupSSL()`): the factory outlives any individual
-/// provider, matching how libwebrtc expects global SSL state to be managed.
-/// libwebrtc's factory is internally thread-safe, so the immutable singleton is
-/// `nonisolated(unsafe)`.
+/// libwebrtc factory construction. `RTCInitializeSSL()` runs once per process;
+/// each `WebRTCProvider` owns its own `RTCPeerConnectionFactory` so peer
+/// connection teardown stays on that provider's conn queues instead of racing
+/// a process-wide factory shared across actor threads.
 enum WebRTCFactory {
-    nonisolated(unsafe) static let shared: RTCPeerConnectionFactory = {
+    private static let initializeSSL: Void = {
         RTCInitializeSSL()
-        return RTCPeerConnectionFactory()
+        return ()
     }()
+
+    static func makePeerConnectionFactory() -> RTCPeerConnectionFactory {
+        _ = initializeSSL
+        return RTCPeerConnectionFactory()
+    }
 }
