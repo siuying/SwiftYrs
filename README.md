@@ -29,7 +29,7 @@ SwiftYrs/
 │   ├── build-xcframework.sh          # Build Artifacts/YrsBridge.xcframework locally
 │   ├── package-binary-artifact.sh    # Zip + checksum for a release
 │   ├── verify-binary-consumer.sh     # Smoke-test downstream binary-target consumption
-│   └── generate-yjs-fixtures.mjs    # Regenerate Fixtures/ from Yjs (requires bun)
+│   └── generate-yjs-fixtures.mjs    # Regenerate Fixtures/ from Yjs (requires Node.js)
 ├── docs/
 │   └── feature-coverage.md    # Feature coverage matrix vs. y-crdt 0.27 / yffi
 ├── Package.swift              # SwiftPM package definition
@@ -368,8 +368,8 @@ swift test
 The `Tests/SwiftYrsTests/Fixtures/` JSON files are generated from JavaScript Yjs and checked in. Regenerate them after changing fixture logic:
 
 ```sh
-bun install
-bun scripts/generate-yjs-fixtures.mjs
+npm install
+node scripts/generate-yjs-fixtures.mjs
 ```
 
 ### Release a binary artifact

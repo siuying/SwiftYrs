@@ -1,13 +1,17 @@
-# CLAUDE.md
+# AGENTS.md
 
 ## Development
 
-- Create one PR for each issues.
+- Create one PR for each issue.
+- Use Node.js for TypeScript/JavaScript tooling and test helpers.
+- Use `npm install` to install JavaScript dependencies.
+- Use `node <script>` for JavaScript/TypeScript helper scripts.
+- Use only Node.js APIs and commands for JavaScript and TypeScript.
 
 ## Git
 
 No "Co-Authored-By: Claude" trailer.
-No "🤖 Generated with" line.
+No "Generated with" line.
 
 ## Agent skills
 

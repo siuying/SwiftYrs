@@ -1,4 +1,5 @@
 import { Server } from "@hocuspocus/server";
+import * as readline from "node:readline";
 
 const authToken = process.env.HOCUSPOCUS_AUTH_TOKEN ?? null;
 
@@ -19,13 +20,10 @@ await server.listen(0, ({ port }: { port: number }) => {
 	console.log(JSON.stringify({ type: "ready", port }));
 });
 
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", async chunk => {
-	const lines = chunk.split("\n");
-	for (const line of lines) {
-		if (line.trim() === "shutdown") {
-			await server.destroy();
-			process.exit(0);
-		}
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", async line => {
+	if (line.trim() === "shutdown") {
+		await server.destroy();
+		process.exit(0);
 	}
 });
