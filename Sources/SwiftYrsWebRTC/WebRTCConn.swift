@@ -139,6 +139,20 @@ final class WebRTCConn: NSObject, @unchecked Sendable {
         }
     }
 
+    func closeAndWait() async {
+        await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume()
+                    return
+                }
+                self.dataChannel?.close()
+                self.connection.close()
+                continuation.resume()
+            }
+        }
+    }
+
     // MARK: - Queue-confined helpers
 
     private func createAnswer() {

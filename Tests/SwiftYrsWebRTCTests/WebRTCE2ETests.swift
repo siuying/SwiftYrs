@@ -28,15 +28,17 @@ struct WebRTCE2ETests {
         }
         defer { syncedTask.cancel() }
 
-        try await providerA.connect()
-        try await providerB.connect()
+        async let connectA: Void = providerA.connect()
+        async let connectB: Void = providerB.connect()
+        try await connectA
+        try await connectB
         defer {
             Task { await providerA.destroy() }
             Task { await providerB.destroy() }
         }
 
         // The mesh establishes a direct data-channel connection over loopback.
-        try await e2eEventually(timeout: .seconds(20)) {
+        try await e2eEventually("peers connected", timeout: .seconds(5)) {
             let a = await providerA.connectedPeers
             let b = await providerB.connectedPeers
             return !a.isEmpty && !b.isEmpty
@@ -44,18 +46,18 @@ struct WebRTCE2ETests {
 
         // An edit on A converges on B.
         try docA.write { try $0.insert("hello", into: textA, at: 0) }
-        try await e2eEventually(timeout: .seconds(20)) {
+        try await e2eEventually("edit on A converges on B", timeout: .seconds(5)) {
             try docB.read { try $0.string(from: textB) == "hello" }
         }
 
         // And an edit on B converges on A (bidirectional).
         try docB.write { try $0.insert(" world", into: textB, at: 5) }
-        try await e2eEventually(timeout: .seconds(20)) {
+        try await e2eEventually("edit on B converges on A", timeout: .seconds(5)) {
             try docA.read { try $0.string(from: textA) == "hello world" }
         }
 
         // `synced` latched true once a peer completed initial sync.
-        try await e2eEventually(timeout: .seconds(5)) {
+        try await e2eEventually("synced latched true", timeout: .seconds(5)) {
             await syncedBox.value == true
         }
 
@@ -78,6 +80,7 @@ struct WebRTCE2ETests {
             "room-awareness-removal", doc: YDoc(clientID: 22), signaling: [url], options: loopbackOptions()
         )
         defer {
+            Task { await providerA.destroy() }
             Task { await providerB.destroy() }
         }
 
@@ -86,21 +89,23 @@ struct WebRTCE2ETests {
         let clientID = awarenessA.clientID
         try awarenessA.setLocalState(["name": "swift"])
 
-        try await providerA.connect()
-        try await providerB.connect()
-        try await e2eEventually(timeout: .seconds(20)) {
+        async let connectA: Void = providerA.connect()
+        async let connectB: Void = providerB.connect()
+        try await connectA
+        try await connectB
+        try await e2eEventually("peers connected", timeout: .seconds(5)) {
             let a = await providerA.connectedPeers
             let b = await providerB.connectedPeers
             return !a.isEmpty && !b.isEmpty
         }
 
-        try await e2eEventually(timeout: .seconds(5)) {
+        try await e2eEventually("awareness state received by B", timeout: .seconds(5)) {
             try awarenessB.state(for: clientID) != nil
         }
 
         await providerA.destroy()
 
-        try await e2eEventually(timeout: .seconds(5)) {
+        try await e2eEventually("awareness state removed after A destroys", timeout: .seconds(5)) {
             try awarenessB.state(for: clientID) == nil
         }
         await providerB.destroy()
@@ -120,9 +125,13 @@ private actor E2EBox<Value: Sendable> {
     func set(_ value: Value?) { storage = value }
 }
 
-private struct E2ETimeout: Error {}
+private struct E2ETimeout: Error {
+    let description: String?
+    init(_ description: String? = nil) { self.description = description }
+}
 
 private func e2eEventually(
+    _ description: String,
     timeout: Duration,
     _ predicate: @escaping () async throws -> Bool
 ) async throws {
@@ -132,7 +141,7 @@ private func e2eEventually(
         try await Task.sleep(for: .milliseconds(50))
     }
     if try await predicate() { return }
-    throw E2ETimeout()
+    throw E2ETimeout(description)
 }
 
 /// Spawns the Bun signaling server and exposes its newline-JSON stdout.

@@ -79,7 +79,7 @@ public actor WebRTCProvider {
     private var connectionStatus: WebRTCConnectionStatus = .disconnected
     private var lastSynced = false
 
-    private final class PeerRecord {
+    private final class PeerRecord: @unchecked Sendable {
         let conn: WebRTCConn
         var glareToken: Double?
         var synced = false
@@ -156,7 +156,7 @@ public actor WebRTCProvider {
         if ownsAwareness {
             await clearOwnedAwareness()
         }
-        disconnect()
+        await disconnectAndWait()
         statusContinuation.finish()
         syncedContinuation.finish()
         peersContinuation.finish()
@@ -168,6 +168,27 @@ public actor WebRTCProvider {
 
     public var connectedPeers: Set<String> {
         Set(conns.filter { $0.value.channelOpen }.keys)
+    }
+
+    private func disconnectAndWait() async {
+        guard started else { return }
+        started = false
+        let signalingConnections = signalingConnections
+        self.signalingConnections.removeAll()
+        for connection in signalingConnections {
+            await connection.stop()
+        }
+        let records = Array(conns.values)
+        conns.removeAll()
+        for record in records {
+            await record.conn.closeAndWait()
+        }
+        documentObservation?.cancel()
+        documentObservation = nil
+        awarenessObservation?.cancel()
+        awarenessObservation = nil
+        emitStatus(.disconnected)
+        emitSynced(false)
     }
 
     // MARK: - Signaling
@@ -213,7 +234,8 @@ public actor WebRTCProvider {
             if GlareResolver.shouldRejectIncomingOffer(localToken: existing.glareToken, remoteToken: token) {
                 return
             }
-            existing.glareToken = nil
+            conns[from] = nil
+            existing.conn.close()
         }
         if case .answer = signal {
             conns[from]?.glareToken = nil
@@ -240,47 +262,47 @@ public actor WebRTCProvider {
         let conn = WebRTCConn(remotePeerId: remotePeerId, initiator: initiator, iceServers: options.iceServers)
         let record = PeerRecord(conn: conn)
         conns[remotePeerId] = record
-        conn.onSignal = { [weak self] signal in
-            Task { await self?.peerEmittedSignal(peerId: remotePeerId, signal: signal) }
+        conn.onSignal = { [weak self, weak record] signal in
+            Task { await self?.peerEmittedSignal(peerId: remotePeerId, record: record, signal: signal) }
         }
-        conn.onConnected = { [weak self] in
-            Task { await self?.peerConnected(peerId: remotePeerId) }
+        conn.onConnected = { [weak self, weak record] in
+            Task { await self?.peerConnected(peerId: remotePeerId, record: record) }
         }
-        conn.onData = { [weak self] data in
-            Task { await self?.peerReceivedData(peerId: remotePeerId, data: data) }
+        conn.onData = { [weak self, weak record] data in
+            Task { await self?.peerReceivedData(peerId: remotePeerId, record: record, data: data) }
         }
-        conn.onClosed = { [weak self] in
-            Task { await self?.peerClosed(peerId: remotePeerId) }
+        conn.onClosed = { [weak self, weak record] in
+            Task { await self?.peerClosed(peerId: remotePeerId, record: record) }
         }
         return record
     }
 
-    private func peerEmittedSignal(peerId remotePeerId: String, signal: PeerSignal) async {
-        guard let record = conns[remotePeerId] else { return }
-        let token = record.glareToken ?? newGlareToken()
-        record.glareToken = token
+    private func peerEmittedSignal(peerId remotePeerId: String, record: PeerRecord?, signal: PeerSignal) async {
+        guard let record, let current = conns[remotePeerId], current === record else { return }
+        let token = current.glareToken ?? newGlareToken()
+        current.glareToken = token
         webRTCDebug("\(peerId.prefix(4)) emit signal \(signalKind(signal)) → \(remotePeerId.prefix(4))")
         await publishSignal(to: remotePeerId, token: token, signal: signal)
     }
 
-    private func peerConnected(peerId remotePeerId: String) {
-        guard let record = conns[remotePeerId] else { return }
+    private func peerConnected(peerId remotePeerId: String, record: PeerRecord?) {
+        guard let record, let current = conns[remotePeerId], current === record else { return }
         webRTCDebug("\(peerId.prefix(4)) data channel OPEN with \(remotePeerId.prefix(4))")
-        record.channelOpen = true
-        sendInitialSync(to: record)
+        current.channelOpen = true
+        sendInitialSync(to: current)
         recomputeSynced()
     }
 
-    private func peerReceivedData(peerId remotePeerId: String, data: Data) {
-        guard let record = conns[remotePeerId] else { return }
+    private func peerReceivedData(peerId remotePeerId: String, record: PeerRecord?, data: Data) {
+        guard let record, let current = conns[remotePeerId], current === record else { return }
         guard let messages = try? YSyncMessage.decodePayload(data) else { return }
         for message in messages {
-            handle(message, from: record)
+            handle(message, from: current)
         }
     }
 
-    private func peerClosed(peerId remotePeerId: String) {
-        guard conns[remotePeerId] != nil else { return }
+    private func peerClosed(peerId remotePeerId: String, record: PeerRecord?) {
+        guard let record, let current = conns[remotePeerId], current === record else { return }
         conns[remotePeerId] = nil
         emitPeers(added: [], removed: [remotePeerId])
         recomputeSynced()

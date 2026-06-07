@@ -66,12 +66,24 @@ actor SignalingConnection {
     private func runLoop() async {
         var attempt = 0
         while !stopped {
-            let task = URLSession.shared.webSocketTask(with: url)
+            let openObserver = WebSocketOpenObserver()
+            let session = URLSession(configuration: .default, delegate: openObserver, delegateQueue: nil)
+            let task = session.webSocketTask(with: url)
             self.task = task
             task.resume()
+            guard await Self.waitForOpen(openObserver) else {
+                session.invalidateAndCancel()
+                if stopped { break }
+                guard attempt < maxRetries else { break }
+                let delay = Self.reconnectDelay(attempt: attempt, initialDelay: initialDelay, maxDelay: maxDelay)
+                attempt += 1
+                try? await Task.sleep(for: delay)
+                continue
+            }
             await onOpen(self)
             startPing()
             let sawFrame = await receiveUntilFailure(on: task)
+            session.invalidateAndCancel()
             webRTCDebug("signaling \(url.absoluteString) receive loop ended; reconnecting")
             stopPing()
             if stopped { break }
@@ -102,6 +114,17 @@ actor SignalingConnection {
         return sawFrame
     }
 
+    private static func waitForOpen(_ observer: WebSocketOpenObserver, timeout: Duration = .seconds(5)) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if let opened = observer.opened {
+                return opened
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
     private func startPing() {
         pinger = Task { [weak self] in
             while !Task.isCancelled {
@@ -125,6 +148,38 @@ actor SignalingConnection {
             return string.data(using: .utf8)
         @unknown default:
             return nil
+        }
+    }
+}
+
+private final class WebSocketOpenObserver: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _opened: Bool?
+
+    var opened: Bool? {
+        lock.withLock { _opened }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        lock.withLock {
+            _opened = true
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        lock.withLock {
+            if _opened == nil {
+                _opened = false
+            }
         }
     }
 }
