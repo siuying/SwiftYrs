@@ -20,54 +20,52 @@ struct HocuspocusE2ETests {
         let awareness = YAwareness(document: document)
         try awareness.setLocalState(["name": "swift"])
         let provider = HocuspocusProvider(url: url, name: "room-e2e", document: document, awareness: awareness)
-        var statelessIterator = provider.stateless.makeAsyncIterator()
-        try await provider.connect()
-        defer {
-            Task {
-                await provider.disconnect()
-            }
-        }
-
-        let peer = try JSONLineProcess.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-e2e"])
-        defer {
-            peer.stop()
-        }
-        _ = try await peer.waitForLine(where: { $0["type"] as? String == "ready" })
-        _ = try await peer.waitForLine(where: { $0["type"] as? String == "synced" })
-
-        try await peer.send(["type": "insertText", "text": "hello"])
-        try await e2eExpectEventually {
-            try document.read { transaction in
-                try transaction.string(from: text) == "hello"
-            }
-        }
-
-        try document.write { transaction in
-            try transaction.insert(" swift", into: text, at: 5)
-        }
-        try await e2eExpectEventually {
-            let response = try await peer.request(["type": "getText"], responseType: "text")
-            return response["text"] as? String == "hello swift"
-        }
-
-        try await e2eExpectEventually {
-            let response = try await peer.request(["type": "getAwareness"], responseType: "awareness")
-            let states = response["states"] as? [[String: Any]] ?? []
-            return states.contains { entry in
-                (entry["state"] as? [String: Any])?["name"] as? String == "swift"
-            }
-        }
-
-        try await peer.send(["type": "sendStateless", "payload": "from-js"])
         let statelessValue = E2EValueBox<String>()
-        let statelessTask = Task {
-            await statelessValue.set(statelessIterator.next())
-        }
-        defer {
-            statelessTask.cancel()
-        }
-        try await e2eExpectEventually {
-            await statelessValue.value == "from-js"
+
+        try await withE2EDisconnect([provider]) {
+            try await provider.connect()
+
+            let peer = try JSONLineProcess.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-e2e"])
+            defer {
+                peer.stop()
+            }
+            _ = try await peer.waitForLine(where: { $0["type"] as? String == "ready" })
+            _ = try await peer.waitForLine(where: { $0["type"] as? String == "synced" })
+
+            try await peer.send(["type": "insertText", "text": "hello"])
+            try await e2eExpectEventually {
+                try document.read { transaction in
+                    try transaction.string(from: text) == "hello"
+                }
+            }
+
+            try document.write { transaction in
+                try transaction.insert(" swift", into: text, at: 5)
+            }
+            try await e2eExpectEventually {
+                let response = try await peer.request(["type": "getText"], responseType: "text")
+                return response["text"] as? String == "hello swift"
+            }
+
+            try await e2eExpectEventually {
+                let response = try await peer.request(["type": "getAwareness"], responseType: "awareness")
+                let states = response["states"] as? [[String: Any]] ?? []
+                return states.contains { entry in
+                    (entry["state"] as? [String: Any])?["name"] as? String == "swift"
+                }
+            }
+
+            try await peer.send(["type": "sendStateless", "payload": "from-js"])
+            let statelessTask = Task {
+                var iterator = provider.stateless.makeAsyncIterator()
+                await statelessValue.set(iterator.next())
+            }
+            defer {
+                statelessTask.cancel()
+            }
+            try await e2eExpectEventually {
+                await statelessValue.value == "from-js"
+            }
         }
     }
 
@@ -88,17 +86,29 @@ struct HocuspocusE2ETests {
             document: YDoc(clientID: 102),
             token: { "secret" }
         )
-        var authIterator = provider.authStatus.makeAsyncIterator()
-
-        try await provider.connect()
-        defer {
-            Task {
-                await provider.disconnect()
-            }
+        try await withE2EDisconnect([provider]) {
+            try await provider.connect()
+            var authIterator = provider.authStatus.makeAsyncIterator()
+            #expect(await authIterator.next() == .authenticated(scope: "read-write"))
         }
-
-        #expect(await authIterator.next() == .authenticated(scope: "read-write"))
     }
+}
+
+/// Runs `body`, then awaits `disconnect()` on every provider before returning or rethrowing.
+private func withE2EDisconnect<A>(
+    _ providers: [HocuspocusProvider],
+    _ body: () async throws -> A
+) async throws -> A {
+    var result: Result<A, any Error>!
+    do {
+        result = .success(try await body())
+    } catch {
+        result = .failure(error)
+    }
+    for provider in providers {
+        await provider.disconnect()
+    }
+    return try result.get()
 }
 
 private final class JSONLineProcess: @unchecked Sendable {
@@ -179,9 +189,21 @@ private final class JSONLineProcess: @unchecked Sendable {
     }
 
     func stop() {
+        guard process.isRunning else { return }
+        try? input.fileHandleForWriting.write(contentsOf: Data("shutdown\n".utf8))
+        let deadline = Date().addingTimeInterval(1)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         if process.isRunning {
-            try? input.fileHandleForWriting.write(contentsOf: Data("shutdown\n".utf8))
             process.terminate()
+        }
+        let killDeadline = Date().addingTimeInterval(1)
+        while process.isRunning && Date() < killDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
         }
     }
 

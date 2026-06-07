@@ -1,4 +1,5 @@
 import Foundation
+@testable import SwiftYrsWebRTC
 
 struct E2ETimeout: Error {
     let description: String?
@@ -23,6 +24,25 @@ func e2eEventually(
     }
     if try await predicate() { return }
     throw E2ETimeout(description)
+}
+
+/// Runs `body`, then awaits `destroy()` on every provider before returning or rethrowing.
+/// Serialized E2E tests must use this (not fire-and-forget `Task { await destroy() }`) so
+/// the next test does not start while prior WebRTC/signaling resources are still live.
+func withE2ETeardown<A>(
+    _ providers: [WebRTCProvider],
+    _ body: () async throws -> A
+) async throws -> A {
+    var result: Result<A, any Error>!
+    do {
+        result = .success(try await body())
+    } catch {
+        result = .failure(error)
+    }
+    for provider in providers {
+        await provider.destroy()
+    }
+    return try result.get()
 }
 
 /// Spawns a Node.js script that speaks newline-delimited JSON over stdio,
@@ -106,9 +126,21 @@ final class JSONLineProcess: @unchecked Sendable {
     }
 
     func stop() {
+        guard process.isRunning else { return }
+        try? input.fileHandleForWriting.write(contentsOf: Data("{\"type\":\"shutdown\"}\nshutdown\n".utf8))
+        let deadline = Date().addingTimeInterval(1)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
         if process.isRunning {
-            try? input.fileHandleForWriting.write(contentsOf: Data("{\"type\":\"shutdown\"}\nshutdown\n".utf8))
             process.terminate()
+        }
+        let killDeadline = Date().addingTimeInterval(1)
+        while process.isRunning && Date() < killDeadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
         }
     }
 

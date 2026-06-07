@@ -64,17 +64,21 @@ public actor WebRTCProvider {
 
     private let signalingURLs: [URL]
     private let options: Options
+    private let peerConnectionFactory = WebRTCFactory.makePeerConnectionFactory()
     private let ownsAwareness: Bool
     private let peerId = UUID().uuidString.lowercased()
+    private let signalingCipher: SignalingCipher?
 
     private let statusContinuation: AsyncStream<WebRTCConnectionStatus>.Continuation
     private let syncedContinuation: AsyncStream<Bool>.Continuation
     private let peersContinuation: AsyncStream<PeersEvent>.Continuation
 
     private var signalingConnections: [SignalingConnection] = []
+    private var openSignalingConnections: Set<ObjectIdentifier> = []
     private var conns: [String: PeerRecord] = [:]
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
+    private var reannounceTask: Task<Void, Never>?
     private var started = false
     private var connectionStatus: WebRTCConnectionStatus = .disconnected
     private var lastSynced = false
@@ -84,6 +88,7 @@ public actor WebRTCProvider {
         var glareToken: Double?
         var synced = false
         var channelOpen = false
+        var awarenessClientIDs: Set<UInt64> = []
         init(conn: WebRTCConn) { self.conn = conn }
     }
 
@@ -92,6 +97,14 @@ public actor WebRTCProvider {
         self.doc = doc
         self.signalingURLs = signaling
         self.options = options
+        if let password = options.password {
+            guard let cipher = try? SignalingCipher(password: password, roomName: roomName) else {
+                preconditionFailure("Failed to derive WebRTC signaling password key")
+            }
+            self.signalingCipher = cipher
+        } else {
+            self.signalingCipher = nil
+        }
         if let awareness = options.awareness {
             self.awareness = awareness
             self.ownsAwareness = false
@@ -124,13 +137,16 @@ public actor WebRTCProvider {
                 initialDelay: options.initialDelay,
                 maxDelay: options.maxDelay,
                 maxRetries: options.maxRetries,
+                cipher: signalingCipher,
                 onOpen: { [weak self] connection in await self?.signalingDidOpen(connection) },
+                onClose: { [weak self] connection in await self?.signalingDidClose(connection) },
                 onMessage: { [weak self] message in await self?.handleSignaling(message) }
             )
         }
         for connection in signalingConnections {
             await connection.start()
         }
+        startReannounceLoop()
     }
 
     public func disconnect() {
@@ -140,6 +156,9 @@ public actor WebRTCProvider {
             Task { await connection.stop() }
         }
         signalingConnections.removeAll()
+        openSignalingConnections.removeAll()
+        reannounceTask?.cancel()
+        reannounceTask = nil
         for record in conns.values {
             record.conn.close()
         }
@@ -153,10 +172,31 @@ public actor WebRTCProvider {
     }
 
     public func destroy() async {
+        guard started else { return }
         if ownsAwareness {
             await clearOwnedAwareness()
         }
-        disconnect()
+        started = false
+        reannounceTask?.cancel()
+        reannounceTask = nil
+        let signaling = signalingConnections
+        // Stop signaling before closing peer connections so the receive loop
+        // cannot dispatch announces/signals into a provider that is tearing down.
+        for connection in signaling {
+            await connection.stop()
+        }
+        signalingConnections.removeAll()
+        openSignalingConnections.removeAll()
+        documentObservation?.cancel()
+        documentObservation = nil
+        awarenessObservation?.cancel()
+        awarenessObservation = nil
+        for record in conns.values {
+            record.conn.close()
+        }
+        conns.removeAll()
+        emitStatus(.disconnected)
+        emitSynced(false)
         statusContinuation.finish()
         syncedContinuation.finish()
         peersContinuation.finish()
@@ -174,18 +214,19 @@ public actor WebRTCProvider {
 
     private func signalingDidOpen(_ connection: SignalingConnection) async {
         webRTCDebug("\(peerId.prefix(4)) signaling open → subscribe+announce")
+        openSignalingConnections.insert(ObjectIdentifier(connection))
         await connection.send(SignalingCodec.subscribe(topics: [roomName]))
-        if conns.count < options.maxConns {
-            await connection.send(SignalingCodec.publish(
-                topic: roomName, data: RoomMessage.announce(from: peerId).jsonObject()
-            ))
-        }
-        if connectionStatus != .connected {
-            emitStatus(.connected)
-        }
+        await sendRoomMessage(.announce(from: peerId), on: connection)
+        recomputeSignalingStatus()
+    }
+
+    private func signalingDidClose(_ connection: SignalingConnection) {
+        openSignalingConnections.remove(ObjectIdentifier(connection))
+        recomputeSignalingStatus()
     }
 
     private func handleSignaling(_ message: IncomingSignalingMessage) async {
+        guard started else { return }
         guard case let .publish(topic, data) = message, topic == roomName else { return }
         guard let object = try? JSONSerialization.jsonObject(with: data),
               let roomMessage = try? RoomMessage(jsonObject: object) else { return }
@@ -193,7 +234,7 @@ public actor WebRTCProvider {
         switch roomMessage {
         case let .announce(from):
             webRTCDebug("\(peerId.prefix(4)) recv announce from \(from.prefix(4))")
-            handleAnnounce(from: from)
+            await handleAnnounce(from: from)
         case let .signal(from, to, token, signal):
             guard to == peerId else { return }
             webRTCDebug("\(peerId.prefix(4)) recv signal \(signalKind(signal)) from \(from.prefix(4))")
@@ -201,14 +242,24 @@ public actor WebRTCProvider {
         }
     }
 
-    private func handleAnnounce(from: String) {
-        guard conns[from] == nil, conns.count < options.maxConns else { return }
+    private func handleAnnounce(from: String) async {
+        guard started else { return }
+        guard conns[from] == nil else { return }
+        guard conns.count < options.maxConns else {
+            // At capacity we cannot initiate, but peers still need our announce so
+            // they can open an inbound WebRTC connection. Re-announce on every
+            // remote announce so a missed frame does not stall until the periodic loop.
+            webRTCDebug("\(peerId.prefix(4)) at capacity, re-announcing for inbound \(from.prefix(4))")
+            await announceToOpenSignalingConnections()
+            return
+        }
         let record = makeConn(remotePeerId: from, initiator: true)
         record.conn.start()
         emitPeers(added: [from], removed: [])
     }
 
     private func handleSignal(from: String, token: Double, signal: PeerSignal) {
+        guard started else { return }
         if case .offer = signal, let existing = conns[from] {
             if GlareResolver.shouldRejectIncomingOffer(localToken: existing.glareToken, remoteToken: token) {
                 return
@@ -229,16 +280,47 @@ public actor WebRTCProvider {
 
     private func publishSignal(to remotePeerId: String, token: Double, signal: PeerSignal) async {
         let message = RoomMessage.signal(from: peerId, to: remotePeerId, token: token, signal: signal)
-        let frame = SignalingCodec.publish(topic: roomName, data: message.jsonObject())
+        guard let frame = try? SignalingCodec.publish(
+            topic: roomName, data: message.jsonObject(), cipher: signalingCipher
+        ) else { return }
         for connection in signalingConnections {
             await connection.send(frame)
+        }
+    }
+
+    private func sendRoomMessage(_ message: RoomMessage, on connection: SignalingConnection) async {
+        guard let frame = try? SignalingCodec.publish(
+            topic: roomName, data: message.jsonObject(), cipher: signalingCipher
+        ) else { return }
+        await connection.send(frame)
+    }
+
+    private func startReannounceLoop(interval: Duration = .seconds(30)) {
+        reannounceTask?.cancel()
+        reannounceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.announceToOpenSignalingConnections()
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled else { return }
+            }
+        }
+    }
+
+    private func announceToOpenSignalingConnections() async {
+        for connection in signalingConnections where openSignalingConnections.contains(ObjectIdentifier(connection)) {
+            await sendRoomMessage(.announce(from: peerId), on: connection)
         }
     }
 
     // MARK: - Peer connections
 
     private func makeConn(remotePeerId: String, initiator: Bool) -> PeerRecord {
-        let conn = WebRTCConn(remotePeerId: remotePeerId, initiator: initiator, iceServers: options.iceServers)
+        let conn = WebRTCConn(
+            remotePeerId: remotePeerId,
+            initiator: initiator,
+            iceServers: options.iceServers,
+            factory: peerConnectionFactory
+        )
         let record = PeerRecord(conn: conn)
         conns[remotePeerId] = record
         conn.onSignal = { [weak self, weak record] signal in
@@ -282,7 +364,13 @@ public actor WebRTCProvider {
 
     private func peerClosed(peerId remotePeerId: String, record: PeerRecord?) {
         guard let record, let current = conns[remotePeerId], current === record else { return }
+        // Dispose through close() even though the peer already closed: blocking
+        // libwebrtc teardown runs on the conn's teardownQueue (after properties are
+        // nilled on `queue`), so dropping `current` here does not release those
+        // objects on the provider-actor thread. See WebRTCConn.close.
+        current.conn.close()
         conns[remotePeerId] = nil
+        removeAwarenessStatesIntroduced(by: current)
         emitPeers(added: [], removed: [remotePeerId])
         recomputeSynced()
     }
@@ -291,6 +379,7 @@ public actor WebRTCProvider {
         do {
             let syncStep1 = try YSyncMessage.syncStep1(doc.stateVector())
             record.conn.send(syncStep1.payload)
+            record.conn.send(try YSyncMessage.awarenessQuery().payload)
             let clientIDs = try awareness.states().map(\.clientID)
             if !clientIDs.isEmpty {
                 let update = try awareness.encodeUpdate(for: clientIDs)
@@ -312,7 +401,7 @@ public actor WebRTCProvider {
             case let .update(update, _):
                 try applyRemote(update)
             case let .awareness(update, _):
-                try awareness.applyUpdate(update)
+                try applyAwarenessUpdate(update, from: record)
             case .awarenessQuery:
                 let clientIDs = try awareness.states().map(\.clientID)
                 if !clientIDs.isEmpty {
@@ -323,6 +412,21 @@ public actor WebRTCProvider {
                 break
             }
         } catch {}
+    }
+
+    private func applyAwarenessUpdate(_ update: YAwarenessUpdate, from record: PeerRecord) throws {
+        let before = try Set(awareness.states().map(\.clientID))
+        try awareness.applyUpdate(update)
+        let after = try Set(awareness.states().map(\.clientID))
+        record.awarenessClientIDs.formUnion(after.subtracting(before).filter { $0 != awareness.clientID })
+        record.awarenessClientIDs.subtract(before.subtracting(after))
+    }
+
+    private func removeAwarenessStatesIntroduced(by record: PeerRecord) {
+        for clientID in record.awarenessClientIDs {
+            awareness.removeState(for: clientID)
+        }
+        record.awarenessClientIDs.removeAll()
     }
 
     private func applyRemote(_ update: YUpdate) throws {
@@ -403,6 +507,19 @@ public actor WebRTCProvider {
     private func emitStatus(_ status: WebRTCConnectionStatus) {
         connectionStatus = status
         statusContinuation.yield(status)
+    }
+
+    private func recomputeSignalingStatus() {
+        let status: WebRTCConnectionStatus
+        if !openSignalingConnections.isEmpty {
+            status = .connected
+        } else if started {
+            status = .connecting
+        } else {
+            status = .disconnected
+        }
+        guard status != connectionStatus else { return }
+        emitStatus(status)
     }
 
     private func emitPeers(added: [String], removed: [String]) {
