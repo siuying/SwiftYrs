@@ -67,16 +67,14 @@ jobs:
       - name: Build XCFramework
         run: scripts/build-xcframework.sh
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: "npm"
 
       - name: Install JavaScript dependencies
-        run: bun install
+        run: npm ci
 
       - name: Run Swift tests
         run: swift test

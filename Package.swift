@@ -63,6 +63,7 @@ let webRTCTargets: [Target] = [
         ],
         exclude: [
             "webrtc-signaling-server.ts",
+            "webrtc-peer.ts",
         ]
     ),
 ]

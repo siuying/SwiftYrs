@@ -28,7 +28,7 @@ struct HocuspocusE2ETests {
             }
         }
 
-        let peer = try JSONLineProcess.bun(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-e2e"])
+        let peer = try JSONLineProcess.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-e2e"])
         defer {
             peer.stop()
         }
@@ -122,27 +122,10 @@ private final class JSONLineProcess: @unchecked Sendable {
         }
     }
 
-    static func bun(
-        script: String,
-        arguments: [String] = [],
-        environment: [String: String] = [:]
-    ) throws -> JSONLineProcess {
-        try run(command: "bun", script: script, arguments: arguments, environment: environment)
-    }
-
     static func node(
         script: String,
         arguments: [String] = [],
         environment: [String: String] = [:]
-    ) throws -> JSONLineProcess {
-        try run(command: "node", script: script, arguments: arguments, environment: environment)
-    }
-
-    private static func run(
-        command: String,
-        script: String,
-        arguments: [String],
-        environment: [String: String]
     ) throws -> JSONLineProcess {
         let process = Process()
         let input = Pipe()
@@ -152,11 +135,15 @@ private final class JSONLineProcess: @unchecked Sendable {
         let scriptURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent(script)
-        process.arguments = [command, scriptURL.path] + arguments
+        process.arguments = ["node", scriptURL.path] + arguments
         process.standardInput = input
         process.standardOutput = output
         process.standardError = error
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        process.currentDirectoryURL = scriptURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
         let runner = JSONLineProcess(process: process, input: input, output: output, error: error)
         try process.run()
         return runner
