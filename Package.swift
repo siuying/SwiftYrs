@@ -12,6 +12,12 @@ let ffiTarget: Target = .systemLibrary(
 let hocuspocusProducts: [Product] = []
 
 let hocuspocusTargets: [Target] = []
+
+let webRTCProducts: [Product] = []
+
+let webRTCTargets: [Target] = []
+
+let packageDependencies: [Package.Dependency] = []
 #else
 let ffiTarget: Target = .binaryTarget(
     name: "YrsBridgeFFI",
@@ -36,6 +42,37 @@ let hocuspocusTargets: [Target] = [
         ]
     ),
 ]
+
+let webRTCProducts: [Product] = [
+    .library(name: "SwiftYrsWebRTC", targets: ["SwiftYrsWebRTC"]),
+]
+
+let webRTCTargets: [Target] = [
+    .target(
+        name: "SwiftYrsWebRTC",
+        dependencies: [
+            "SwiftYrs",
+            .product(name: "StreamWebRTC", package: "stream-video-swift-webrtc"),
+        ]
+    ),
+    .testTarget(
+        name: "SwiftYrsWebRTCTests",
+        dependencies: [
+            "SwiftYrsWebRTC",
+            .product(name: "StreamWebRTC", package: "stream-video-swift-webrtc"),
+        ],
+        exclude: [
+            "webrtc-signaling-server.ts",
+        ]
+    ),
+]
+
+let packageDependencies: [Package.Dependency] = [
+    .package(
+        url: "https://github.com/GetStream/stream-video-swift-webrtc",
+        from: "145.9.0"
+    ),
+]
 #endif
 
 let package = Package(
@@ -47,7 +84,8 @@ let package = Package(
     ],
     products: [
         .library(name: "SwiftYrs", targets: ["SwiftYrs"]),
-    ] + hocuspocusProducts,
+    ] + hocuspocusProducts + webRTCProducts,
+    dependencies: packageDependencies,
     targets: [
         ffiTarget,
         .target(
@@ -59,5 +97,5 @@ let package = Package(
             dependencies: ["SwiftYrs"],
             resources: [.process("Fixtures")]
         ),
-    ] + hocuspocusTargets,
+    ] + hocuspocusTargets + webRTCTargets,
 )
