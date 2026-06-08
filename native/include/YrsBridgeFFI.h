@@ -65,11 +65,17 @@ int yrs_bridge_text_string(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction 
 int yrs_bridge_text_chunks_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 
 int yrs_bridge_map_set(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeValue value);
+int yrs_bridge_map_set_map(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBranch *_Nullable *_Nonnull out);
+int yrs_bridge_map_set_array(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBranch *_Nullable *_Nonnull out);
+int yrs_bridge_map_set_text(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBranch *_Nullable *_Nonnull out);
 int yrs_bridge_map_get(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeValue *_Nonnull out);
 int yrs_bridge_map_remove(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key);
 int yrs_bridge_map_entries_json(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 
 int yrs_bridge_array_insert(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, YrsBridgeValue value);
+int yrs_bridge_array_insert_map(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, YrsBridgeBranch *_Nullable *_Nonnull out);
+int yrs_bridge_array_insert_array(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, YrsBridgeBranch *_Nullable *_Nonnull out);
+int yrs_bridge_array_insert_text(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, YrsBridgeBranch *_Nullable *_Nonnull out);
 int yrs_bridge_array_get(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, YrsBridgeValue *_Nonnull out);
 int yrs_bridge_array_remove(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, uint32_t len);
 int yrs_bridge_array_len(YrsBridgeBranch *_Nonnull array, YrsBridgeTransaction *_Nonnull transaction, uint32_t *_Nonnull out);

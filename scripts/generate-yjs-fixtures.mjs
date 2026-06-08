@@ -122,3 +122,25 @@ writeFileSync(
   join(root, 'Tests/SwiftYrsTests/Fixtures/sync-messages.json'),
   `${JSON.stringify(syncFixture, null, 2)}\n`
 )
+
+const nestedDoc = new Y.Doc()
+nestedDoc.clientID = 7
+const nestedMessages = nestedDoc.getArray('messages')
+const nestedMessage = new Y.Map()
+nestedMessage.set('sender', 'alice')
+nestedMessage.set('body', 'hello')
+const nestedTags = new Y.Array()
+nestedTags.push(['urgent', 'demo'])
+nestedMessage.set('tags', nestedTags)
+nestedMessages.push([nestedMessage])
+
+const nestedFixture = {
+  stateVector: Buffer.from(Y.encodeStateVector(nestedDoc)).toString('base64'),
+  updateV1: Buffer.from(Y.encodeStateAsUpdate(nestedDoc)).toString('base64'),
+  updateV2: Buffer.from(Y.encodeStateAsUpdateV2(nestedDoc)).toString('base64')
+}
+
+writeFileSync(
+  join(root, 'Tests/SwiftYrsTests/Fixtures/nested-container-document.json'),
+  `${JSON.stringify(nestedFixture, null, 2)}\n`
+)

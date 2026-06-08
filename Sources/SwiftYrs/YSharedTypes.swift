@@ -378,6 +378,66 @@ extension YWriteTransaction {
         }
     }
 
+    public func insertMap(into array: YArray, at index: UInt32) throws -> YMap {
+        var output: OpaquePointer?
+        try throwIfNeeded(yrs_bridge_array_insert_map(array.handle, handle, index, &output))
+        guard let output else {
+            throw YError.nullPointer
+        }
+        return YMap(handle: output)
+    }
+
+    public func insertArray(into array: YArray, at index: UInt32) throws -> YArray {
+        var output: OpaquePointer?
+        try throwIfNeeded(yrs_bridge_array_insert_array(array.handle, handle, index, &output))
+        guard let output else {
+            throw YError.nullPointer
+        }
+        return YArray(handle: output)
+    }
+
+    public func setMap(forKey key: String, in map: YMap) throws -> YMap {
+        try key.withCString { keyPointer in
+            var output: OpaquePointer?
+            try throwIfNeeded(yrs_bridge_map_set_map(map.handle, handle, keyPointer, &output))
+            guard let output else {
+                throw YError.nullPointer
+            }
+            return YMap(handle: output)
+        }
+    }
+
+    public func setArray(forKey key: String, in map: YMap) throws -> YArray {
+        try key.withCString { keyPointer in
+            var output: OpaquePointer?
+            try throwIfNeeded(yrs_bridge_map_set_array(map.handle, handle, keyPointer, &output))
+            guard let output else {
+                throw YError.nullPointer
+            }
+            return YArray(handle: output)
+        }
+    }
+
+    public func insertText(into array: YArray, at index: UInt32) throws -> YText {
+        var output: OpaquePointer?
+        try throwIfNeeded(yrs_bridge_array_insert_text(array.handle, handle, index, &output))
+        guard let output else {
+            throw YError.nullPointer
+        }
+        return YText(handle: output)
+    }
+
+    public func setText(forKey key: String, in map: YMap) throws -> YText {
+        try key.withCString { keyPointer in
+            var output: OpaquePointer?
+            try throwIfNeeded(yrs_bridge_map_set_text(map.handle, handle, keyPointer, &output))
+            guard let output else {
+                throw YError.nullPointer
+            }
+            return YText(handle: output)
+        }
+    }
+
     public func remove(from array: YArray, at index: UInt32, length: UInt32) throws {
         try throwIfNeeded(yrs_bridge_array_remove(array.handle, handle, index, length))
     }

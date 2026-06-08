@@ -19,9 +19,9 @@ use yrs::encoding::read::Cursor;
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1, EncoderV2};
 use yrs::{
-    Any, Array, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexedSequence, Map, MapRef, Out,
-    Quotable, ReadTxn, StateVector, StickyIndex, Store, Text, Subscription, TextRef, Transact,
-    Update, UndoManager, WeakRef, Xml,
+    Any, Array, ArrayPrelim, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexedSequence, Map,
+    MapPrelim, MapRef, Out, Quotable, ReadTxn, StateVector, StickyIndex, Store, Text, TextPrelim,
+    Subscription, TextRef, Transact, Update, UndoManager, WeakRef, Xml,
 };
 
 const YRS_BRIDGE_OK: i32 = 0;
@@ -1161,6 +1161,84 @@ pub unsafe extern "C" fn yrs_bridge_map_set(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_set_map(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    out: *mut *mut Branch,
+) -> i32 {
+    ffi_boundary(|| {
+        if map.is_null() || transaction.is_null() || key.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let key = match read_name(key) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let branch = MapRef::from_raw_branch(map)
+            .insert(transaction, key, MapPrelim::default())
+            .into_raw_branch();
+        *out = branch;
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_set_array(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    out: *mut *mut Branch,
+) -> i32 {
+    ffi_boundary(|| {
+        if map.is_null() || transaction.is_null() || key.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let key = match read_name(key) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let branch = MapRef::from_raw_branch(map)
+            .insert(transaction, key, ArrayPrelim::default())
+            .into_raw_branch();
+        *out = branch;
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_set_text(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    out: *mut *mut Branch,
+) -> i32 {
+    ffi_boundary(|| {
+        if map.is_null() || transaction.is_null() || key.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let key = match read_name(key) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let branch = MapRef::from_raw_branch(map)
+            .insert(transaction, key, TextPrelim::new(""))
+            .into_raw_branch();
+        *out = branch;
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_map_get(
     map: *mut Branch,
     transaction: *mut YrsBridgeTransaction,
@@ -1242,6 +1320,72 @@ pub unsafe extern "C" fn yrs_bridge_array_insert(
             return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
         };
         ArrayRef::from_raw_branch(array).insert(transaction, index, input);
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_array_insert_map(
+    array: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    index: u32,
+    out: *mut *mut Branch,
+) -> i32 {
+    ffi_boundary(|| {
+        if array.is_null() || transaction.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let branch = ArrayRef::from_raw_branch(array)
+            .insert(transaction, index, MapPrelim::default())
+            .into_raw_branch();
+        *out = branch;
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_array_insert_array(
+    array: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    index: u32,
+    out: *mut *mut Branch,
+) -> i32 {
+    ffi_boundary(|| {
+        if array.is_null() || transaction.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let branch = ArrayRef::from_raw_branch(array)
+            .insert(transaction, index, ArrayPrelim::default())
+            .into_raw_branch();
+        *out = branch;
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_array_insert_text(
+    array: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    index: u32,
+    out: *mut *mut Branch,
+) -> i32 {
+    ffi_boundary(|| {
+        if array.is_null() || transaction.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let branch = ArrayRef::from_raw_branch(array)
+            .insert(transaction, index, TextPrelim::new(""))
+            .into_raw_branch();
+        *out = branch;
         YRS_BRIDGE_OK
     })
 }
