@@ -303,6 +303,43 @@ let resolved = try doc.read { txn in
 // resolved.index == 7  (shifted by the 2 inserted chars)
 ```
 
+### Terminal chat
+
+`ChatExample` is a runnable command-line chat that demonstrates `SwiftYrsWebRTC`
+end to end. Peers join a WebRTC mesh through a local signaling server and
+collaborate on a single shared `YDoc`. Each line you type appends a message that
+syncs to every connected peer; a newly joining peer syncs the full history and
+shows the last 10 messages, then streams new ones as they arrive. (Apple
+platforms only — the example is gated to the non-Linux build.)
+
+First, start the signaling server (it prints its `ws://` URL on startup and
+listens on a fixed port, `ws://127.0.0.1:4444`):
+
+```sh
+npm install                              # once, to fetch the `ws` dependency
+node Examples/chat-signaling-server.ts
+```
+
+Then run `ChatExample` in two or more terminals, giving each a name:
+
+```sh
+swift run ChatExample --name alice
+swift run ChatExample --name bob
+```
+
+Type a message and press Enter to send it; it appears on every peer's screen.
+Use `/quit` (or Ctrl-C) to leave — both tear down the connection cleanly before
+exiting.
+
+Options (all optional):
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name <string>` | prompt, then `user-<uuid>` | Sender name shown on each message |
+| `--room <string>` | `chat-demo` | Room to join; peers in the same room see each other |
+| `--signaling <url>` | `ws://127.0.0.1:4444` | Signaling server URL; comma-separated and repeatable |
+| `--password <string>` | none | Optional shared-room password (encrypts signaling) |
+
 ---
 
 ## Feature Parity

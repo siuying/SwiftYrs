@@ -454,14 +454,14 @@ public actor WebRTCProvider {
         if documentObservation == nil {
             documentObservation = try doc.observeUpdates { [weak self] event in
                 guard let update = Self.update(from: event) else { return }
-                Task { await self?.broadcastDocumentUpdate(update) }
+                Task { [weak self] in await self?.broadcastDocumentUpdate(update) }
             }
         }
         if awarenessObservation == nil {
             awarenessObservation = try awareness.observeUpdate { [weak self, awareness] event in
                 let clientIDs = Self.awarenessClientIDs(from: event)
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else { return }
-                Task { await self?.broadcastAwarenessUpdate(update) }
+                Task { [weak self] in await self?.broadcastAwarenessUpdate(update) }
             }
         }
     }
