@@ -44,25 +44,26 @@ struct ChatExample {
         print("Signaling: \(config.signaling.map(\.absoluteString).joined(separator: ", "))")
         print("Type a message and press Enter. Use /quit to leave.")
 
-        // Render new entries as the array changes. Local writes and remote
-        // updates both fire this observer, so own messages echo via one path.
-        let renderTask = Task {
-            for await _ in try doc.array(named: "messages").events() {
-                await log.renderNew()
-            }
-        }
+        // Subscribe to the message array before connecting so no change is
+        // missed; the stream buffers events until the task below consumes them.
+        let events = try doc.array(named: "messages").events()
 
         try await provider.connect()
 
-        // Let the initial sync settle, then print the last 10 messages as
-        // history and start streaming new ones. Gating on `synced` keeps a
-        // joining peer's synced backlog out of the live stream so it renders as
-        // one history block; the timeout covers the first peer in a room (which
+        // After the initial sync settles, print the last 10 messages as history,
+        // then stream buffered and live updates. Consuming `events` only after
+        // go-live (rather than gating each render) keeps a joining peer's synced
+        // backlog out of the live stream and closes the lost-update window:
+        // changes during sync/go-live are buffered, then the count-diff render
+        // catches them up. The timeout covers the first peer in a room (which
         // never reaches `synced`) and slow connections. Runs concurrently with
         // input so typing is never blocked while the mesh forms.
-        let goLiveTask = Task {
+        let renderTask = Task {
             await awaitInitialSync(provider, timeout: .seconds(8))
-            await log.showHistoryAndGoLive()
+            await log.showHistory()
+            for await _ in events {
+                await log.renderNew()
+            }
         }
 
         // Destroy cleanly on Ctrl-C: remove awareness, tear down signaling and
@@ -73,7 +74,6 @@ struct ChatExample {
 
         await readInputLoop(into: log, sender: config.name)
 
-        goLiveTask.cancel()
         renderTask.cancel()
         await provider.destroy()
     }

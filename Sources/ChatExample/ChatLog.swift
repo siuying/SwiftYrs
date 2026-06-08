@@ -4,16 +4,18 @@ import SwiftYrs
 /// Owns the shared chat log and renders it to the terminal.
 ///
 /// The chat log is a top-level `YArray("messages")` whose entries are nested
-/// `YMap { sender, body, ts }`. Rendering is append-only: an internal
-/// `lastRenderedCount` tracks how many entries have already been printed, and
-/// `renderNew()` prints only the entries beyond it. Local writes and remote
-/// updates both fire the array observer and flow through the same path, so a
-/// peer's own messages echo without any dedup.
+/// `YMap { sender, body, ts }`. Rendering is append-only: `lastRenderedCount`
+/// tracks how many entries have already been printed, and `renderNew()` prints
+/// only the entries beyond it. Local writes and remote updates both fire the
+/// array observer and flow through the same path, so a peer's own messages echo
+/// without any dedup.
+///
+/// `renderNew()` is only ever called serially (from a single consuming task,
+/// after `showHistory()`), so it needs no reentrancy guard.
 actor ChatLog {
     private let doc: YDoc
     private let messages: YArray
     private var lastRenderedCount: UInt32 = 0
-    private var live = false
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -26,29 +28,28 @@ actor ChatLog {
         self.messages = try doc.array(named: "messages")
     }
 
-    /// Prints the last 10 synced messages as history, then seeds
-    /// `lastRenderedCount` to the full count and enables live rendering. Called
-    /// once after the initial sync settles so history is not re-streamed.
-    func showHistoryAndGoLive() async {
-        let count = await currentCount()
-        let start = count > 10 ? count - 10 : 0
-        if start < count {
-            print("--- last \(count - start) message(s) ---")
-            let lines = await readMessages(start..<count)
+    /// Prints the last 10 messages currently in the log as a history block and
+    /// seeds `lastRenderedCount` to the full count. Call once, after the initial
+    /// sync settles and before streaming live updates, so a joining peer's
+    /// synced backlog renders as one block instead of a flood.
+    func showHistory() async {
+        guard let (count, lines) = await readNew(from: 0, tail: 10) else { return }
+        if !lines.isEmpty {
+            print("--- last \(lines.count) message(s) ---")
             for line in lines { print(line) }
             print("--- end of history ---")
         }
         lastRenderedCount = count
-        live = true
     }
 
-    /// Prints any entries appended since the last render. No-op until
-    /// `showHistoryAndGoLive()` has run.
+    /// Prints entries appended since the last render. Advances only on a
+    /// successful read, so a transient failure is retried by the next event
+    /// rather than silently skipping messages.
     func renderNew() async {
-        guard live else { return }
-        let count = await currentCount()
-        guard count > lastRenderedCount else { return }
-        let lines = await readMessages(lastRenderedCount..<count)
+        let start = lastRenderedCount
+        guard let (count, lines) = await readNew(from: start, tail: nil), count > start else {
+            return
+        }
         for line in lines { print(line) }
         lastRenderedCount = count
     }
@@ -65,30 +66,35 @@ actor ChatLog {
         }
     }
 
-    /// Reads and formats the messages at `range` in a single read transaction.
+    /// Reads the current count and formats the new entries in a single
+    /// transaction, returning `(count, lines)`. With `tail`, only the last
+    /// `tail` entries are formatted (for history); otherwise every entry from
+    /// `from` onward is.
     ///
-    /// The array observer fires *during* the apply transaction of a remote
-    /// update, so a read started then throws (yrs permits one transaction at a
-    /// time). The write commits within milliseconds, so we retry briefly rather
-    /// than drop the update — without this, a peer silently loses messages whose
-    /// observer event has no later follow-up.
-    private func readMessages(_ range: Range<UInt32>) async -> [String] {
+    /// Returns `nil` only if the read never succeeds: the array observer fires
+    /// *during* the apply transaction of a remote update, so a read started then
+    /// throws (yrs permits one transaction at a time). The write commits within
+    /// milliseconds, so we retry briefly rather than drop the update.
+    private func readNew(from start: UInt32, tail: UInt32?) async -> (count: UInt32, lines: [String])? {
         await retryingRead { txn in
-            try range.compactMap { index in
-                guard case let .map(entry) = try txn.get(index, from: self.messages) else {
-                    return nil
-                }
-                let sender = Self.string(try txn.get("sender", from: entry))
-                let body = Self.string(try txn.get("body", from: entry))
-                let ts = Self.int(try txn.get("ts", from: entry))
-                let time = Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
-                return "[\(time)] \(sender): \(body)"
-            }
-        } ?? []
+            let count = try txn.count(of: self.messages)
+            let lower = tail.map { count > $0 ? count - $0 : 0 } ?? start
+            guard count > lower else { return (count, []) }
+            return (count, try self.format(lower..<count, in: txn))
+        }
     }
 
-    private func currentCount() async -> UInt32 {
-        await retryingRead { try $0.count(of: self.messages) } ?? lastRenderedCount
+    private func format(_ range: Range<UInt32>, in txn: YReadTransaction) throws -> [String] {
+        try range.compactMap { index in
+            guard case let .map(entry) = try txn.get(index, from: messages) else {
+                return nil
+            }
+            let sender = Self.string(try txn.get("sender", from: entry))
+            let body = Self.string(try txn.get("body", from: entry))
+            let ts = Self.int(try txn.get("ts", from: entry))
+            let time = Self.timeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+            return "[\(time)] \(sender): \(body)"
+        }
     }
 
     /// Runs `body` in a read transaction, retrying briefly while a concurrent
