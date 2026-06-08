@@ -66,6 +66,10 @@ let webRTCTargets: [Target] = [
             "webrtc-peer.ts",
         ]
     ),
+    .executableTarget(
+        name: "ChatExample",
+        dependencies: ["SwiftYrsWebRTC"]
+    ),
 ]
 
 let packageDependencies: [Package.Dependency] = [

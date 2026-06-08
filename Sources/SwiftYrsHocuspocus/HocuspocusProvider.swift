@@ -231,7 +231,7 @@ public actor HocuspocusProvider {
                 guard let update = Self.update(from: event) else {
                     return
                 }
-                Task {
+                Task { [weak self] in
                     await self?.sendLocalUpdate(update)
                 }
             }
@@ -245,7 +245,7 @@ public actor HocuspocusProvider {
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }
-                Task {
+                Task { [weak self] in
                     await self?.sendAwareness(update)
                 }
             }
