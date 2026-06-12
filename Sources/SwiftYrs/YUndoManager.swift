@@ -33,24 +33,8 @@ public final class YUndoManager {
         }
     }
 
-    public func addScope(_ text: YText) throws {
-        try addScope(text.handle)
-    }
-
-    public func addScope(_ map: YMap) throws {
-        try addScope(map.handle)
-    }
-
-    public func addScope(_ array: YArray) throws {
-        try addScope(array.handle)
-    }
-
-    public func addScope(_ xml: YXmlFragment) throws {
-        try addScope(xml.handle)
-    }
-
-    public func addScope(_ xml: YXmlElement) throws {
-        try addScope(xml.handle)
+    public func addScope(_ scope: YSharedType) throws {
+        try throwIfNeeded(yrs_bridge_undo_manager_add_scope(handle, document.handle, scope.handle))
     }
 
     public func includeOrigin(_ origin: String) {
@@ -95,9 +79,5 @@ public final class YUndoManager {
         try makeObservation(callback) { context, callback in
             yrs_bridge_undo_manager_observe_item_popped(handle, context, callback)
         }
-    }
-
-    private func addScope(_ branch: OpaquePointer) throws {
-        try throwIfNeeded(yrs_bridge_undo_manager_add_scope(handle, document.handle, branch))
     }
 }

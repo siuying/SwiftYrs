@@ -19,39 +19,6 @@ public enum YValue: Equatable {
     case xmlElement(YXmlElement)
     case xmlText(YXmlText)
     case weakLink
-
-    public static func == (lhs: YValue, rhs: YValue) -> Bool {
-        switch (lhs, rhs) {
-        case (.undefined, .undefined), (.null, .null), (.weakLink, .weakLink):
-            true
-        case let (.bool(lhs), .bool(rhs)):
-            lhs == rhs
-        case let (.int(lhs), .int(rhs)):
-            lhs == rhs
-        case let (.double(lhs), .double(rhs)):
-            lhs == rhs
-        case let (.string(lhs), .string(rhs)):
-            lhs == rhs
-        case let (.binary(lhs), .binary(rhs)):
-            lhs == rhs
-        case let (.text(lhs), .text(rhs)):
-            lhs == rhs
-        case let (.map(lhs), .map(rhs)):
-            lhs == rhs
-        case let (.array(lhs), .array(rhs)):
-            lhs == rhs
-        case let (.document(lhs), .document(rhs)):
-            lhs === rhs
-        case let (.xmlFragment(lhs), .xmlFragment(rhs)):
-            lhs == rhs
-        case let (.xmlElement(lhs), .xmlElement(rhs)):
-            lhs == rhs
-        case let (.xmlText(lhs), .xmlText(rhs)):
-            lhs == rhs
-        default:
-            false
-        }
-    }
 }
 
 public enum YTextDeltaOperation: Equatable {
@@ -80,75 +47,79 @@ public struct YSubdoc: Equatable {
     public let guid: String
 }
 
-public struct YText: Equatable {
-    let handle: OpaquePointer
+/// The base of every shared CRDT type: a live branch in a document, exposed as
+/// a reference type per ADR-0002 (copying the Swift object must not suggest
+/// copying CRDT content). Equality is branch identity. The branch handle is
+/// borrowed from the document and is valid for the document's lifetime
+/// (ADR-0015).
+public class YSharedType: Equatable {
+    typealias BridgeObserve = (OpaquePointer, UnsafeMutableRawPointer?, YrsBridgeEventCallback) -> OpaquePointer?
 
-    init(handle: OpaquePointer) {
+    let handle: OpaquePointer
+    private let bridgeObserve: BridgeObserve
+
+    init(handle: OpaquePointer, observe: @escaping BridgeObserve) {
         self.handle = handle
+        self.bridgeObserve = observe
     }
 
-    public static func == (lhs: YText, rhs: YText) -> Bool {
+    public static func == (lhs: YSharedType, rhs: YSharedType) -> Bool {
         lhs.handle == rhs.handle
+    }
+
+    /// Observes changes to this shared type. The returned token cancels the
+    /// observation when cancelled or deallocated.
+    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
+        try makeObservation(callback) { context, eventCallback in
+            bridgeObserve(handle, context, eventCallback)
+        }
+    }
+
+    /// An `AsyncStream` of this shared type's change events; the observation is
+    /// cancelled when the stream terminates.
+    public func events() throws -> AsyncStream<YObservationEvent> {
+        try makeEventStream(observe: observe)
     }
 }
 
-public struct YMap: Equatable {
-    let handle: OpaquePointer
-
+public final class YText: YSharedType {
     init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public static func == (lhs: YMap, rhs: YMap) -> Bool {
-        lhs.handle == rhs.handle
+        super.init(handle: handle, observe: yrs_bridge_text_observe)
     }
 }
 
-public struct YArray: Equatable {
-    let handle: OpaquePointer
-
+public final class YMap: YSharedType {
     init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public static func == (lhs: YArray, rhs: YArray) -> Bool {
-        lhs.handle == rhs.handle
+        super.init(handle: handle, observe: yrs_bridge_map_observe)
     }
 }
 
-public struct YXmlFragment: Equatable {
-    let handle: OpaquePointer
-
+public final class YArray: YSharedType {
     init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public static func == (lhs: YXmlFragment, rhs: YXmlFragment) -> Bool {
-        lhs.handle == rhs.handle
+        super.init(handle: handle, observe: yrs_bridge_array_observe)
     }
 }
 
-public struct YXmlElement: Equatable {
-    let handle: OpaquePointer
+/// An XML node that can hold children: the common API of `YXmlFragment` and
+/// `YXmlElement` (child access, child insertion, removal) is defined against
+/// this class.
+public class YXmlContainer: YSharedType {}
 
+public final class YXmlFragment: YXmlContainer {
     init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public static func == (lhs: YXmlElement, rhs: YXmlElement) -> Bool {
-        lhs.handle == rhs.handle
+        super.init(handle: handle, observe: yrs_bridge_xml_observe)
     }
 }
 
-public struct YXmlText: Equatable {
-    let handle: OpaquePointer
-
+public final class YXmlElement: YXmlContainer {
     init(handle: OpaquePointer) {
-        self.handle = handle
+        super.init(handle: handle, observe: yrs_bridge_xml_observe)
     }
+}
 
-    public static func == (lhs: YXmlText, rhs: YXmlText) -> Bool {
-        lhs.handle == rhs.handle
+public final class YXmlText: YSharedType {
+    init(handle: OpaquePointer) {
+        super.init(handle: handle, observe: yrs_bridge_xml_text_observe)
     }
 }
 
@@ -229,28 +200,37 @@ extension YReadTransaction {
         return object as? [Any] ?? []
     }
 
-    public func childCount(of xml: YXmlFragment) throws -> UInt32 {
-        try xmlChildCount(xml.handle, transaction: handle)
+    public func childCount(of xml: YXmlContainer) throws -> UInt32 {
+        var result: UInt32 = 0
+        try throwIfNeeded(yrs_bridge_xml_len(xml.handle, handle, &result))
+        return result
     }
 
-    public func childCount(of xml: YXmlElement) throws -> UInt32 {
-        try xmlChildCount(xml.handle, transaction: handle)
+    public func string(from xml: YXmlContainer) throws -> String {
+        var buffer = YrsBridgeBuffer(data: nil, len: 0)
+        try throwIfNeeded(yrs_bridge_xml_string(xml.handle, handle, &buffer))
+        defer {
+            yrs_bridge_buffer_destroy(buffer)
+        }
+        return String(data: data(from: buffer), encoding: .utf8) ?? ""
     }
 
-    public func string(from xml: YXmlFragment) throws -> String {
-        try xmlString(xml.handle, transaction: handle)
-    }
-
-    public func string(from xml: YXmlElement) throws -> String {
-        try xmlString(xml.handle, transaction: handle)
-    }
-
-    public func child(at index: UInt32, in xml: YXmlFragment) throws -> YXmlNode {
-        try xmlChild(at: index, in: xml.handle, transaction: handle)
-    }
-
-    public func child(at index: UInt32, in xml: YXmlElement) throws -> YXmlNode {
-        try xmlChild(at: index, in: xml.handle, transaction: handle)
+    public func child(at index: UInt32, in xml: YXmlContainer) throws -> YXmlNode {
+        var value = YrsBridgeValue()
+        try throwIfNeeded(yrs_bridge_xml_get(xml.handle, handle, index, &value))
+        defer {
+            yrs_bridge_value_destroy(value)
+        }
+        switch nativeValue(value) {
+        case let .xmlFragment(value):
+            return .fragment(value)
+        case let .xmlElement(value):
+            return .element(value)
+        case let .xmlText(value):
+            return .text(value)
+        default:
+            throw YError.typeMismatch
+        }
     }
 
     public func tag(of element: YXmlElement) throws -> String {
@@ -442,27 +422,27 @@ extension YWriteTransaction {
         try throwIfNeeded(yrs_bridge_array_remove(array.handle, handle, index, length))
     }
 
-    public func insertElement(named name: String, into xml: YXmlFragment, at index: UInt32) throws -> YXmlElement {
-        try insertXmlElement(named: name, into: xml.handle, at: index, transaction: handle)
+    public func insertElement(named name: String, into xml: YXmlContainer, at index: UInt32) throws -> YXmlElement {
+        try name.withCString { pointer in
+            var output: OpaquePointer?
+            try throwIfNeeded(yrs_bridge_xml_insert_element(xml.handle, handle, index, pointer, &output))
+            guard let output else {
+                throw YError.nullPointer
+            }
+            return YXmlElement(handle: output)
+        }
     }
 
-    public func insertElement(named name: String, into xml: YXmlElement, at index: UInt32) throws -> YXmlElement {
-        try insertXmlElement(named: name, into: xml.handle, at: index, transaction: handle)
+    public func insertText(into xml: YXmlContainer, at index: UInt32) throws -> YXmlText {
+        var output: OpaquePointer?
+        try throwIfNeeded(yrs_bridge_xml_insert_text(xml.handle, handle, index, &output))
+        guard let output else {
+            throw YError.nullPointer
+        }
+        return YXmlText(handle: output)
     }
 
-    public func insertText(into xml: YXmlFragment, at index: UInt32) throws -> YXmlText {
-        try insertXmlText(into: xml.handle, at: index, transaction: handle)
-    }
-
-    public func insertText(into xml: YXmlElement, at index: UInt32) throws -> YXmlText {
-        try insertXmlText(into: xml.handle, at: index, transaction: handle)
-    }
-
-    public func remove(from xml: YXmlFragment, at index: UInt32, length: UInt32) throws {
-        try throwIfNeeded(yrs_bridge_xml_remove(xml.handle, handle, index, length))
-    }
-
-    public func remove(from xml: YXmlElement, at index: UInt32, length: UInt32) throws {
+    public func remove(from xml: YXmlContainer, at index: UInt32, length: UInt32) throws {
         try throwIfNeeded(yrs_bridge_xml_remove(xml.handle, handle, index, length))
     }
 
@@ -514,64 +494,6 @@ extension YWriteTransaction {
             try throwIfNeeded(yrs_bridge_map_clear_subdoc(map.handle, handle, keyPointer))
         }
     }
-}
-
-private func xmlChildCount(_ xml: OpaquePointer, transaction: OpaquePointer) throws -> UInt32 {
-    var result: UInt32 = 0
-    try throwIfNeeded(yrs_bridge_xml_len(xml, transaction, &result))
-    return result
-}
-
-private func xmlString(_ xml: OpaquePointer, transaction: OpaquePointer) throws -> String {
-    var buffer = YrsBridgeBuffer(data: nil, len: 0)
-    try throwIfNeeded(yrs_bridge_xml_string(xml, transaction, &buffer))
-    defer {
-        yrs_bridge_buffer_destroy(buffer)
-    }
-    return String(data: data(from: buffer), encoding: .utf8) ?? ""
-}
-
-private func xmlChild(at index: UInt32, in xml: OpaquePointer, transaction: OpaquePointer) throws -> YXmlNode {
-    var value = YrsBridgeValue()
-    try throwIfNeeded(yrs_bridge_xml_get(xml, transaction, index, &value))
-    defer {
-        yrs_bridge_value_destroy(value)
-    }
-    switch nativeValue(value) {
-    case let .xmlFragment(value):
-        return .fragment(value)
-    case let .xmlElement(value):
-        return .element(value)
-    case let .xmlText(value):
-        return .text(value)
-    default:
-        throw YError.typeMismatch
-    }
-}
-
-private func insertXmlElement(
-    named name: String,
-    into xml: OpaquePointer,
-    at index: UInt32,
-    transaction: OpaquePointer
-) throws -> YXmlElement {
-    try name.withCString { pointer in
-        var output: OpaquePointer?
-        try throwIfNeeded(yrs_bridge_xml_insert_element(xml, transaction, index, pointer, &output))
-        guard let output else {
-            throw YError.nullPointer
-        }
-        return YXmlElement(handle: output)
-    }
-}
-
-private func insertXmlText(into xml: OpaquePointer, at index: UInt32, transaction: OpaquePointer) throws -> YXmlText {
-    var output: OpaquePointer?
-    try throwIfNeeded(yrs_bridge_xml_insert_text(xml, transaction, index, &output))
-    guard let output else {
-        throw YError.nullPointer
-    }
-    return YXmlText(handle: output)
 }
 
 private func xmlAttribute(_ key: String, from xml: OpaquePointer, transaction: OpaquePointer) throws -> YValue {
@@ -734,62 +656,80 @@ func nativeValue(fromJSONObject object: Any?) -> YValue {
     }
 }
 
+/// The `tag` discriminant of `YrsBridgeValue`, mirroring the Rust shim's value
+/// encoding. Must stay in sync with `yrs-bridge`.
+private enum BridgeValueTag: Int32 {
+    case undefined = 0
+    case null = 1
+    case bool = 2
+    case int = 3
+    case double = 4
+    case string = 5
+    case binary = 6
+    case text = 7
+    case map = 8
+    case array = 9
+    case document = 10
+    case xmlFragment = 11
+    case weakLink = 12
+    case xmlElement = 13
+    case xmlText = 14
+}
+
 func nativeValue(_ value: YrsBridgeValue) -> YValue {
-    switch value.tag {
-    case 1:
+    switch BridgeValueTag(rawValue: value.tag) {
+    case .null:
         return .null
-    case 2:
+    case .bool:
         return .bool(value.bool_value)
-    case 3:
+    case .int:
         return .int(value.int_value)
-    case 4:
+    case .double:
         return .double(value.double_value)
-    case 5:
+    case .string:
         guard let bytes = value.bytes else {
             return .undefined
         }
         let data = Data(bytes: bytes, count: Int(value.len))
         return .string(String(data: data, encoding: .utf8) ?? "")
-    case 6:
+    case .binary:
         guard let bytes = value.bytes else {
             return .undefined
         }
         return .binary(Data(bytes: bytes, count: Int(value.len)))
-    case 7:
+    case .text:
         guard let branch = value.branch else {
             return .undefined
         }
         return .text(YText(handle: branch))
-    case 8:
+    case .map:
         guard let branch = value.branch else {
             return .undefined
         }
         return .map(YMap(handle: branch))
-    case 9:
+    case .array:
         guard let branch = value.branch else {
             return .undefined
         }
         return .array(YArray(handle: branch))
-    case 10:
-        return .undefined
-    case 11:
+    case .xmlFragment:
         guard let branch = value.branch else {
             return .undefined
         }
         return .xmlFragment(YXmlFragment(handle: branch))
-    case 12:
+    case .weakLink:
         return .weakLink
-    case 13:
+    case .xmlElement:
         guard let branch = value.branch else {
             return .undefined
         }
         return .xmlElement(YXmlElement(handle: branch))
-    case 14:
+    case .xmlText:
         guard let branch = value.branch else {
             return .undefined
         }
         return .xmlText(YXmlText(handle: branch))
-    default:
+    case .undefined, .document, .none:
         return .undefined
     }
 }
@@ -797,47 +737,47 @@ func nativeValue(_ value: YrsBridgeValue) -> YValue {
 private func withNativeValue<T>(_ value: YValue, _ body: (YrsBridgeValue) throws -> T) throws -> T {
     switch value {
     case .undefined:
-        return try body(YrsBridgeValue(tag: 0))
+        return try body(YrsBridgeValue(tag: .undefined))
     case .null:
-        return try body(YrsBridgeValue(tag: 1))
+        return try body(YrsBridgeValue(tag: .null))
     case let .bool(value):
-        return try body(YrsBridgeValue(tag: 2, bool_value: value))
+        return try body(YrsBridgeValue(tag: .bool, bool_value: value))
     case let .int(value):
-        return try body(YrsBridgeValue(tag: 3, int_value: value))
+        return try body(YrsBridgeValue(tag: .int, int_value: value))
     case let .double(value):
-        return try body(YrsBridgeValue(tag: 4, double_value: value))
+        return try body(YrsBridgeValue(tag: .double, double_value: value))
     case let .string(value):
         return try value.withCString { pointer in
             let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
-            return try body(YrsBridgeValue(tag: 5, bytes: UnsafeMutablePointer(mutating: bytes), len: UInt(value.utf8.count)))
+            return try body(YrsBridgeValue(tag: .string, bytes: UnsafeMutablePointer(mutating: bytes), len: UInt(value.utf8.count)))
         }
     case let .binary(value):
         return try value.withUnsafeBytes { bytes in
             let pointer = bytes.bindMemory(to: UInt8.self).baseAddress
-            return try body(YrsBridgeValue(tag: 6, bytes: UnsafeMutablePointer(mutating: pointer), len: UInt(bytes.count)))
+            return try body(YrsBridgeValue(tag: .binary, bytes: UnsafeMutablePointer(mutating: pointer), len: UInt(bytes.count)))
         }
     case let .text(value):
-        return try body(YrsBridgeValue(tag: 7, branch: value.handle))
+        return try body(YrsBridgeValue(tag: .text, branch: value.handle))
     case let .map(value):
-        return try body(YrsBridgeValue(tag: 8, branch: value.handle))
+        return try body(YrsBridgeValue(tag: .map, branch: value.handle))
     case let .array(value):
-        return try body(YrsBridgeValue(tag: 9, branch: value.handle))
+        return try body(YrsBridgeValue(tag: .array, branch: value.handle))
     case .document:
         throw YError.typeMismatch
     case let .xmlFragment(value):
-        return try body(YrsBridgeValue(tag: 11, branch: value.handle))
+        return try body(YrsBridgeValue(tag: .xmlFragment, branch: value.handle))
     case let .xmlElement(value):
-        return try body(YrsBridgeValue(tag: 13, branch: value.handle))
+        return try body(YrsBridgeValue(tag: .xmlElement, branch: value.handle))
     case let .xmlText(value):
-        return try body(YrsBridgeValue(tag: 14, branch: value.handle))
+        return try body(YrsBridgeValue(tag: .xmlText, branch: value.handle))
     case .weakLink:
-        return try body(YrsBridgeValue(tag: 12))
+        return try body(YrsBridgeValue(tag: .weakLink))
     }
 }
 
 private extension YrsBridgeValue {
     init(
-        tag: Int32 = 0,
+        tag: BridgeValueTag,
         bool_value: Bool = false,
         int_value: Int64 = 0,
         double_value: Double = 0,
@@ -846,7 +786,7 @@ private extension YrsBridgeValue {
         branch: OpaquePointer? = nil
     ) {
         self.init()
-        self.tag = tag
+        self.tag = tag.rawValue
         self.bool_value = bool_value
         self.int_value = int_value
         self.double_value = double_value

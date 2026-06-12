@@ -1,15 +1,9 @@
 import Foundation
 import YrsBridgeFFI
 
-public struct YWeakLink: Equatable {
-    let handle: OpaquePointer
-
+public final class YWeakLink: YSharedType {
     init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public static func == (lhs: YWeakLink, rhs: YWeakLink) -> Bool {
-        lhs.handle == rhs.handle
+        super.init(handle: handle, observe: yrs_bridge_weak_observe)
     }
 }
 
@@ -207,17 +201,5 @@ extension YWriteTransaction {
         }
 
         return YRelativePosition(data: SwiftYrs.data(from: dataBuffer), json: SwiftYrs.data(from: jsonBuffer))
-    }
-}
-
-extension YWeakLink {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_weak_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
     }
 }

@@ -70,8 +70,12 @@ func data(from buffer: YrsBridgeBuffer) -> Data {
     return Data(bytes: pointer, count: Int(buffer.len))
 }
 
-public final class YDoc {
+public final class YDoc: Equatable {
     let handle: OpaquePointer
+
+    public static func == (lhs: YDoc, rhs: YDoc) -> Bool {
+        lhs === rhs
+    }
 
     public init() {
         guard let handle = yrs_bridge_doc_new() else {
