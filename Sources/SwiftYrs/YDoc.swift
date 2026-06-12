@@ -190,7 +190,7 @@ public final class YDoc {
     }
 }
 
-public final class YReadTransaction {
+public class YReadTransaction {
     let handle: OpaquePointer
 
     init(handle: OpaquePointer) {
@@ -239,21 +239,9 @@ public final class YReadTransaction {
     }
 }
 
-public final class YWriteTransaction {
-    let handle: OpaquePointer
-
-    init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public var isWritable: Bool {
-        get throws {
-            var result = false
-            try throwIfNeeded(yrs_bridge_transaction_is_writable(handle, &result))
-            return result
-        }
-    }
-
+/// A write transaction is also a read transaction: every read accessor on
+/// `YReadTransaction` is available here through inheritance.
+public final class YWriteTransaction: YReadTransaction {
     public func apply(_ update: YUpdate) throws {
         try update.data.withUnsafeBytes { bytes in
             guard let baseAddress = bytes.bindMemory(to: UInt8.self).baseAddress else {
