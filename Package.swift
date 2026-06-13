@@ -136,7 +136,8 @@ let package = Package(
             dependencies: [
                 "SwiftYrsCloudKit",
                 .product(name: "SQLite", package: "SQLite.swift"),
-            ]
+            ],
+            resources: [.process("Fixtures")]
         ),
         .testTarget(
             name: "SwiftYrsSQLiteTests",
