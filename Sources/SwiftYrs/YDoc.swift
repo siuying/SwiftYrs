@@ -151,6 +151,12 @@ public final class YDoc: Equatable {
         }
     }
 
+    public func clientClock(clientID: UInt64) throws -> UInt32 {
+        try read { transaction in
+            try transaction.clientClock(clientID: clientID)
+        }
+    }
+
     public func encodeStateAsUpdateV1(from stateVector: YStateVector? = nil) throws -> YUpdate {
         try read { transaction in
             try transaction.encodeStateAsUpdateV1(from: stateVector)
@@ -160,6 +166,18 @@ public final class YDoc: Equatable {
     public func encodeStateAsUpdateV2(from stateVector: YStateVector? = nil) throws -> YUpdate {
         try read { transaction in
             try transaction.encodeStateAsUpdateV2(from: stateVector)
+        }
+    }
+
+    public func encodeClientStateAsUpdateV1(clientID: UInt64, fromClock: UInt32) throws -> YUpdate {
+        try read { transaction in
+            try transaction.encodeClientStateAsUpdateV1(clientID: clientID, fromClock: fromClock)
+        }
+    }
+
+    public func encodeClientStateAsUpdateV2(clientID: UInt64, fromClock: UInt32) throws -> YUpdate {
+        try read { transaction in
+            try transaction.encodeClientStateAsUpdateV2(clientID: clientID, fromClock: fromClock)
         }
     }
 
@@ -223,6 +241,12 @@ public class YReadTransaction {
         try YStateVector(readingBuffer { yrs_bridge_transaction_state_vector_v1(handle, &$0) })
     }
 
+    public func clientClock(clientID: UInt64) throws -> UInt32 {
+        try readingScalar(UInt32(0)) {
+            yrs_bridge_transaction_client_clock(handle, clientID, &$0)
+        }
+    }
+
     public func encodeStateAsUpdateV1(from stateVector: YStateVector? = nil) throws -> YUpdate {
         let updateData = try withOptionalBytes(stateVector?.data) { pointer, count in
             try readingBuffer { yrs_bridge_transaction_state_diff_v1(handle, pointer, UInt(count), &$0) }
@@ -233,6 +257,20 @@ public class YReadTransaction {
     public func encodeStateAsUpdateV2(from stateVector: YStateVector? = nil) throws -> YUpdate {
         let updateData = try withOptionalBytes(stateVector?.data) { pointer, count in
             try readingBuffer { yrs_bridge_transaction_state_diff_v2(handle, pointer, UInt(count), &$0) }
+        }
+        return .v2(updateData)
+    }
+
+    public func encodeClientStateAsUpdateV1(clientID: UInt64, fromClock: UInt32) throws -> YUpdate {
+        let updateData = try readingBuffer {
+            yrs_bridge_transaction_client_state_diff_v1(handle, clientID, fromClock, &$0)
+        }
+        return .v1(updateData)
+    }
+
+    public func encodeClientStateAsUpdateV2(clientID: UInt64, fromClock: UInt32) throws -> YUpdate {
+        let updateData = try readingBuffer {
+            yrs_bridge_transaction_client_state_diff_v2(handle, clientID, fromClock, &$0)
         }
         return .v2(updateData)
     }

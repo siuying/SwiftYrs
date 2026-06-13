@@ -67,6 +67,61 @@ func stateVectorCanGenerateNoopDiffsForAnotherDocument() throws {
 }
 
 @Test
+func clientDiffIncludesOnlyTheRequestedClientInsertionsSinceClock() throws {
+    let clientOne = YDoc(clientID: 1)
+    let clientOneText = try clientOne.text(named: "body")
+    try clientOne.write { transaction in
+        try transaction.insert("one", into: clientOneText, at: 0)
+    }
+
+    let clientTwo = YDoc(clientID: 2)
+    let clientTwoText = try clientTwo.text(named: "body")
+    try clientTwo.write { transaction in
+        try transaction.insert("two", into: clientTwoText, at: 0)
+    }
+
+    let merged = YDoc()
+    try merged.apply(try clientOne.encodeStateAsUpdateV1())
+    try merged.apply(try clientTwo.encodeStateAsUpdateV1())
+
+    let clientOneDiff = try merged.encodeClientStateAsUpdateV1(clientID: 1, fromClock: 0)
+
+    let destination = YDoc()
+    let destinationText = try destination.text(named: "body")
+    try destination.apply(clientOneDiff)
+
+    try destination.read { transaction in
+        try #expect(transaction.string(from: destinationText) == "one")
+    }
+}
+
+@Test
+func clientDiffStartsAtTheRequestedClientClock() throws {
+    let doc = YDoc(clientID: 7)
+    let text = try doc.text(named: "body")
+
+    try doc.write { transaction in
+        try transaction.insert("old", into: text, at: 0)
+    }
+    let marker = try doc.clientClock(clientID: 7)
+    let initialUpdate = try doc.encodeStateAsUpdateV1()
+
+    try doc.write { transaction in
+        try transaction.insert("new", into: text, at: 3)
+    }
+
+    let diff = try doc.encodeClientStateAsUpdateV1(clientID: 7, fromClock: marker)
+    let destination = YDoc()
+    let destinationText = try destination.text(named: "body")
+    try destination.apply(initialUpdate)
+    try destination.apply(diff)
+
+    try destination.read { transaction in
+        try #expect(transaction.string(from: destinationText) == "oldnew")
+    }
+}
+
+@Test
 func invalidUpdatesThrowDecodeFailure() throws {
     let doc = YDoc()
 
