@@ -20,3 +20,31 @@ func readingBuffer(_ fill: (inout YrsBridgeBuffer) -> Int32) throws -> Data {
     }
     return data(from: buffer)
 }
+
+/// Runs a shim call that fills an **Owned Handle** out-parameter, then wraps the
+/// non-null result with `make`.
+///
+/// This owns the "out-parameter → status check → null guard → construct" dance
+/// once, including the null-handle → `YError.nullPointer` mapping (ADR-0008), so
+/// branch-returning accessors stop re-typing it. `fill` does nothing but invoke
+/// the shim call with the supplied out-parameter.
+func makeBranch<T>(
+    _ make: (OpaquePointer) -> T,
+    _ fill: (inout OpaquePointer?) -> Int32
+) throws -> T {
+    var output: OpaquePointer?
+    try throwIfNeeded(fill(&output))
+    guard let output else {
+        throw YError.nullPointer
+    }
+    return make(output)
+}
+
+/// Runs a shim call that fills a scalar out-parameter (e.g. a length or a
+/// boolean), then returns it. Owns the zero-initialise / status-check pair so
+/// scalar accessors stop re-typing it.
+func readingScalar<T>(_ initial: T, _ fill: (inout T) -> Int32) throws -> T {
+    var output = initial
+    try throwIfNeeded(fill(&output))
+    return output
+}

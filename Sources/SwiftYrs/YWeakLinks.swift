@@ -45,12 +45,7 @@ public struct YRelativePosition: Equatable, Sendable {
 extension YReadTransaction {
     public func weakLink(forKey key: String, in map: YMap) throws -> YWeakLink {
         try key.withCString { keyPointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_map_get_weak_link(map.handle, handle, keyPointer, &output))
-            guard let output else {
-                throw YError.nullPointer
-            }
-            return YWeakLink(handle: output)
+            try makeBranch(YWeakLink.init) { yrs_bridge_map_get_weak_link(map.handle, handle, keyPointer, &$0) }
         }
     }
 
@@ -76,13 +71,13 @@ extension YReadTransaction {
     }
 
     public func offset(of position: YRelativePosition, in _: YText) throws -> UInt32 {
-        try position.json.withUnsafeBytes { bytes in
+        try position.json.withUnsafeBytes { bytes -> UInt32 in
             guard let pointer = bytes.bindMemory(to: UInt8.self).baseAddress else {
                 throw YError.nullPointer
             }
-            var output: UInt32 = 0
-            try throwIfNeeded(yrs_bridge_relative_position_offset(pointer, UInt(bytes.count), handle, &output))
-            return output
+            return try readingScalar(UInt32(0)) {
+                yrs_bridge_relative_position_offset(pointer, UInt(bytes.count), handle, &$0)
+            }
         }
     }
 }
@@ -96,19 +91,16 @@ extension YWriteTransaction {
     ) throws -> YWeakLink {
         try sourceKey.withCString { sourcePointer in
             try targetKey.withCString { targetPointer in
-                var output: OpaquePointer?
-                try throwIfNeeded(yrs_bridge_map_set_weak_link(
-                    sourceMap.handle,
-                    handle,
-                    sourcePointer,
-                    targetMap.handle,
-                    targetPointer,
-                    &output
-                ))
-                guard let output else {
-                    throw YError.nullPointer
+                try makeBranch(YWeakLink.init) {
+                    yrs_bridge_map_set_weak_link(
+                        sourceMap.handle,
+                        handle,
+                        sourcePointer,
+                        targetMap.handle,
+                        targetPointer,
+                        &$0
+                    )
                 }
-                return YWeakLink(handle: output)
             }
         }
     }
@@ -123,22 +115,19 @@ extension YWriteTransaction {
         in map: YMap
     ) throws -> YWeakLink {
         try key.withCString { keyPointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_text_set_quote(
-                text.handle,
-                handle,
-                start,
-                end,
-                startInclusive,
-                endInclusive,
-                map.handle,
-                keyPointer,
-                &output
-            ))
-            guard let output else {
-                throw YError.nullPointer
+            try makeBranch(YWeakLink.init) {
+                yrs_bridge_text_set_quote(
+                    text.handle,
+                    handle,
+                    start,
+                    end,
+                    startInclusive,
+                    endInclusive,
+                    map.handle,
+                    keyPointer,
+                    &$0
+                )
             }
-            return YWeakLink(handle: output)
         }
     }
 
@@ -152,22 +141,19 @@ extension YWriteTransaction {
         in map: YMap
     ) throws -> YWeakLink {
         try key.withCString { keyPointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_array_set_quote(
-                array.handle,
-                handle,
-                start,
-                end,
-                startInclusive,
-                endInclusive,
-                map.handle,
-                keyPointer,
-                &output
-            ))
-            guard let output else {
-                throw YError.nullPointer
+            try makeBranch(YWeakLink.init) {
+                yrs_bridge_array_set_quote(
+                    array.handle,
+                    handle,
+                    start,
+                    end,
+                    startInclusive,
+                    endInclusive,
+                    map.handle,
+                    keyPointer,
+                    &$0
+                )
             }
-            return YWeakLink(handle: output)
         }
     }
 
