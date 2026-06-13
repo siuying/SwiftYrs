@@ -9,10 +9,26 @@ public struct CloudKitProviderOptions: Sendable {
     public let debounce: Duration
     /// Attempts to capture a diff before giving up on `transactionConflict`.
     public let maxTransactionRetries: Int
+    /// Compaction/GC decisions (ADR-0023/0024).
+    public let compaction: CompactionPolicy
+    /// Per-attempt jitter in `0...1`, used to stagger the multi-device
+    /// compaction herd. Defaults to a fresh random value each attempt.
+    public let jitter: @Sendable () -> Double
+    /// Attempts to write the snapshot before giving up on a conflict loop.
+    public let maxSnapshotRetries: Int
 
-    public init(debounce: Duration = .seconds(30), maxTransactionRetries: Int = 8) {
+    public init(
+        debounce: Duration = .seconds(30),
+        maxTransactionRetries: Int = 8,
+        compaction: CompactionPolicy = CompactionPolicy(),
+        jitter: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) },
+        maxSnapshotRetries: Int = 8
+    ) {
         self.debounce = debounce
         self.maxTransactionRetries = maxTransactionRetries
+        self.compaction = compaction
+        self.jitter = jitter
+        self.maxSnapshotRetries = maxSnapshotRetries
     }
 
     public static let `default` = CloudKitProviderOptions()
@@ -50,6 +66,15 @@ public actor CloudKitProvider {
     private var drainSet: [UInt64: UInt32] = [:]
     /// Records computed at flush time, supplied to the engine at send time.
     private var pendingRecords: [CKRecord.ID: CKRecord] = [:]
+    /// Incremental records known to exist in the cloud (own + fetched), keyed by
+    /// record ID — the GC candidate set once a snapshot subsumes them.
+    private var knownIncrementals: [CKRecord.ID: IncrementalSummary] = [:]
+    /// The most recent snapshot state vector seen (own confirmed save or fetch),
+    /// used by the herd-damping re-check.
+    private var latestSnapshotStateVector: ClientClockMap?
+    /// Outcome of the in-flight snapshot send, recorded by `handleSent`.
+    private var confirmedSnapshotStateVector: YStateVector?
+    private var snapshotConflictServerRecord: CKRecord?
     private var observation: Observation?
     private var debounceTask: Task<Void, Never>?
     private var started = false
@@ -122,6 +147,14 @@ public actor CloudKitProvider {
         try await store.fetchChanges()
     }
 
+    /// Force a compaction now: write the shared full-state snapshot (resolving
+    /// conflicts by merge) and GC the incrementals it subsumes. Threshold and
+    /// herd-damping checks are bypassed.
+    public func compact() async {
+        guard started, !destroyed else { return }
+        await writeSnapshot()
+    }
+
     private func scheduleFlush() {
         guard started, !destroyed else { return }
         debounceTask?.cancel()
@@ -155,6 +188,7 @@ public actor CloudKitProvider {
             await store.enqueueSave(recordID)
         }
         try await store.sendChanges()
+        await compactIfNeeded()
     }
 
     /// On (re)start, re-derive and re-enqueue each prior open session's
@@ -235,6 +269,114 @@ public actor CloudKitProvider {
         )
     }
 
+    // MARK: Compaction / GC (ADR-0023)
+
+    /// If the incremental backlog crosses the threshold, write the shared
+    /// full-state snapshot and GC the incrementals it subsumes. Jitter plus a
+    /// pre-compaction fetch dampen the multi-device herd: if a freshly-fetched
+    /// snapshot already subsumes the backlog, this trailing device backs off.
+    private func compactIfNeeded() async {
+        guard started, !destroyed else { return }
+        let summaries = Array(knownIncrementals.values)
+        let bytes = summaries.reduce(0) { $0 + $1.byteCount }
+        guard options.compaction.shouldCompact(
+            incrementalCount: summaries.count,
+            incrementalBytes: bytes,
+            jitter: options.jitter()
+        ) else { return }
+
+        try? await store.fetchChanges()
+        if let latest = latestSnapshotStateVector {
+            let confirmed = ConfirmedSnapshot(confirmedSaved: latest)
+            guard options.compaction.shouldProceedAfterFetch(
+                incrementals: Array(knownIncrementals.values),
+                latestSnapshot: confirmed,
+                jitter: options.jitter()
+            ) else { return }
+        }
+
+        await writeSnapshot()
+    }
+
+    /// Write the full-state snapshot, resolving `serverRecordChanged` by
+    /// applying the server snapshot (lossless — merge only grows state),
+    /// recomputing, and retrying. Once the snapshot is confirmed saved, GC the
+    /// incrementals it subsumes.
+    private func writeSnapshot() async {
+        var attempts = 0
+        while attempts < options.maxSnapshotRetries {
+            attempts += 1
+            confirmedSnapshotStateVector = nil
+            snapshotConflictServerRecord = nil
+            do {
+                let full = try await captureFullState()
+                let recordID = store.codec.snapshotRecordID(documentName: documentName)
+                pendingRecords[recordID] = try store.codec.encodeSnapshot(
+                    CloudKitSnapshotRecordPayload(
+                        documentName: documentName,
+                        update: full.update,
+                        stateVector: full.stateVector
+                    )
+                )
+                await store.enqueueSave(recordID)
+                try await store.sendChanges()
+            } catch {
+                errorsContinuation.yield(error)
+                return
+            }
+
+            if let serverRecord = snapshotConflictServerRecord {
+                snapshotConflictServerRecord = nil
+                if let payload = try? store.codec.decodeSnapshot(serverRecord) {
+                    try? await applyWithRetry(payload.update)
+                }
+                continue
+            }
+            if let stateVector = confirmedSnapshotStateVector {
+                await gcSubsumed(confirmedStateVector: stateVector)
+            }
+            return
+        }
+    }
+
+    private func captureFullState() async throws -> (update: YUpdate, stateVector: YStateVector) {
+        var attempts = 0
+        while true {
+            do {
+                return (try doc.encodeStateAsUpdateV1(), try doc.stateVector())
+            } catch YError.transactionConflict {
+                attempts += 1
+                guard attempts < options.maxTransactionRetries else {
+                    throw CloudKitProviderError.transactionConflict
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
+    }
+
+    /// Delete incrementals fully contained in the confirmed snapshot — safe
+    /// cross-writer because the stored SV proves subsumption; incrementals
+    /// authored after the snapshot are retained.
+    private func gcSubsumed(confirmedStateVector: YStateVector) async {
+        guard let confirmed = try? ConfirmedSnapshot(confirmedSaved: confirmedStateVector) else { return }
+        let subsumed = options.compaction.subsumedIncrementals(
+            Array(knownIncrementals.values),
+            by: confirmed
+        )
+        guard !subsumed.isEmpty else { return }
+        for summary in subsumed {
+            let recordID = store.codec.incrementalRecordID(
+                documentName: documentName,
+                clientID: summary.clientID,
+                fromClock: summary.fromClock,
+                toClock: summary.toClock
+            )
+            knownIncrementals[recordID] = nil
+            await store.enqueueDelete(recordID)
+        }
+        try? await store.sendChanges()
+    }
+
     /// Capture this session's client-scoped diff since the marker, retrying on
     /// `transactionConflict` so a concurrent app write does not lose the flush.
     private func captureOutstandingDiff() async throws -> (update: YUpdate, toClock: UInt32)? {
@@ -265,17 +407,27 @@ public actor CloudKitProvider {
         pendingRecords[recordID]
     }
 
+    /// Records the outcome of a send. The compaction flow reads
+    /// `confirmedSnapshotStateVector` / `snapshotConflictServerRecord` after its
+    /// `sendChanges()` returns to drive GC or the merge-retry.
     func handleSent(saved: [CKRecord], deleted: [CKRecord.ID], failed: [CloudKitSendFailure]) {
+        let snapshotID = store.codec.snapshotRecordID(documentName: documentName)
         var drainSetChanged = false
         for record in saved {
-            guard pendingRecords.removeValue(forKey: record.recordID) != nil else { continue }
+            pendingRecords.removeValue(forKey: record.recordID)
+            if record.recordType == CloudKitRecordType.snapshot {
+                if let payload = try? store.codec.decodeSnapshot(record) {
+                    confirmedSnapshotStateVector = payload.stateVector
+                    latestSnapshotStateVector = try? ClientClockMap(decoding: payload.stateVector)
+                }
+                continue
+            }
             guard let payload = try? store.codec.decodeIncremental(record) else { continue }
+            trackIncremental(payload, recordID: record.recordID)
             if payload.clientID == clientID {
-                // This session's writes are confirmed through toClock.
                 marker = max(marker, payload.toClock)
                 drainSet[clientID] = marker
             } else {
-                // A prior dead session's full diff is confirmed → retire it.
                 drainSet[payload.clientID] = nil
             }
             drainSetChanged = true
@@ -284,11 +436,24 @@ public actor CloudKitProvider {
             persistDrainSet()
         }
         for failure in failed {
-            errorsContinuation.yield(failure.error)
+            if failure.recordID == snapshotID, failure.error == .serverRecordChanged {
+                snapshotConflictServerRecord = failure.serverRecord
+            } else {
+                errorsContinuation.yield(failure.error)
+            }
         }
         if !saved.isEmpty {
             syncedContinuation.yield(true)
         }
+    }
+
+    private func trackIncremental(_ payload: CloudKitIncrementalRecordPayload, recordID: CKRecord.ID) {
+        knownIncrementals[recordID] = IncrementalSummary(
+            clientID: payload.clientID,
+            fromClock: payload.fromClock,
+            toClock: payload.toClock,
+            byteCount: payload.update.data.count
+        )
     }
 
     /// Apply remote records to the doc (ADR-0023). Yjs updates are commutative
@@ -303,6 +468,7 @@ public actor CloudKitProvider {
     func handleFetched(modified: [CKRecord], deleted: [CKRecord.ID]) async {
         var applied = false
         for record in modified {
+            noteFetchedRecord(record)
             guard let update = decodeUpdate(from: record) else { continue }
             do {
                 try await applyWithRetry(update)
@@ -311,8 +477,28 @@ public actor CloudKitProvider {
                 errorsContinuation.yield(error)
             }
         }
+        for recordID in deleted {
+            knownIncrementals[recordID] = nil
+        }
         if applied {
             syncedContinuation.yield(true)
+        }
+    }
+
+    /// Track fetched records so the GC candidate set and the herd-damping
+    /// re-check see other devices' incrementals and the shared snapshot.
+    private func noteFetchedRecord(_ record: CKRecord) {
+        switch record.recordType {
+        case CloudKitRecordType.incremental:
+            if let payload = try? store.codec.decodeIncremental(record) {
+                trackIncremental(payload, recordID: record.recordID)
+            }
+        case CloudKitRecordType.snapshot:
+            if let payload = try? store.codec.decodeSnapshot(record) {
+                latestSnapshotStateVector = try? ClientClockMap(decoding: payload.stateVector)
+            }
+        default:
+            break
         }
     }
 
