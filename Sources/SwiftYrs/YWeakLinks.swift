@@ -55,14 +55,14 @@ extension YReadTransaction {
         defer {
             yrs_bridge_value_destroy(output)
         }
-        return nativeValue(output)
+        return YValueCodec.value(from: output)
     }
 
     public func values(from weakLink: YWeakLink) throws -> [YValue] {
         let data = try readingBuffer { yrs_bridge_weak_values_json(weakLink.handle, handle, &$0) }
         let object = try JSONSerialization.jsonObject(with: data)
         let values = object as? [Any] ?? []
-        return values.map(nativeValue(fromJSONObject:))
+        return values.map(YValueCodec.value(fromJSON:))
     }
 
     public func string(from weakLink: YWeakLink) throws -> String {
