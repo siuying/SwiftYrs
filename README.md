@@ -21,6 +21,17 @@ SwiftYrs/
 │   ├── YSync.swift            # YSyncMessage — encode/decode y-protocols messages
 │   ├── YUndoManager.swift     # YUndoManager — undo/redo with origin filtering
 │   └── YWeakLinks.swift       # YWeakLink, YRelativePosition (sticky indexes)
+├── Sources/SwiftYrsWebRTC/    # WebRTC transport (Apple platforms only)
+│   ├── WebRTCProvider.swift   # WebRTCProvider actor — y-webrtc-compatible mesh sync
+│   ├── SignalingConnection.swift # WebSocket signaling client
+│   └── ...                    # Peer signaling, ICE, cipher, codec helpers
+├── Sources/SwiftYrsHocuspocus/ # Hocuspocus WebSocket provider
+│   ├── HocuspocusProvider.swift # HocuspocusProvider actor — syncs a YDoc over y-protocols WebSocket
+│   └── ...                    # Message codec, auth helpers
+├── Sources/ChatExample/       # Runnable terminal chat (Apple platforms only)
+│   ├── ChatExample.swift      # Entry point — CLI arg parsing, peer lifecycle
+│   ├── ChatLog.swift          # Shared YArray-backed message log
+│   └── ChatConfig.swift       # Room / signaling configuration
 ├── Tests/SwiftYrsTests/       # Swift test suite
 │   ├── Fixtures/              # Cross-language JSON fixtures generated from Yjs
 │   └── *.swift                # Per-feature test files

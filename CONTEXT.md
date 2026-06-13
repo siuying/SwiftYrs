@@ -8,9 +8,17 @@ Swift binding for Yrs, which is a port of the Yjs framework.. Its language keeps
 The Swift 6 API surface for Yjs/Yrs document types, transactions, updates, state vectors, snapshots, awareness, and sync protocol messages. It excludes concrete network transports.
 _Avoid_: Provider package, app sync layer
 
-**Network Provider**:
-An optional transport integration that sends and receives Core Swift Package protocol payloads over a concrete network such as WebSocket or WebRTC.
+**Provider**:
+The umbrella term, following Yjs, for an optional integration that keeps a document in sync with something outside the Core Swift Package. It has two subtypes: a Connection Provider and a Database Provider.
 _Avoid_: Core library, sync protocol
+
+**Connection Provider**:
+A Provider that sends and receives Core Swift Package protocol payloads over a concrete network such as WebSocket or WebRTC. (Earlier drafts of this glossary called it a "Network Provider".)
+_Avoid_: Database Provider, Core library, sync protocol
+
+**Database Provider**:
+A Provider that syncs a document to and from durable local storage: it loads a document's prior state on startup and durably records subsequent updates. It never talks to a peer and carries no sync protocol over a wire.
+_Avoid_: Connection Provider, network sync, server
 
 **FFI Surface**:
 The C ABI exported by `yffi` or a local fork/shim of it. It is the boundary the Swift package wraps, not the API Swift users should write against directly.
@@ -128,7 +136,7 @@ _Avoid_: SDP blob, ICE message, sync message
 
 Dev: "Does the Core Swift Package include WebSocket sync?"
 
-Domain expert: "No. It exposes update, awareness, and sync protocol payloads. A Network Provider can carry those bytes over WebSocket later."
+Domain expert: "No. It exposes update, awareness, and sync protocol payloads. A Connection Provider can carry those bytes over WebSocket later."
 
 Dev: "If upstream yffi lacks awareness exports, where does that belong?"
 
@@ -205,6 +213,10 @@ Domain expert: "The Observation owns that subscription. An Event Stream may use 
 Dev: "Does the Signaling Server ever see the document updates?"
 
 Domain expert: "No. It only relays Peer Signals so peers in a Room can find each other. Sync and awareness travel directly over the Mesh Topology's data channels."
+
+Dev: "Is a SQLite persistence layer a kind of Connection Provider?"
+
+Domain expert: "No. It is a Database Provider — the other Provider subtype. It loads a document's stored state and records later updates to disk. It never speaks a sync protocol over a wire, so it gets no connect/reconnect vocabulary."
 
 Dev: "Is the Room a different thing from the document name?"
 
