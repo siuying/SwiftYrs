@@ -1,5 +1,7 @@
 import Foundation
+import SQLite
 import SwiftYrs
+import SwiftYrsSQLite
 import SwiftYrsWebRTC
 
 /// A runnable terminal chat that demonstrates `SwiftYrsWebRTC` end to end.
@@ -38,10 +40,22 @@ struct ChatExample {
 
         var options = WebRTCProvider.Options()
         options.password = config.password
+        let sqliteProvider: SQLiteProvider?
+        if let databasePath = config.databasePath {
+            let store = try SQLiteStore(Connection(databasePath))
+            let provider = SQLiteProvider(documentName: config.room, doc: doc, store: store)
+            try provider.start()
+            sqliteProvider = provider
+        } else {
+            sqliteProvider = nil
+        }
         let provider = WebRTCProvider(config.room, doc: doc, signaling: config.signaling, options: options)
 
         print("Joining room '\(config.room)' as '\(config.name)'")
         print("Signaling: \(config.signaling.map(\.absoluteString).joined(separator: ", "))")
+        if let databasePath = config.databasePath {
+            print("Persistence: \(databasePath)")
+        }
         print("Type a message and press Enter. Use /quit to leave.")
 
         // Subscribe to the message array before connecting so no change is
@@ -69,12 +83,14 @@ struct ChatExample {
         // Destroy cleanly on Ctrl-C: remove awareness, tear down signaling and
         // peers, then exit.
         installSIGINTHandler {
+            sqliteProvider?.destroy()
             await provider.destroy()
         }
 
         await readInputLoop(into: log, sender: config.name)
 
         renderTask.cancel()
+        sqliteProvider?.destroy()
         await provider.destroy()
     }
 
@@ -159,6 +175,7 @@ struct ChatExample {
           --signaling <url>    signaling server URL, comma-separated/repeatable
                                (default: ws://127.0.0.1:4444)
           --password <string>  optional shared-room password
+          --database <path>    optional SQLite database path for local persistence
         """
         print(usage)
     }
