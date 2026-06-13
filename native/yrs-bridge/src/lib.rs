@@ -664,6 +664,17 @@ pub extern "C" fn yrs_bridge_doc_new_with_client_id(client_id: u64) -> *mut Doc 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_doc_client_id(doc: *mut Doc) -> u64 {
+    catch_unwind(AssertUnwindSafe(|| {
+        if doc.is_null() {
+            return 0;
+        }
+        (*doc).client_id().get()
+    }))
+    .unwrap_or(0)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_doc_destroy(doc: *mut Doc) {
     if !doc.is_null() {
         drop(Box::from_raw(doc));

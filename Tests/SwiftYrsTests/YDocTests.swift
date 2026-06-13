@@ -8,6 +8,13 @@ func documentCanRoundtripThroughYrsBridge() {
 }
 
 @Test
+func documentExposesClientID() {
+    let doc = YDoc(clientID: 42)
+
+    #expect(doc.clientID == 42)
+}
+
+@Test
 func documentProvidesClosureScopedTransactions() throws {
     let doc = YDoc()
 

@@ -99,6 +99,10 @@ public final class YDoc: Equatable {
         self.handle = handle
     }
 
+    public var clientID: UInt64 {
+        yrs_bridge_doc_client_id(handle)
+    }
+
     deinit {
         yrs_bridge_doc_destroy(handle)
     }

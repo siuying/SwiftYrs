@@ -33,6 +33,7 @@ typedef struct YrsBridgeValue {
 
 YrsBridgeDoc *_Nullable yrs_bridge_doc_new(void);
 YrsBridgeDoc *_Nullable yrs_bridge_doc_new_with_client_id(uint64_t client_id);
+uint64_t yrs_bridge_doc_client_id(YrsBridgeDoc *_Nonnull doc);
 void yrs_bridge_doc_destroy(YrsBridgeDoc *_Nonnull doc);
 
 int yrs_bridge_doc_read_transaction(YrsBridgeDoc *_Nonnull doc, YrsBridgeTransaction *_Nullable *_Nonnull out);
