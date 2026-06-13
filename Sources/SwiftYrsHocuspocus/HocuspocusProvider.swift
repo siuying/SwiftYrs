@@ -378,24 +378,26 @@ public actor HocuspocusProvider {
     }
 }
 
+/// Guards against echoing our own applied remote update back to the server.
+/// `applyRemote` raises the flag around `document.write`; the document update
+/// observer fires synchronously inside that write, on the same thread, reads
+/// the flag, and skips re-sending. The flag is only set/read/cleared on that
+/// one thread within a single apply, but it still needs synchronization for
+/// `Sendable` correctness because the observer is a nonisolated C callback. The
+/// lock is taken only to touch the flag — never held across `body()` — so the
+/// observer's read during `body()` cannot deadlock against it.
 private final class RemoteApplyGate: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "SwiftYrsHocuspocus.RemoteApplyGate")
+    private let lock = NSLock()
     private var applyingRemote = false
 
     var isApplyingRemote: Bool {
-        queue.sync {
-            applyingRemote
-        }
+        lock.withLock { applyingRemote }
     }
 
     func withApplyingRemote<T>(_ body: () throws -> T) rethrows -> T {
-        queue.sync {
-            applyingRemote = true
-        }
+        lock.withLock { applyingRemote = true }
         defer {
-            queue.sync {
-                applyingRemote = false
-            }
+            lock.withLock { applyingRemote = false }
         }
         return try body()
     }

@@ -129,17 +129,18 @@ actor SignalingConnection {
     }
 
     private static func waitForOpen(_ observer: WebSocketOpenObserver, timeout: Duration = .seconds(5)) async -> Bool {
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            // Bail out immediately when the receive loop is cancelled (stop/destroy)
-            // so teardown does not block for the full open timeout on a dead server.
-            guard !Task.isCancelled else { return false }
-            if let opened = observer.opened {
-                return opened
+        // Race the delegate's open/close callback against a timeout. The open
+        // observer resolves to `false` on cancellation (stop/destroy) too, so
+        // teardown does not block for the full timeout on a dead server.
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await observer.awaitOpened() }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
             }
-            try? await Task.sleep(for: .milliseconds(10))
+            defer { group.cancelAll() }
+            return await group.next() ?? false
         }
-        return false
     }
 
     private func startPing() {
@@ -169,12 +170,29 @@ actor SignalingConnection {
     }
 }
 
+/// Bridges `URLSession`'s open/close delegate callbacks into a single awaitable
+/// result. `awaitOpened()` suspends until the socket opens (`true`), closes
+/// before opening (`false`), or the awaiting task is cancelled (`false`). The
+/// result latches, so callers that await after the callback fired still see it.
 private final class WebSocketOpenObserver: NSObject, URLSessionWebSocketDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private var _opened: Bool?
+    private var result: Bool?
+    private var continuation: CheckedContinuation<Bool, Never>?
 
-    var opened: Bool? {
-        lock.withLock { _opened }
+    func awaitOpened() async -> Bool {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    if let result {
+                        continuation.resume(returning: result)
+                    } else {
+                        self.continuation = continuation
+                    }
+                }
+            }
+        } onCancel: {
+            resolve(false)
+        }
     }
 
     func urlSession(
@@ -182,9 +200,7 @@ private final class WebSocketOpenObserver: NSObject, URLSessionWebSocketDelegate
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
     ) {
-        lock.withLock {
-            _opened = true
-        }
+        resolve(true)
     }
 
     func urlSession(
@@ -193,10 +209,17 @@ private final class WebSocketOpenObserver: NSObject, URLSessionWebSocketDelegate
         didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
         reason: Data?
     ) {
-        lock.withLock {
-            if _opened == nil {
-                _opened = false
-            }
+        resolve(false)
+    }
+
+    /// Latches the first outcome and resumes a waiter exactly once.
+    private func resolve(_ value: Bool) {
+        let continuation: CheckedContinuation<Bool, Never>? = lock.withLock {
+            guard result == nil else { return nil }
+            result = value
+            defer { self.continuation = nil }
+            return self.continuation
         }
+        continuation?.resume(returning: value)
     }
 }

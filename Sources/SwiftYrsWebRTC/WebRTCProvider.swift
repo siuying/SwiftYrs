@@ -29,6 +29,9 @@ public actor WebRTCProvider {
         public init(
             password: String? = nil,
             awareness: YAwareness? = nil,
+            // Randomized default mirrors y-webrtc's `maxConns`: a per-peer jitter
+            // so peers in a large room don't all hit the connection cap at the
+            // same size and deterministically reject the same inbound peers.
             maxConns: Int = 20 + Int.random(in: 0..<15),
             iceServers: [WebRTCIceServer] = .defaultSTUN,
             maxRetries: Int = .max,
