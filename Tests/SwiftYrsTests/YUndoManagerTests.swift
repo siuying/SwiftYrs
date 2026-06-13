@@ -114,7 +114,7 @@ func undoManagerObservationDeliversAddedAndPoppedEvents() throws {
     let text = try doc.text(named: "body")
     let undoManager = YUndoManager(document: doc)
     try undoManager.addScope(text)
-    var events: [YObservationEvent] = []
+    var events: [YEvent] = []
 
     let added = try undoManager.observeItemAdded { events.append($0) }
     let popped = try undoManager.observeItemPopped { events.append($0) }
@@ -128,6 +128,21 @@ func undoManagerObservationDeliversAddedAndPoppedEvents() throws {
     }
     _ = try undoManager.undo()
 
-    #expect(events.map(\.kind) == ["undoItemAdded", "undoItemAdded", "undoItemPopped"])
-    #expect(events.map { $0.object["action"] as? String } == ["undo", "redo", "undo"])
+    #expect(events.compactMap(undoTag) == ["added", "added", "popped"])
+    #expect(events.compactMap(undoAction) == ["undo", "redo", "undo"])
+}
+
+private func undoTag(_ event: YEvent) -> String? {
+    switch event {
+    case .undoItemAdded: return "added"
+    case .undoItemPopped: return "popped"
+    default: return nil
+    }
+}
+
+private func undoAction(_ event: YEvent) -> String? {
+    switch event {
+    case let .undoItemAdded(action), let .undoItemPopped(action): return action
+    default: return nil
+    }
 }

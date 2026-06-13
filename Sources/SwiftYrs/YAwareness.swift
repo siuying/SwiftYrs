@@ -121,23 +121,23 @@ public final class YAwareness {
         }
     }
 
-    public func observeUpdate(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
+    public func observeUpdate(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
         try makeObservation(callback) { context, callback in
             yrs_bridge_awareness_observe_update(handle, context, callback)
         }
     }
 
-    public func observeChange(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
+    public func observeChange(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
         try makeObservation(callback) { context, callback in
             yrs_bridge_awareness_observe_change(handle, context, callback)
         }
     }
 
-    public func updateEvents() throws -> AsyncStream<YObservationEvent> {
+    public func updateEvents() throws -> AsyncStream<YEvent> {
         try makeEventStream(observe: observeUpdate)
     }
 
-    public func changeEvents() throws -> AsyncStream<YObservationEvent> {
+    public func changeEvents() throws -> AsyncStream<YEvent> {
         try makeEventStream(observe: observeChange)
     }
 
