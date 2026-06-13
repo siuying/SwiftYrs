@@ -2,11 +2,30 @@ import Foundation
 import Testing
 import SwiftYrs
 
+private extension YEvent {
+    var shared: YSharedEvent? {
+        if case let .shared(value) = self { return value }
+        return nil
+    }
+
+    var update: YUpdate? {
+        if case let .update(value) = self { return value }
+        return nil
+    }
+}
+
+private extension YTextDeltaOperation {
+    var insert: (value: YValue, attributes: YAttributes)? {
+        if case let .insert(value, attributes) = self { return (value, attributes) }
+        return nil
+    }
+}
+
 @Test
 func textObservationDeliversDeltasAndCanBeCancelled() throws {
     let doc = YDoc()
     let text = try doc.text(named: "body")
-    var events: [YObservationEvent] = []
+    var events: [YEvent] = []
 
     let observation = try text.observe { event in
         events.append(event)
@@ -17,11 +36,11 @@ func textObservationDeliversDeltasAndCanBeCancelled() throws {
     }
 
     #expect(events.count == 1)
-    #expect(events[0].kind == "text")
-    let firstDelta = try #require(events[0].array("delta").first as? [String: Any])
-    #expect(firstDelta["kind"] as? String == "insert")
-    #expect((firstDelta["insert"] as? [String: Any])?["value"] as? String == "hello")
-    #expect(((firstDelta["attributes"] as? [String: Any])?["bold"] as? [String: Any])?["value"] as? Bool == true)
+    let shared = try #require(events.first?.shared)
+    #expect(shared.target == .text)
+    let insert = try #require(shared.delta.first?.insert)
+    #expect(insert.value == .string("hello"))
+    #expect(insert.attributes["bold"] == .bool(true))
 
     observation.cancel()
 
@@ -36,9 +55,9 @@ func textObservationDeliversDeltasAndCanBeCancelled() throws {
 func documentObservationDeliversUpdateCleanupAndSubdocEvents() throws {
     let doc = YDoc()
     let map = try doc.map(named: "subdocs")
-    var updateEvents: [YObservationEvent] = []
-    var cleanupEvents: [YObservationEvent] = []
-    var subdocEvents: [YObservationEvent] = []
+    var updateEvents: [YEvent] = []
+    var cleanupEvents: [YEvent] = []
+    var subdocEvents: [YEvent] = []
 
     let updates = try doc.observeUpdates { updateEvents.append($0) }
     let cleanup = try doc.observeTransactionCleanup { cleanupEvents.append($0) }
@@ -55,14 +74,18 @@ func documentObservationDeliversUpdateCleanupAndSubdocEvents() throws {
     }
 
     #expect(updateEvents.count == 1)
-    #expect(updateEvents[0].kind == "updateV1")
-    #expect(!updateEvents[0].array("updateV1").isEmpty)
+    #expect(!(try #require(updateEvents.first?.update)).data.isEmpty)
     #expect(cleanupEvents.count == 1)
-    #expect(cleanupEvents[0].kind == "transactionCleanup")
+    if case .transactionCleanup = cleanupEvents[0] {} else {
+        Issue.record("expected transactionCleanup, got \(cleanupEvents[0])")
+    }
     #expect(subdocEvents.count == 1)
-    #expect(subdocEvents[0].kind == "subdocs")
-    #expect(!subdocEvents[0].array("added").isEmpty)
-    #expect(!subdocEvents[0].array("loaded").isEmpty)
+    guard case let .subdocs(added, _, loaded) = subdocEvents[0] else {
+        Issue.record("expected subdocs, got \(subdocEvents[0])")
+        return
+    }
+    #expect(!added.isEmpty)
+    #expect(!loaded.isEmpty)
 }
 
 @Test
@@ -74,10 +97,10 @@ func sharedTypeObservationDeliversKeyPathAndXmlChanges() throws {
     let xmlText = try doc.write { transaction in
         try transaction.insertText(into: fragment, at: 0)
     }
-    var arrayEvents: [YObservationEvent] = []
-    var mapEvents: [YObservationEvent] = []
-    var xmlEvents: [YObservationEvent] = []
-    var xmlTextEvents: [YObservationEvent] = []
+    var arrayEvents: [YEvent] = []
+    var mapEvents: [YEvent] = []
+    var xmlEvents: [YEvent] = []
+    var xmlTextEvents: [YEvent] = []
 
     let arrayObservation = try array.observe { arrayEvents.append($0) }
     let mapObservation = try map.observe { mapEvents.append($0) }
@@ -100,18 +123,25 @@ func sharedTypeObservationDeliversKeyPathAndXmlChanges() throws {
     }
 
     #expect(arrayEvents.count == 1)
-    #expect(arrayEvents[0].kind == "array")
-    #expect(arrayEvents[0].array("delta").count == 1)
+    let arrayShared = try #require(arrayEvents.first?.shared)
+    #expect(arrayShared.target == .array)
+    #expect(arrayShared.delta.count == 1)
+
     #expect(mapEvents.count == 1)
-    #expect(mapEvents[0].kind == "map")
-    #expect((mapEvents[0].dictionary("keys")["status"] as? [String: Any])?["kind"] as? String == "insert")
+    let mapShared = try #require(mapEvents.first?.shared)
+    #expect(mapShared.target == .map)
+    #expect(mapShared.keys["status"] == .inserted(.string("draft")))
+
     #expect(xmlEvents.count == 1)
-    #expect(xmlEvents[0].kind == "xml")
-    #expect(!xmlEvents[0].array("delta").isEmpty)
+    let xmlShared = try #require(xmlEvents.first?.shared)
+    #expect(xmlShared.target == .xml)
+    #expect(!xmlShared.delta.isEmpty)
+
     #expect(xmlTextEvents.count == 1)
-    #expect(xmlTextEvents[0].kind == "xmlText")
-    #expect(!xmlTextEvents[0].array("delta").isEmpty)
-    #expect(!xmlTextEvents[0].dictionary("keys").isEmpty)
+    let xmlTextShared = try #require(xmlTextEvents.first?.shared)
+    #expect(xmlTextShared.target == .xmlText)
+    #expect(!xmlTextShared.delta.isEmpty)
+    #expect(!xmlTextShared.keys.isEmpty)
 }
 
 @Test
@@ -121,7 +151,7 @@ func updateEventExposesTypedUpdateV1() throws {
     var updates: [YUpdate] = []
 
     let observation = try doc.observeUpdates { event in
-        if let update = event.updateV1 {
+        if case let .update(update) = event {
             updates.append(update)
         }
     }
@@ -140,10 +170,10 @@ func updateEventExposesTypedUpdateV1() throws {
 }
 
 @Test
-func nonUpdateEventHasNoTypedUpdate() throws {
+func sharedEventIsNotAnUpdateEvent() throws {
     let doc = YDoc()
     let text = try doc.text(named: "body")
-    var events: [YObservationEvent] = []
+    var events: [YEvent] = []
 
     let observation = try text.observe { events.append($0) }
     defer { observation.cancel() }
@@ -153,7 +183,8 @@ func nonUpdateEventHasNoTypedUpdate() throws {
     }
 
     let event = try #require(events.first)
-    #expect(event.updateV1 == nil)
+    #expect(event.update == nil)
+    #expect(event.shared != nil)
 }
 
 @Test
@@ -162,7 +193,9 @@ func awarenessUpdateEventExposesChangedClientIDs() throws {
     var changed: [[UInt64]] = []
 
     let observation = try awareness.observeUpdate { event in
-        changed.append(event.changedAwarenessClientIDs)
+        if case let .awarenessUpdate(change) = event {
+            changed.append(change.changed)
+        }
     }
     defer { observation.cancel() }
 
@@ -177,7 +210,7 @@ func asyncObservationStreamYieldsEventsAndTerminates() async throws {
     let text = try doc.text(named: "body")
     let stream = try text.events()
 
-    let task = Task<YObservationEvent?, Never> {
+    let task = Task<YEvent?, Never> {
         for await event in stream {
             return event
         }
@@ -189,5 +222,5 @@ func asyncObservationStreamYieldsEventsAndTerminates() async throws {
     }
 
     let event = await task.value
-    #expect(event?.kind == "text")
+    #expect(event?.shared?.target == .text)
 }

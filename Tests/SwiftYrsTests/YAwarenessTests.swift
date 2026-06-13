@@ -2,12 +2,6 @@ import Foundation
 import Testing
 import SwiftYrs
 
-private func clientIDs(_ values: [Any]) -> [UInt64] {
-    values.compactMap { value in
-        (value as? UInt64) ?? (value as? NSNumber)?.uint64Value
-    }
-}
-
 private struct YjsAwarenessFixture: Decodable {
     let update: Data
 
@@ -79,10 +73,30 @@ func awarenessRemovalPropagatesWithExplicitClientUpdate() throws {
     #expect(try remote.states().isEmpty)
 }
 
+private enum AwarenessEventTag: Equatable {
+    case update
+    case change
+}
+
+private func tag(_ event: YEvent) -> AwarenessEventTag? {
+    switch event {
+    case .awarenessUpdate: return .update
+    case .awarenessChange: return .change
+    default: return nil
+    }
+}
+
+private func awarenessChange(_ event: YEvent) -> YAwarenessChange? {
+    switch event {
+    case let .awarenessUpdate(change), let .awarenessChange(change): return change
+    default: return nil
+    }
+}
+
 @Test
 func awarenessObservationDeliversUpdateAndChangeEvents() throws {
     let awareness = YAwareness(document: YDoc(clientID: 1))
-    var events: [YObservationEvent] = []
+    var events: [YEvent] = []
 
     let update = try awareness.observeUpdate { events.append($0) }
     let change = try awareness.observeChange { events.append($0) }
@@ -95,16 +109,10 @@ func awarenessObservationDeliversUpdateAndChangeEvents() throws {
     try awareness.setLocalState(["name": "Ada"])
     awareness.clearLocalState()
 
-    #expect(events.map(\.kind) == [
-        "awarenessChange",
-        "awarenessUpdate",
-        "awarenessUpdate",
-        "awarenessChange",
-        "awarenessUpdate"
-    ])
-    #expect(clientIDs(events[0].array("added")) == [1])
-    #expect(clientIDs(events[2].array("updated")) == [1])
-    #expect(clientIDs(events[3].array("removed")) == [1])
+    #expect(events.compactMap(tag) == [.change, .update, .update, .change, .update])
+    #expect(awarenessChange(events[0])?.added == [1])
+    #expect(awarenessChange(events[2])?.updated == [1])
+    #expect(awarenessChange(events[3])?.removed == [1])
 }
 
 @Test
@@ -112,7 +120,7 @@ func awarenessAsyncStreamYieldsEvents() async throws {
     let awareness = YAwareness(document: YDoc(clientID: 1))
     let stream = try awareness.changeEvents()
 
-    let task = Task<YObservationEvent?, Never> {
+    let task = Task<YEvent?, Never> {
         for await event in stream {
             return event
         }
@@ -122,8 +130,8 @@ func awarenessAsyncStreamYieldsEvents() async throws {
     try awareness.setLocalState(["name": "Ada"])
 
     let event = await task.value
-    #expect(event?.kind == "awarenessChange")
-    #expect(clientIDs(event?.array("added") ?? []) == [1])
+    #expect(tag(try #require(event)) == .change)
+    #expect(awarenessChange(try #require(event))?.added == [1])
 }
 
 @Test

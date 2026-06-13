@@ -69,7 +69,7 @@ public class YSharedType: Equatable {
 
     /// Observes changes to this shared type. The returned token cancels the
     /// observation when cancelled or deallocated.
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
+    public func observe(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
         try makeObservation(callback) { context, eventCallback in
             bridgeObserve(handle, context, eventCallback)
         }
@@ -77,7 +77,7 @@ public class YSharedType: Equatable {
 
     /// An `AsyncStream` of this shared type's change events; the observation is
     /// cancelled when the stream terminates.
-    public func events() throws -> AsyncStream<YObservationEvent> {
+    public func events() throws -> AsyncStream<YEvent> {
         try makeEventStream(observe: observe)
     }
 }

@@ -18,7 +18,7 @@ func mapWeakLinksDereferenceUpdatedAndDeletedEntries() throws {
         try #expect(transaction.weakLink(forKey: "title-link", in: links) == link)
     }
 
-    var events: [YObservationEvent] = []
+    var events: [YEvent] = []
     let observation = try link.observe { events.append($0) }
     defer {
         observation.cancel()
@@ -29,7 +29,11 @@ func mapWeakLinksDereferenceUpdatedAndDeletedEntries() throws {
     }
 
     #expect(events.count == 1)
-    #expect(events[0].kind == "weak")
+    if case let .shared(shared) = events[0] {
+        #expect(shared.target == .weak)
+    } else {
+        Issue.record("expected a shared weak event, got \(events[0])")
+    }
 
     try doc.write { transaction in
         try #expect(transaction.dereference(link) == .string("second"))

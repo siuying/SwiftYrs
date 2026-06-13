@@ -222,7 +222,7 @@ public actor HocuspocusProvider {
                 guard !documentObservationGate.isApplyingRemote else {
                     return
                 }
-                guard let update = event.updateV1 else {
+                guard case let .update(update) = event else {
                     return
                 }
                 Task { [weak self] in
@@ -235,7 +235,10 @@ public actor HocuspocusProvider {
                 guard !awarenessObservationGate.isApplyingRemote else {
                     return
                 }
-                let clientIDs = event.changedAwarenessClientIDs
+                guard case let .awarenessUpdate(change) = event else {
+                    return
+                }
+                let clientIDs = change.changed
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }

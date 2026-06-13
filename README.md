@@ -150,9 +150,11 @@ try docB.apply(update)
 let doc = YDoc()
 let text = try doc.text(named: "content")
 
-// Callback-based
+// Callback-based. Events are a typed `YEvent` enum — switch on the case.
 let observation = try text.observe { event in
-    print("text changed:", event.kind)
+    if case let .shared(change) = event {
+        print("text changed, \(change.delta.count) delta ops")
+    }
 }
 // Cancel when done
 observation.cancel()
@@ -161,7 +163,9 @@ observation.cancel()
 let stream = try text.events()
 Task {
     for await event in stream {
-        print("text event:", event.kind)
+        if case let .shared(change) = event, change.target == .text {
+            print("text event, \(change.delta.count) delta ops")
+        }
     }
 }
 ```
@@ -364,7 +368,7 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | `Y.XmlText` | ✅ | ✅ | ✅ | `YXmlText` insert/remove/attributes |
 | Subdocuments | ✅ | ✅ | ✅ | Nested `YDoc` via `setNewSubdoc`, `loadSubdoc`, `clearSubdoc` |
 | Observers (callback) | ✅ | ✅ | ✅ | `Observation` token, per-type `.observe(_:)` |
-| Observers (async stream) | ✅ | ✅ | ✅ | `.events()` returns `AsyncStream<YObservationEvent>` |
+| Observers (async stream) | ✅ | ✅ | ✅ | `.events()` returns `AsyncStream<YEvent>` |
 | Document update observers | ✅ | ✅ | ✅ | `observeUpdates`, `observeTransactionCleanup`, `observeSubdocs`, `observeDestroy` |
 | Transaction origins | ✅ | ✅ | ✅ | `doc.write(origin:)` |
 | Encode state as update (v1) | ✅ | ✅ | ✅ | `encodeStateAsUpdateV1(from:)` |
