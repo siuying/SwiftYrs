@@ -116,6 +116,16 @@ public actor MockCloudKitSyncEngine: CloudKitSyncEngineAdapter {
         await emitStateUpdate(to: handler)
     }
 
+    public func deleteZone(_ zoneID: CKRecordZone.ID) async {
+        for recordID in server.keys where recordID.zoneID == zoneID {
+            server[recordID] = nil
+        }
+        inboundModified.removeAll { $0.recordID.zoneID == zoneID }
+        inboundDeleted.removeAll { $0.zoneID == zoneID }
+        pendingSaves.removeAll { $0.zoneID == zoneID }
+        pendingDeletes.removeAll { $0.zoneID == zoneID }
+    }
+
     // MARK: Test-driving surface
 
     /// Simulate another device saving `record`: it lands in the server zone and

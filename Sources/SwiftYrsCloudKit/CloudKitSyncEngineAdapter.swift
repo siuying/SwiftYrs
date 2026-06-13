@@ -79,5 +79,8 @@ public protocol CloudKitSyncEngineAdapter: Sendable {
     func sendChanges() async throws
     /// Pull remote changes, delivering a `fetchedChanges` event when any exist.
     func fetchChanges() async throws
+
+    /// Delete a document's zone and all its records (document removal).
+    func deleteZone(_ zoneID: CKRecordZone.ID) async throws
 }
 #endif
