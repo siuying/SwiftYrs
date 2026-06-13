@@ -1,5 +1,8 @@
 import Foundation
+import OSLog
 import SwiftYrs
+
+private let logger = Logger(subsystem: "SwiftYrsHocuspocus", category: "provider")
 
 public enum ConnectionStatus: Equatable, Sendable {
     case connecting
@@ -138,7 +141,9 @@ public actor HocuspocusProvider {
         }
         do {
             try await webSocket.send(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded())
-        } catch {}
+        } catch {
+            logger.error("failed to send stateless message: \(error, privacy: .public)")
+        }
     }
 
     private func openWebSocket() async throws {
@@ -313,7 +318,9 @@ public actor HocuspocusProvider {
         do {
             let syncMessage = try YSyncMessage.update(update)
             try await webSocket.send(HocuspocusMessage.sync(documentName: name, syncMessage).encoded())
-        } catch {}
+        } catch {
+            logger.error("failed to send local update: \(error, privacy: .public)")
+        }
     }
 
     private func sendAwareness(_ update: YAwarenessUpdate) async {
@@ -322,7 +329,9 @@ public actor HocuspocusProvider {
         }
         do {
             try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
-        } catch {}
+        } catch {
+            logger.error("failed to send awareness update: \(error, privacy: .public)")
+        }
     }
 
     private func sendKnownAwarenessStates() async throws {

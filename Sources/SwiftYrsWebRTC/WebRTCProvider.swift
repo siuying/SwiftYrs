@@ -1,5 +1,8 @@
 import Foundation
+import OSLog
 import SwiftYrs
+
+let webRTCLogger = Logger(subsystem: "SwiftYrsWebRTC", category: "provider")
 
 private let webRTCDebugEnabled = ProcessInfo.processInfo.environment["WEBRTC_DEBUG"] != nil
 
@@ -293,19 +296,29 @@ public actor WebRTCProvider {
 
     private func publishSignal(to remotePeerId: String, token: Double, signal: PeerSignal) async {
         let message = RoomMessage.signal(from: peerId, to: remotePeerId, token: token, signal: signal)
-        guard let frame = try? SignalingCodec.publish(
-            topic: roomName, data: message.jsonObject(), cipher: signalingCipher
-        ) else { return }
+        guard let frame = encodePublish(message) else { return }
         for connection in signalingConnections {
             await connection.send(frame)
         }
     }
 
     private func sendRoomMessage(_ message: RoomMessage, on connection: SignalingConnection) async {
-        guard let frame = try? SignalingCodec.publish(
-            topic: roomName, data: message.jsonObject(), cipher: signalingCipher
-        ) else { return }
+        guard let frame = encodePublish(message) else { return }
         await connection.send(frame)
+    }
+
+    /// Encodes a room message as a signaling `publish` frame. A failure here is
+    /// an encoding bug rather than a transient network drop, so it is logged
+    /// rather than silently swallowed.
+    private func encodePublish(_ message: RoomMessage) -> Data? {
+        do {
+            return try SignalingCodec.publish(
+                topic: roomName, data: message.jsonObject(), cipher: signalingCipher
+            )
+        } catch {
+            webRTCLogger.error("failed to encode signaling publish frame: \(error, privacy: .public)")
+            return nil
+        }
     }
 
     private func startReannounceLoop(interval: Duration = .seconds(30)) {
@@ -394,7 +407,9 @@ public actor WebRTCProvider {
             record.conn.send(syncStep1.payload)
             record.conn.send(try YSyncMessage.awarenessQuery().payload)
             try sendKnownAwarenessStates(to: record)
-        } catch {}
+        } catch {
+            webRTCLogger.error("failed to send initial sync to peer: \(error, privacy: .public)")
+        }
     }
 
     /// Sends every awareness state we currently know to one peer, as a single
@@ -425,7 +440,9 @@ public actor WebRTCProvider {
             default:
                 break
             }
-        } catch {}
+        } catch {
+            webRTCLogger.error("failed to handle sync message from peer: \(error, privacy: .public)")
+        }
     }
 
     private func applyAwarenessUpdate(_ update: YAwarenessUpdate, from record: PeerRecord) throws {
