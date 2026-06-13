@@ -1,7 +1,7 @@
 import Foundation
 import SQLite
 import SwiftYrs
-import SwiftYrsSQLite
+@testable import SwiftYrsSQLite
 import Testing
 
 @Test
@@ -104,7 +104,7 @@ func metadataIsScopedByDocumentNameAndDoesNotMutateTheDocument() throws {
     try reloaded.removeMetadata(forKey: "lastOpenedBy")
     #expect(try reloaded.metadata(forKey: "lastOpenedBy") == nil)
     #expect(try string(in: reloadedDoc, named: "body") == "")
-    #expect(try updateRowCount(connection, documentName: "a") == 0)
+    #expect(try updateRowCount(store, documentName: "a") == 0)
 }
 
 @Test
@@ -121,13 +121,14 @@ func compactionRewritesUpdatesToSnapshotAndKeepsAcceptingUpdates() throws {
     try insert("a", into: doc, named: "body")
     try insert("b", into: doc, named: "body")
     try waitUntil {
-        try updateRowCount(connection, documentName: "compact") == 1
+        try updateRowCount(store, documentName: "compact") == 1
     }
-    #expect(try updateKinds(connection, documentName: "compact") == ["snapshot"])
+    #expect(try updateKinds(store, documentName: "compact") == ["snapshot"])
     provider.destroy()
 
     let reloadedDoc = YDoc()
-    let reloaded = SQLiteProvider(documentName: "compact", doc: reloadedDoc, store: store, options: options)
+    let manualCompaction = try SQLiteProviderOptions(autoCompact: false, compactThreshold: 2)
+    let reloaded = SQLiteProvider(documentName: "compact", doc: reloadedDoc, store: store, options: manualCompaction)
     try reloaded.start()
     try insert("c", into: reloadedDoc, named: "body")
     try reloaded.compact()
@@ -135,7 +136,48 @@ func compactionRewritesUpdatesToSnapshotAndKeepsAcceptingUpdates() throws {
 
     #expect(try string(in: reloadedDoc, named: "body") == "abc")
     #expect(try reloaded.metadata(forKey: "key") == Data("value".utf8))
-    #expect(try updateRowCount(connection, documentName: "compact") == 1)
+    #expect(try updateRowCount(store, documentName: "compact") == 1)
+}
+
+@Test
+func compactionPreservesRowsWrittenAfterCapturedBoundary() throws {
+    let databaseURL = try temporaryDatabaseURL()
+    let connection = try Connection(databaseURL.path)
+    let store = try SQLiteStore(connection)
+
+    let doc = YDoc()
+    try insert("a", into: doc, named: "body")
+    let snapshot = try doc.encodeStateAsUpdateV1()
+    let compactedThroughID = try store.sync { connection -> Int64? in
+        try SQLiteSchema.create(on: connection)
+        try SQLiteSchema.append(snapshot, kind: .incremental, documentName: "race", on: connection)
+        return try SQLiteSchema.maxUpdateID(documentName: "race", on: connection)
+    }
+    guard let compactedThroughID else {
+        Issue.record("Expected an update row before compaction")
+        return
+    }
+
+    try insert("b", into: doc, named: "body")
+    let laterUpdate = try doc.encodeStateAsUpdateV1()
+    try store.sync { connection in
+        try SQLiteSchema.append(laterUpdate, kind: .incremental, documentName: "race", on: connection)
+        try SQLiteSchema.compact(
+            documentName: "race",
+            snapshot: snapshot,
+            compactedThroughID: compactedThroughID,
+            on: connection
+        )
+    }
+
+    #expect(try updateRowCount(store, documentName: "race") == 2)
+    #expect(try updateKinds(store, documentName: "race") == ["incremental", "snapshot"])
+
+    let reloadedDoc = YDoc()
+    let reloaded = SQLiteProvider(documentName: "race", doc: reloadedDoc, store: store)
+    try reloaded.start()
+    defer { reloaded.destroy() }
+    #expect(try string(in: reloadedDoc, named: "body") == "ab")
 }
 
 @Test
@@ -152,14 +194,14 @@ func startDoesNotAutoCompactExistingRows() throws {
     try insert("b", into: doc, named: "body")
     try insert("c", into: doc, named: "body")
     provider.destroy()
-    #expect(try updateRowCount(connection, documentName: "history") == 3)
+    #expect(try updateRowCount(store, documentName: "history") == 3)
 
     let compactingOptions = try SQLiteProviderOptions(autoCompact: true, compactThreshold: 2)
     let reloaded = SQLiteProvider(documentName: "history", doc: YDoc(), store: store, options: compactingOptions)
     try reloaded.start()
     defer { reloaded.destroy() }
 
-    #expect(try updateRowCount(connection, documentName: "history") == 3)
+    #expect(try updateRowCount(store, documentName: "history") == 3)
 }
 
 @Test
@@ -188,8 +230,8 @@ func storeCanCreateSchemaAndRemoveInactiveDocuments() throws {
     provider.destroy()
 
     try store.removeDocument(named: "remove-me")
-    #expect(try updateRowCount(connection, documentName: "remove-me") == 0)
-    #expect(try metadataRowCount(connection, documentName: "remove-me") == 0)
+    #expect(try updateRowCount(store, documentName: "remove-me") == 0)
+    #expect(try metadataRowCount(store, documentName: "remove-me") == 0)
     #expect(try scalarCount(connection, sql: "SELECT count(*) FROM app_owned_table") == 0)
 }
 
@@ -260,6 +302,12 @@ private func updateRowCount(_ connection: Connection, documentName: String) thro
     )
 }
 
+private func updateRowCount(_ store: SQLiteStore, documentName: String) throws -> Int {
+    try store.sync { connection in
+        try updateRowCount(connection, documentName: documentName)
+    }
+}
+
 private func updateKinds(_ connection: Connection, documentName: String) throws -> [String] {
     try connection.prepare(
         "SELECT update_kind FROM swiftyrs_sqlite_updates WHERE document_name = ? ORDER BY id",
@@ -269,12 +317,24 @@ private func updateKinds(_ connection: Connection, documentName: String) throws 
     }
 }
 
+private func updateKinds(_ store: SQLiteStore, documentName: String) throws -> [String] {
+    try store.sync { connection in
+        try updateKinds(connection, documentName: documentName)
+    }
+}
+
 private func metadataRowCount(_ connection: Connection, documentName: String) throws -> Int {
     try scalarCount(
         connection,
         sql: "SELECT count(*) FROM swiftyrs_sqlite_metadata WHERE document_name = ?",
         documentName
     )
+}
+
+private func metadataRowCount(_ store: SQLiteStore, documentName: String) throws -> Int {
+    try store.sync { connection in
+        try metadataRowCount(connection, documentName: documentName)
+    }
 }
 
 private func scalarCount(_ connection: Connection, sql: String, _ bindings: Binding?...) throws -> Int {

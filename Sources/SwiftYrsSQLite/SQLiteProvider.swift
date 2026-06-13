@@ -54,7 +54,11 @@ public final class SQLiteStore: @unchecked Sendable {
     }
 
     public func removeDocument(named documentName: String) throws {
-        try ensureInactive(documentName: documentName)
+        registryLock.lock()
+        defer { registryLock.unlock() }
+        if activeDocumentNames.contains(documentName) {
+            throw SQLiteProviderError.activeProvider(documentName: documentName)
+        }
         try sync { connection in
             try SQLiteSchema.create(on: connection)
             try connection.transaction {
@@ -77,14 +81,6 @@ public final class SQLiteStore: @unchecked Sendable {
         registryLock.lock()
         activeDocumentNames.remove(documentName)
         registryLock.unlock()
-    }
-
-    func ensureInactive(documentName: String) throws {
-        registryLock.lock()
-        defer { registryLock.unlock() }
-        if activeDocumentNames.contains(documentName) {
-            throw SQLiteProviderError.activeProvider(documentName: documentName)
-        }
     }
 
     func sync<T>(_ body: (Connection) throws -> T) throws -> T {
@@ -139,10 +135,11 @@ public final class SQLiteProvider: @unchecked Sendable {
             lifecycleLock.unlock()
             return
         }
-        lifecycleLock.unlock()
 
-        try store.registerProvider(documentName: documentName)
+        var registered = false
         do {
+            try store.registerProvider(documentName: documentName)
+            registered = true
             try store.createSchemaIfNeeded()
             let updates = try store.sync { connection in
                 try SQLiteSchema.loadUpdates(for: documentName, from: connection)
@@ -157,42 +154,49 @@ public final class SQLiteProvider: @unchecked Sendable {
                 self.persistObservedUpdate(update)
             }
 
-            lifecycleLock.lock()
             isStarted = true
             lifecycleLock.unlock()
             syncedContinuation.yield(true)
         } catch {
             observation?.cancel()
             observation = nil
-            store.unregisterProvider(documentName: documentName)
+            if registered {
+                store.unregisterProvider(documentName: documentName)
+            }
+            lifecycleLock.unlock()
             throw error
         }
     }
 
     public func compact() throws {
+        let compactedThroughID = try store.sync { connection in
+            try SQLiteSchema.maxUpdateID(documentName: documentName, on: connection)
+        }
         let snapshot = try doc.encodeStateAsUpdateV1()
         try store.sync { connection in
-            try SQLiteSchema.compact(documentName: documentName, snapshot: snapshot, on: connection)
+            try SQLiteSchema.compact(
+                documentName: documentName,
+                snapshot: snapshot,
+                compactedThroughID: compactedThroughID,
+                on: connection
+            )
         }
     }
 
     public func setMetadata(_ value: Data, forKey key: String) throws {
         try store.sync { connection in
-            try SQLiteSchema.create(on: connection)
             try SQLiteSchema.setMetadata(value, forKey: key, documentName: documentName, on: connection)
         }
     }
 
     public func metadata(forKey key: String) throws -> Data? {
         try store.sync { connection in
-            try SQLiteSchema.create(on: connection)
             return try SQLiteSchema.metadata(forKey: key, documentName: documentName, from: connection)
         }
     }
 
     public func removeMetadata(forKey key: String) throws {
         try store.sync { connection in
-            try SQLiteSchema.create(on: connection)
             try SQLiteSchema.removeMetadata(forKey: key, documentName: documentName, on: connection)
         }
     }
@@ -326,9 +330,30 @@ enum SQLiteSchema {
         try connection.scalar(updates.filter(documentName == name).count)
     }
 
-    static func compact(documentName name: String, snapshot: YUpdate, on connection: Connection) throws {
+    static func maxUpdateID(documentName name: String, on connection: Connection) throws -> Int64? {
+        try connection.pluck(
+            updates
+                .select(id)
+                .filter(documentName == name)
+                .order(id.desc)
+                .limit(1)
+        )?[id]
+    }
+
+    static func compact(
+        documentName name: String,
+        snapshot: YUpdate,
+        compactedThroughID: Int64?,
+        on connection: Connection
+    ) throws {
         try connection.transaction {
-            try connection.run(updates.filter(documentName == name).delete())
+            if let compactedThroughID {
+                try connection.run(
+                    updates
+                        .filter(documentName == name && id <= compactedThroughID)
+                        .delete()
+                )
+            }
             try append(snapshot, kind: .snapshot, documentName: name, on: connection)
         }
     }
