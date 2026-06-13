@@ -125,9 +125,7 @@ public final class YXmlText: YSharedType {
 
 extension YReadTransaction {
     public func length(of text: YText) throws -> UInt32 {
-        var result: UInt32 = 0
-        try throwIfNeeded(yrs_bridge_text_len(text.handle, handle, &result))
-        return result
+        try readingScalar(UInt32(0)) { yrs_bridge_text_len(text.handle, handle, &$0) }
     }
 
     public func string(from text: YText) throws -> String {
@@ -163,9 +161,7 @@ extension YReadTransaction {
     }
 
     public func count(of array: YArray) throws -> UInt32 {
-        var result: UInt32 = 0
-        try throwIfNeeded(yrs_bridge_array_len(array.handle, handle, &result))
-        return result
+        try readingScalar(UInt32(0)) { yrs_bridge_array_len(array.handle, handle, &$0) }
     }
 
     public func get(_ index: UInt32, from array: YArray) throws -> YValue {
@@ -184,9 +180,7 @@ extension YReadTransaction {
     }
 
     public func childCount(of xml: YXmlContainer) throws -> UInt32 {
-        var result: UInt32 = 0
-        try throwIfNeeded(yrs_bridge_xml_len(xml.handle, handle, &result))
-        return result
+        try readingScalar(UInt32(0)) { yrs_bridge_xml_len(xml.handle, handle, &$0) }
     }
 
     public func string(from xml: YXmlContainer) throws -> String {
@@ -226,9 +220,7 @@ extension YReadTransaction {
     }
 
     public func length(of xmlText: YXmlText) throws -> UInt32 {
-        var result: UInt32 = 0
-        try throwIfNeeded(yrs_bridge_xml_text_len(xmlText.handle, handle, &result))
-        return result
+        try readingScalar(UInt32(0)) { yrs_bridge_xml_text_len(xmlText.handle, handle, &$0) }
     }
 
     public func string(from xmlText: YXmlText) throws -> String {
@@ -322,62 +314,32 @@ extension YWriteTransaction {
     }
 
     public func insertMap(into array: YArray, at index: UInt32) throws -> YMap {
-        var output: OpaquePointer?
-        try throwIfNeeded(yrs_bridge_array_insert_map(array.handle, handle, index, &output))
-        guard let output else {
-            throw YError.nullPointer
-        }
-        return YMap(handle: output)
+        try makeBranch(YMap.init) { yrs_bridge_array_insert_map(array.handle, handle, index, &$0) }
     }
 
     public func insertArray(into array: YArray, at index: UInt32) throws -> YArray {
-        var output: OpaquePointer?
-        try throwIfNeeded(yrs_bridge_array_insert_array(array.handle, handle, index, &output))
-        guard let output else {
-            throw YError.nullPointer
-        }
-        return YArray(handle: output)
+        try makeBranch(YArray.init) { yrs_bridge_array_insert_array(array.handle, handle, index, &$0) }
     }
 
     public func setMap(forKey key: String, in map: YMap) throws -> YMap {
         try key.withCString { keyPointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_map_set_map(map.handle, handle, keyPointer, &output))
-            guard let output else {
-                throw YError.nullPointer
-            }
-            return YMap(handle: output)
+            try makeBranch(YMap.init) { yrs_bridge_map_set_map(map.handle, handle, keyPointer, &$0) }
         }
     }
 
     public func setArray(forKey key: String, in map: YMap) throws -> YArray {
         try key.withCString { keyPointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_map_set_array(map.handle, handle, keyPointer, &output))
-            guard let output else {
-                throw YError.nullPointer
-            }
-            return YArray(handle: output)
+            try makeBranch(YArray.init) { yrs_bridge_map_set_array(map.handle, handle, keyPointer, &$0) }
         }
     }
 
     public func insertText(into array: YArray, at index: UInt32) throws -> YText {
-        var output: OpaquePointer?
-        try throwIfNeeded(yrs_bridge_array_insert_text(array.handle, handle, index, &output))
-        guard let output else {
-            throw YError.nullPointer
-        }
-        return YText(handle: output)
+        try makeBranch(YText.init) { yrs_bridge_array_insert_text(array.handle, handle, index, &$0) }
     }
 
     public func setText(forKey key: String, in map: YMap) throws -> YText {
         try key.withCString { keyPointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_map_set_text(map.handle, handle, keyPointer, &output))
-            guard let output else {
-                throw YError.nullPointer
-            }
-            return YText(handle: output)
+            try makeBranch(YText.init) { yrs_bridge_map_set_text(map.handle, handle, keyPointer, &$0) }
         }
     }
 
@@ -387,22 +349,12 @@ extension YWriteTransaction {
 
     public func insertElement(named name: String, into xml: YXmlContainer, at index: UInt32) throws -> YXmlElement {
         try name.withCString { pointer in
-            var output: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_xml_insert_element(xml.handle, handle, index, pointer, &output))
-            guard let output else {
-                throw YError.nullPointer
-            }
-            return YXmlElement(handle: output)
+            try makeBranch(YXmlElement.init) { yrs_bridge_xml_insert_element(xml.handle, handle, index, pointer, &$0) }
         }
     }
 
     public func insertText(into xml: YXmlContainer, at index: UInt32) throws -> YXmlText {
-        var output: OpaquePointer?
-        try throwIfNeeded(yrs_bridge_xml_insert_text(xml.handle, handle, index, &output))
-        guard let output else {
-            throw YError.nullPointer
-        }
-        return YXmlText(handle: output)
+        try makeBranch(YXmlText.init) { yrs_bridge_xml_insert_text(xml.handle, handle, index, &$0) }
     }
 
     public func remove(from xml: YXmlContainer, at index: UInt32, length: UInt32) throws {

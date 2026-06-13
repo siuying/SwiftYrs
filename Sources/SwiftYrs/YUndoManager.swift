@@ -50,15 +50,11 @@ public final class YUndoManager {
     }
 
     public func undo() throws -> Bool {
-        var output = false
-        try throwIfNeeded(yrs_bridge_undo_manager_undo(handle, &output))
-        return output
+        try readingScalar(false) { yrs_bridge_undo_manager_undo(handle, &$0) }
     }
 
     public func redo() throws -> Bool {
-        var output = false
-        try throwIfNeeded(yrs_bridge_undo_manager_redo(handle, &output))
-        return output
+        try readingScalar(false) { yrs_bridge_undo_manager_redo(handle, &$0) }
     }
 
     public func stopCapturing() {

@@ -211,9 +211,7 @@ public class YReadTransaction {
 
     public var isWritable: Bool {
         get throws {
-            var result = false
-            try throwIfNeeded(yrs_bridge_transaction_is_writable(handle, &result))
-            return result
+            try readingScalar(false) { yrs_bridge_transaction_is_writable(handle, &$0) }
         }
     }
 
