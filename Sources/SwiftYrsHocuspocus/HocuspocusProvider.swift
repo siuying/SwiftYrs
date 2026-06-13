@@ -1,5 +1,8 @@
 import Foundation
+import OSLog
 import SwiftYrs
+
+private let logger = Logger(subsystem: "SwiftYrsHocuspocus", category: "provider")
 
 public enum ConnectionStatus: Equatable, Sendable {
     case connecting
@@ -138,18 +141,9 @@ public actor HocuspocusProvider {
         }
         do {
             try await webSocket.send(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded())
-        } catch {}
-    }
-
-    static func reconnectDelay(attempt: Int, initialDelay: Duration, maxDelay: Duration) -> Duration {
-        var delay = initialDelay
-        guard attempt > 0 else {
-            return min(delay, maxDelay)
+        } catch {
+            logger.error("failed to send stateless message: \(error, privacy: .public)")
         }
-        for _ in 0..<attempt {
-            delay = min(delay + delay, maxDelay)
-        }
-        return delay
     }
 
     private func openWebSocket() async throws {
@@ -204,7 +198,7 @@ public actor HocuspocusProvider {
         guard retryAttempt < maxRetries else {
             return
         }
-        let delay = Self.reconnectDelay(
+        let delay = Backoff.reconnectDelay(
             attempt: retryAttempt,
             initialDelay: initialDelay,
             maxDelay: maxDelay
@@ -228,7 +222,7 @@ public actor HocuspocusProvider {
                 guard !documentObservationGate.isApplyingRemote else {
                     return
                 }
-                guard let update = Self.update(from: event) else {
+                guard let update = event.updateV1 else {
                     return
                 }
                 Task { [weak self] in
@@ -241,7 +235,7 @@ public actor HocuspocusProvider {
                 guard !awarenessObservationGate.isApplyingRemote else {
                     return
                 }
-                let clientIDs = Self.awarenessClientIDs(from: event)
+                let clientIDs = event.changedAwarenessClientIDs
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }
@@ -324,7 +318,9 @@ public actor HocuspocusProvider {
         do {
             let syncMessage = try YSyncMessage.update(update)
             try await webSocket.send(HocuspocusMessage.sync(documentName: name, syncMessage).encoded())
-        } catch {}
+        } catch {
+            logger.error("failed to send local update: \(error, privacy: .public)")
+        }
     }
 
     private func sendAwareness(_ update: YAwarenessUpdate) async {
@@ -333,7 +329,9 @@ public actor HocuspocusProvider {
         }
         do {
             try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
-        } catch {}
+        } catch {
+            logger.error("failed to send awareness update: \(error, privacy: .public)")
+        }
     }
 
     private func sendKnownAwarenessStates() async throws {
@@ -378,51 +376,28 @@ public actor HocuspocusProvider {
             awareness.removeState(for: state.clientID)
         }
     }
-
-    private nonisolated static func update(from event: YObservationEvent) -> YUpdate? {
-        guard event.kind == "updateV1" else {
-            return nil
-        }
-        let bytes = event.array("updateV1").compactMap { value -> UInt8? in
-            if let value = value as? UInt8 {
-                return value
-            }
-            return (value as? NSNumber)?.uint8Value
-        }
-        guard !bytes.isEmpty else {
-            return nil
-        }
-        return .v1(Data(bytes))
-    }
-
-    private nonisolated static func awarenessClientIDs(from event: YObservationEvent) -> [UInt64] {
-        (event.array("added") + event.array("updated") + event.array("removed")).compactMap { value in
-            if let value = value as? UInt64 {
-                return value
-            }
-            return (value as? NSNumber)?.uint64Value
-        }
-    }
 }
 
+/// Guards against echoing our own applied remote update back to the server.
+/// `applyRemote` raises the flag around `document.write`; the document update
+/// observer fires synchronously inside that write, on the same thread, reads
+/// the flag, and skips re-sending. The flag is only set/read/cleared on that
+/// one thread within a single apply, but it still needs synchronization for
+/// `Sendable` correctness because the observer is a nonisolated C callback. The
+/// lock is taken only to touch the flag — never held across `body()` — so the
+/// observer's read during `body()` cannot deadlock against it.
 private final class RemoteApplyGate: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "SwiftYrsHocuspocus.RemoteApplyGate")
+    private let lock = NSLock()
     private var applyingRemote = false
 
     var isApplyingRemote: Bool {
-        queue.sync {
-            applyingRemote
-        }
+        lock.withLock { applyingRemote }
     }
 
     func withApplyingRemote<T>(_ body: () throws -> T) rethrows -> T {
-        queue.sync {
-            applyingRemote = true
-        }
+        lock.withLock { applyingRemote = true }
         defer {
-            queue.sync {
-                applyingRemote = false
-            }
+            lock.withLock { applyingRemote = false }
         }
         return try body()
     }

@@ -20,6 +20,30 @@ public struct YObservationEvent: @unchecked Sendable {
     public func dictionary(_ key: String) -> [String: Any] {
         object[key] as? [String: Any] ?? [:]
     }
+
+    /// The document update carried by a `YDoc.observeUpdates` event as a typed
+    /// payload (ADR-0017), so callers never parse the raw event JSON. `nil` for
+    /// any other event kind.
+    public var updateV1: YUpdate? {
+        guard kind == "updateV1" else {
+            return nil
+        }
+        let bytes = array("updateV1").compactMap { value -> UInt8? in
+            (value as? UInt8) ?? (value as? NSNumber)?.uint8Value
+        }
+        guard !bytes.isEmpty else {
+            return nil
+        }
+        return .v1(Data(bytes))
+    }
+
+    /// Client IDs added, updated, or removed by a `YAwareness` update/change
+    /// event. Empty for non-awareness events.
+    public var changedAwarenessClientIDs: [UInt64] {
+        (array("added") + array("updated") + array("removed")).compactMap { value in
+            (value as? UInt64) ?? (value as? NSNumber)?.uint64Value
+        }
+    }
 }
 
 private final class ObservationCallbackBox {
@@ -124,74 +148,5 @@ extension YDoc {
     }
 }
 
-extension YText {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_text_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
-    }
-}
-
-extension YArray {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_array_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
-    }
-}
-
-extension YMap {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_map_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
-    }
-}
-
-extension YXmlFragment {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_xml_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
-    }
-}
-
-extension YXmlElement {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_xml_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
-    }
-}
-
-extension YXmlText {
-    public func observe(_ callback: @escaping (YObservationEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_xml_text_observe(handle, context, callback)
-        }
-    }
-
-    public func events() throws -> AsyncStream<YObservationEvent> {
-        try makeEventStream(observe: observe)
-    }
-}
+// Shared types (`YText`, `YMap`, `YArray`, XML nodes, weak links) inherit
+// `observe`/`events` from `YSharedType`.

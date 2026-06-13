@@ -115,6 +115,63 @@ func sharedTypeObservationDeliversKeyPathAndXmlChanges() throws {
 }
 
 @Test
+func updateEventExposesTypedUpdateV1() throws {
+    let doc = YDoc()
+    let text = try doc.text(named: "body")
+    var updates: [YUpdate] = []
+
+    let observation = try doc.observeUpdates { event in
+        if let update = event.updateV1 {
+            updates.append(update)
+        }
+    }
+    defer { observation.cancel() }
+
+    try doc.write { transaction in
+        try transaction.insert("hello", into: text, at: 0)
+    }
+
+    let update = try #require(updates.first)
+    let replica = YDoc()
+    try replica.apply(update)
+    let replicaText = try replica.text(named: "body")
+    let replicated = try replica.read { try $0.string(from: replicaText) }
+    #expect(replicated == "hello")
+}
+
+@Test
+func nonUpdateEventHasNoTypedUpdate() throws {
+    let doc = YDoc()
+    let text = try doc.text(named: "body")
+    var events: [YObservationEvent] = []
+
+    let observation = try text.observe { events.append($0) }
+    defer { observation.cancel() }
+
+    try doc.write { transaction in
+        try transaction.insert("hello", into: text, at: 0)
+    }
+
+    let event = try #require(events.first)
+    #expect(event.updateV1 == nil)
+}
+
+@Test
+func awarenessUpdateEventExposesChangedClientIDs() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 7))
+    var changed: [[UInt64]] = []
+
+    let observation = try awareness.observeUpdate { event in
+        changed.append(event.changedAwarenessClientIDs)
+    }
+    defer { observation.cancel() }
+
+    try awareness.setLocalState(["name": "Ada"])
+
+    #expect(changed.first == [7])
+}
+
+@Test
 func asyncObservationStreamYieldsEventsAndTerminates() async throws {
     let doc = YDoc()
     let text = try doc.text(named: "body")

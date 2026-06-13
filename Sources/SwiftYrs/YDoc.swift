@@ -11,7 +11,7 @@ public enum YError: Error, Equatable {
     case unknown(code: Int32)
 }
 
-public struct YStateVector: Equatable {
+public struct YStateVector: Equatable, Sendable {
     public let data: Data
 
     public init(_ data: Data) {
@@ -19,8 +19,8 @@ public struct YStateVector: Equatable {
     }
 }
 
-public struct YUpdate: Equatable {
-    public enum Encoding: Equatable {
+public struct YUpdate: Equatable, Sendable {
+    public enum Encoding: Equatable, Sendable {
         case v1
         case v2
     }
@@ -70,8 +70,20 @@ func data(from buffer: YrsBridgeBuffer) -> Data {
     return Data(bytes: pointer, count: Int(buffer.len))
 }
 
-public final class YDoc {
+/// A document is a reference to a native handle, not data safe to mutate from
+/// several threads at once. It is `@unchecked Sendable` so transports can hold
+/// it across actors and callbacks, on the contract that all access is confined
+/// to a single actor or serial queue (see `CLAUDE.md` on foreign-threaded
+/// handles). The conformance lives here, in core, so every transport relies on
+/// the same contract rather than re-declaring it.
+extension YDoc: @unchecked Sendable {}
+
+public final class YDoc: Equatable {
     let handle: OpaquePointer
+
+    public static func == (lhs: YDoc, rhs: YDoc) -> Bool {
+        lhs === rhs
+    }
 
     public init() {
         guard let handle = yrs_bridge_doc_new() else {
@@ -190,7 +202,7 @@ public final class YDoc {
     }
 }
 
-public final class YReadTransaction {
+public class YReadTransaction {
     let handle: OpaquePointer
 
     init(handle: OpaquePointer) {
@@ -239,21 +251,9 @@ public final class YReadTransaction {
     }
 }
 
-public final class YWriteTransaction {
-    let handle: OpaquePointer
-
-    init(handle: OpaquePointer) {
-        self.handle = handle
-    }
-
-    public var isWritable: Bool {
-        get throws {
-            var result = false
-            try throwIfNeeded(yrs_bridge_transaction_is_writable(handle, &result))
-            return result
-        }
-    }
-
+/// A write transaction is also a read transaction: every read accessor on
+/// `YReadTransaction` is available here through inheritance.
+public final class YWriteTransaction: YReadTransaction {
     public func apply(_ update: YUpdate) throws {
         try update.data.withUnsafeBytes { bytes in
             guard let baseAddress = bytes.bindMemory(to: UInt8.self).baseAddress else {

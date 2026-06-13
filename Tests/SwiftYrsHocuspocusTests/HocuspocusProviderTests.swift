@@ -387,25 +387,6 @@ func providerResetsBackoffAfterHealthyReconnect() async throws {
 }
 
 @Test
-func providerBackoffDelayIsExponentialAndCapped() {
-    #expect(HocuspocusProvider.reconnectDelay(
-        attempt: 0,
-        initialDelay: .milliseconds(10),
-        maxDelay: .milliseconds(100)
-    ) == .milliseconds(10))
-    #expect(HocuspocusProvider.reconnectDelay(
-        attempt: 3,
-        initialDelay: .milliseconds(10),
-        maxDelay: .milliseconds(100)
-    ) == .milliseconds(80))
-    #expect(HocuspocusProvider.reconnectDelay(
-        attempt: 6,
-        initialDelay: .milliseconds(10),
-        maxDelay: .milliseconds(100)
-    ) == .milliseconds(100))
-}
-
-@Test
 func providerSendsAndReceivesStatelessMessages() async throws {
     let socket = FakeHocuspocusWebSocket()
     let provider = HocuspocusProvider(
