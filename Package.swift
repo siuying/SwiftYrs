@@ -102,6 +102,7 @@ let package = Package(
     ],
     products: [
         .library(name: "SwiftYrs", targets: ["SwiftYrs"]),
+        .library(name: "SwiftYrsCloudKit", targets: ["SwiftYrsCloudKit"]),
         .library(name: "SwiftYrsSQLite", targets: ["SwiftYrsSQLite"]),
     ] + hocuspocusProducts + webRTCProducts,
     dependencies: packageDependencies,
@@ -118,10 +119,24 @@ let package = Package(
                 .product(name: "SQLite", package: "SQLite.swift"),
             ]
         ),
+        .target(
+            name: "SwiftYrsCloudKit",
+            dependencies: [
+                "SwiftYrs",
+                "SwiftYrsSQLite",
+            ]
+        ),
         .testTarget(
             name: "SwiftYrsTests",
             dependencies: ["SwiftYrs"],
             resources: [.process("Fixtures")]
+        ),
+        .testTarget(
+            name: "SwiftYrsCloudKitTests",
+            dependencies: [
+                "SwiftYrsCloudKit",
+                .product(name: "SQLite", package: "SQLite.swift"),
+            ]
         ),
         .testTarget(
             name: "SwiftYrsSQLiteTests",
