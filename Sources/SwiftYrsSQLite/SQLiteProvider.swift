@@ -68,6 +68,27 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func setMetadata(_ value: Data, forKey key: String, documentName: String) throws {
+        try sync { connection in
+            try SQLiteSchema.create(on: connection)
+            try SQLiteSchema.setMetadata(value, forKey: key, documentName: documentName, on: connection)
+        }
+    }
+
+    public func metadata(forKey key: String, documentName: String) throws -> Data? {
+        try sync { connection in
+            try SQLiteSchema.create(on: connection)
+            return try SQLiteSchema.metadata(forKey: key, documentName: documentName, from: connection)
+        }
+    }
+
+    public func removeMetadata(forKey key: String, documentName: String) throws {
+        try sync { connection in
+            try SQLiteSchema.create(on: connection)
+            try SQLiteSchema.removeMetadata(forKey: key, documentName: documentName, on: connection)
+        }
+    }
+
     func registerProvider(documentName: String) throws {
         registryLock.lock()
         defer { registryLock.unlock() }
@@ -184,21 +205,15 @@ public final class SQLiteProvider: @unchecked Sendable {
     }
 
     public func setMetadata(_ value: Data, forKey key: String) throws {
-        try store.sync { connection in
-            try SQLiteSchema.setMetadata(value, forKey: key, documentName: documentName, on: connection)
-        }
+        try store.setMetadata(value, forKey: key, documentName: documentName)
     }
 
     public func metadata(forKey key: String) throws -> Data? {
-        try store.sync { connection in
-            return try SQLiteSchema.metadata(forKey: key, documentName: documentName, from: connection)
-        }
+        try store.metadata(forKey: key, documentName: documentName)
     }
 
     public func removeMetadata(forKey key: String) throws {
-        try store.sync { connection in
-            try SQLiteSchema.removeMetadata(forKey: key, documentName: documentName, on: connection)
-        }
+        try store.removeMetadata(forKey: key, documentName: documentName)
     }
 
     public func destroy() {
