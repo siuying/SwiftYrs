@@ -37,9 +37,17 @@ public final class CloudKitSyncStore: CloudKitSyncEngineHandler, @unchecked Send
         self.metadataStore = metadataStore
     }
 
-    /// Wire the store as the engine's handler. Call once before starting providers.
+    /// Wire the store as the engine's handler and restore persisted engine state
+    /// so a relaunch resumes from its change token rather than cold-fetching.
+    /// Call once before starting providers.
     public func start() async {
         await adapter.setHandler(self)
+        if let state = try? metadataStore.data(
+            forKey: CloudKitSyncStateKeys.engineState,
+            documentName: CloudKitSyncStateKeys.storeNamespace
+        ) {
+            await adapter.loadState(state)
+        }
     }
 
     // MARK: Provider registry
@@ -102,9 +110,12 @@ public final class CloudKitSyncStore: CloudKitSyncEngineHandler, @unchecked Send
 
     public func handleEvent(_ event: CloudKitSyncEvent) async {
         switch event {
-        case .stateUpdate:
-            // Engine-state serialization persistence is wired in issue #66.
-            break
+        case let .stateUpdate(data):
+            try? metadataStore.set(
+                data,
+                forKey: CloudKitSyncStateKeys.engineState,
+                documentName: CloudKitSyncStateKeys.storeNamespace
+            )
         case let .accountChange(change):
             for provider in allProviders() {
                 await provider.handleAccountChange(change)
