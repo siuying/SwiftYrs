@@ -343,9 +343,22 @@ swift run ChatExample --name alice
 swift run ChatExample --name bob
 ```
 
+To keep local chat history across restarts, pass a SQLite database path:
+
+```sh
+swift run ChatExample --name alice --database /tmp/swiftyrs-chat.sqlite
+```
+
 Type a message and press Enter to send it; it appears on every peer's screen.
 Use `/quit` (or Ctrl-C) to leave — both tear down the connection cleanly before
 exiting.
+
+When `--database` is present, the example starts `SQLiteProvider` before
+connecting WebRTC, using the room name as the SQLite document name. Restarting
+with the same `--room` and database path replays local history before network
+sync completes. Manual verification: run the example with `--database`, send a
+message, quit, then run the same command again and confirm the message appears
+in the initial history.
 
 Options (all optional):
 
@@ -355,6 +368,7 @@ Options (all optional):
 | `--room <string>` | `chat-demo` | Room to join; peers in the same room see each other |
 | `--signaling <url>` | `ws://127.0.0.1:4444` | Signaling server URL; comma-separated and repeatable |
 | `--password <string>` | none | Optional shared-room password (encrypts signaling) |
+| `--database <path>` | none | SQLite database path for local persistence |
 
 ---
 

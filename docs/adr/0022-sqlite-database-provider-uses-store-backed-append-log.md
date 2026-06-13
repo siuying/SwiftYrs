@@ -1,0 +1,5 @@
+# SQLite database provider uses a store-backed append log
+
+`SwiftYrsSQLite` will be a separate optional product that provides `SQLiteProvider` for database-backed document persistence. The provider persists observed `YUpdate.v1` values as an append-only SQLite log keyed by document name, supports manual and threshold-based compaction into a full-state snapshot update, and keeps Provider Metadata in separate document/key-scoped rows that are never synced as CRDT content.
+
+The provider is a synchronous class rather than an actor because SQLite operations are synchronous, but it serializes database work through a caller-created `SQLiteStore` that wraps a SQLite.swift `Connection`; one store may serve many document providers, while multiple stores around the same connection are unsupported. This exposes SQLite.swift intentionally so the application owns database-level policy such as journal mode, busy timeout, and shared database setup instead of the provider reinventing connection configuration.

@@ -9,16 +9,20 @@ The Swift 6 API surface for Yjs/Yrs document types, transactions, updates, state
 _Avoid_: Provider package, app sync layer
 
 **Provider**:
-The umbrella term, following Yjs, for an optional integration that keeps a document in sync with something outside the Core Swift Package. It has two subtypes: a Connection Provider and a Database Provider.
+The umbrella term, following Yjs, for an optional integration that keeps a document in sync with something outside the Core Swift Package. Yjs defines two provider families: Connection Providers for network syncing and Database Providers for database syncing.
 _Avoid_: Core library, sync protocol
 
 **Connection Provider**:
-A Provider that sends and receives Core Swift Package protocol payloads over a concrete network such as WebSocket or WebRTC. (Earlier drafts of this glossary called it a "Network Provider".)
+A Provider that syncs documents over a network connection such as WebSocket or WebRTC. (Earlier drafts of this glossary called it a "Network Provider".)
 _Avoid_: Database Provider, Core library, sync protocol
 
 **Database Provider**:
-A Provider that syncs a document to and from durable local storage: it loads a document's prior state on startup and durably records subsequent updates. It never talks to a peer and carries no sync protocol over a wire.
+A Provider that syncs documents to a database: it loads a document's prior state and durably records subsequent updates. It never talks to a peer and carries no sync protocol over a wire.
 _Avoid_: Connection Provider, network sync, server
+
+**Provider Metadata**:
+Provider-local key/value data scoped by document name and metadata key. It is stored alongside provider state but is not CRDT document content and is not synced with peers.
+_Avoid_: Shared Type content, YMap entry, awareness state
 
 **FFI Surface**:
 The C ABI exported by `yffi` or a local fork/shim of it. It is the boundary the Swift package wraps, not the API Swift users should write against directly.
@@ -217,6 +221,10 @@ Domain expert: "No. It only relays Peer Signals so peers in a Room can find each
 Dev: "Is a SQLite persistence layer a kind of Connection Provider?"
 
 Domain expert: "No. It is a Database Provider — the other Provider subtype. It loads a document's stored state and records later updates to disk. It never speaks a sync protocol over a wire, so it gets no connect/reconnect vocabulary."
+
+Dev: "Can provider metadata hold app state that syncs to other peers?"
+
+Domain expert: "No. Provider Metadata is local to one provider store and scoped by document name plus key. Use Shared Type content for CRDT state that must sync."
 
 Dev: "Is the Room a different thing from the document name?"
 

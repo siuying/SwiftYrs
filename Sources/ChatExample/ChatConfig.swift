@@ -11,6 +11,7 @@ import Foundation
 /// - `--signaling <url>` signaling server URL; comma-separated and repeatable
 ///                       (default `ws://127.0.0.1:4444`).
 /// - `--password <string>` optional shared-room password.
+/// - `--database <path>` optional SQLite database path for local persistence.
 struct ChatConfig {
     static let defaultSignaling = URL(string: "ws://127.0.0.1:4444")!
 
@@ -18,6 +19,7 @@ struct ChatConfig {
     var room: String
     var signaling: [URL]
     var password: String?
+    var databasePath: String?
 
     /// Parses `arguments` (excluding the executable path) into a `ChatConfig`,
     /// resolving the sender name via `promptName` / `generateName` when no
@@ -31,6 +33,7 @@ struct ChatConfig {
         var room = "chat-demo"
         var signaling: [URL] = []
         var password: String?
+        var databasePath: String?
 
         var index = arguments.startIndex
         while index < arguments.endIndex {
@@ -51,6 +54,8 @@ struct ChatConfig {
                 room = try value()
             case "--password":
                 password = try value()
+            case "--database":
+                databasePath = try value()
             case "--signaling":
                 for piece in try value().split(separator: ",") {
                     let trimmed = piece.trimmingCharacters(in: .whitespaces)
@@ -72,7 +77,8 @@ struct ChatConfig {
             name: resolvedName,
             room: room,
             signaling: signaling.isEmpty ? [defaultSignaling] : signaling,
-            password: password
+            password: password,
+            databasePath: databasePath
         )
     }
 

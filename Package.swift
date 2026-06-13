@@ -17,7 +17,12 @@ let webRTCProducts: [Product] = []
 
 let webRTCTargets: [Target] = []
 
-let packageDependencies: [Package.Dependency] = []
+let packageDependencies: [Package.Dependency] = [
+    .package(
+        url: "https://github.com/stephencelis/SQLite.swift",
+        from: "0.15.4"
+    ),
+]
 #else
 let ffiTarget: Target = .binaryTarget(
     name: "YrsBridgeFFI",
@@ -68,11 +73,19 @@ let webRTCTargets: [Target] = [
     ),
     .executableTarget(
         name: "ChatExample",
-        dependencies: ["SwiftYrsWebRTC"]
+        dependencies: [
+            "SwiftYrsSQLite",
+            "SwiftYrsWebRTC",
+            .product(name: "SQLite", package: "SQLite.swift"),
+        ]
     ),
 ]
 
 let packageDependencies: [Package.Dependency] = [
+    .package(
+        url: "https://github.com/stephencelis/SQLite.swift",
+        from: "0.15.4"
+    ),
     .package(
         url: "https://github.com/GetStream/stream-video-swift-webrtc",
         from: "145.9.0"
@@ -89,6 +102,7 @@ let package = Package(
     ],
     products: [
         .library(name: "SwiftYrs", targets: ["SwiftYrs"]),
+        .library(name: "SwiftYrsSQLite", targets: ["SwiftYrsSQLite"]),
     ] + hocuspocusProducts + webRTCProducts,
     dependencies: packageDependencies,
     targets: [
@@ -97,10 +111,21 @@ let package = Package(
             name: "SwiftYrs",
             dependencies: ["YrsBridgeFFI"]
         ),
+        .target(
+            name: "SwiftYrsSQLite",
+            dependencies: [
+                "SwiftYrs",
+                .product(name: "SQLite", package: "SQLite.swift"),
+            ]
+        ),
         .testTarget(
             name: "SwiftYrsTests",
             dependencies: ["SwiftYrs"],
             resources: [.process("Fixtures")]
+        ),
+        .testTarget(
+            name: "SwiftYrsSQLiteTests",
+            dependencies: ["SwiftYrsSQLite"]
         ),
     ] + hocuspocusTargets + webRTCTargets,
 )

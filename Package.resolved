@@ -1,6 +1,15 @@
 {
-  "originHash" : "a00d1083f2a1c975df3a212935119531988347d66a1e65ded4445bd11c762d37",
+  "originHash" : "abf3b69968c2da30aef7b219357153742369599c19daecac219f1dd8d07948a7",
   "pins" : [
+    {
+      "identity" : "sqlite.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/stephencelis/SQLite.swift",
+      "state" : {
+        "revision" : "964c300fb0736699ce945c9edb56ecd62eba27a3",
+        "version" : "0.16.0"
+      }
+    },
     {
       "identity" : "stream-video-swift-webrtc",
       "kind" : "remoteSourceControl",
