@@ -1,0 +1,9 @@
+{
+  "clientID": 1,
+  "fromClock": 0,
+  "expectedClock": 3,
+  "clientOneUpdate": "AQEBAAQBBGJvZHkDb25lAA==",
+  "clientTwoUpdate": "AQECAAQBBGJvZHkDdHdvAA==",
+  "scopedStateVector": "AgEAAgM=",
+  "clientOneDiff": "AQEBAAQBBGJvZHkDb25lAA=="
+}
