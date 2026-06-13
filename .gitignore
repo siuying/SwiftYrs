@@ -4,3 +4,5 @@
 Artifacts
 native/yrs-bridge/target
 node_modules
+# XcodeGen-generated example project
+Examples/TodoCloudKit/*.xcodeproj
