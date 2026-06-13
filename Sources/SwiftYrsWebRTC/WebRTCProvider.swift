@@ -453,13 +453,13 @@ public actor WebRTCProvider {
     private func startObserving() throws {
         if documentObservation == nil {
             documentObservation = try doc.observeUpdates { [weak self] event in
-                guard let update = Self.update(from: event) else { return }
+                guard let update = event.updateV1 else { return }
                 Task { [weak self] in await self?.broadcastDocumentUpdate(update) }
             }
         }
         if awarenessObservation == nil {
             awarenessObservation = try awareness.observeUpdate { [weak self, awareness] event in
-                let clientIDs = Self.awarenessClientIDs(from: event)
+                let clientIDs = event.changedAwarenessClientIDs
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else { return }
                 Task { [weak self] in await self?.broadcastAwarenessUpdate(update) }
             }
@@ -549,20 +549,5 @@ public actor WebRTCProvider {
 
     private func newGlareToken() -> Double {
         Date().timeIntervalSince1970 * 1000 + Double.random(in: 0..<1)
-    }
-
-    private nonisolated static func update(from event: YObservationEvent) -> YUpdate? {
-        guard event.kind == "updateV1" else { return nil }
-        let bytes = event.array("updateV1").compactMap { value -> UInt8? in
-            (value as? UInt8) ?? (value as? NSNumber)?.uint8Value
-        }
-        guard !bytes.isEmpty else { return nil }
-        return .v1(Data(bytes))
-    }
-
-    private nonisolated static func awarenessClientIDs(from event: YObservationEvent) -> [UInt64] {
-        (event.array("added") + event.array("updated") + event.array("removed")).compactMap { value in
-            (value as? UInt64) ?? (value as? NSNumber)?.uint64Value
-        }
     }
 }

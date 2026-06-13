@@ -217,7 +217,7 @@ public actor HocuspocusProvider {
                 guard !documentObservationGate.isApplyingRemote else {
                     return
                 }
-                guard let update = Self.update(from: event) else {
+                guard let update = event.updateV1 else {
                     return
                 }
                 Task { [weak self] in
@@ -230,7 +230,7 @@ public actor HocuspocusProvider {
                 guard !awarenessObservationGate.isApplyingRemote else {
                     return
                 }
-                let clientIDs = Self.awarenessClientIDs(from: event)
+                let clientIDs = event.changedAwarenessClientIDs
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }
@@ -365,31 +365,6 @@ public actor HocuspocusProvider {
         }
         for state in states where state.clientID != awareness.clientID {
             awareness.removeState(for: state.clientID)
-        }
-    }
-
-    private nonisolated static func update(from event: YObservationEvent) -> YUpdate? {
-        guard event.kind == "updateV1" else {
-            return nil
-        }
-        let bytes = event.array("updateV1").compactMap { value -> UInt8? in
-            if let value = value as? UInt8 {
-                return value
-            }
-            return (value as? NSNumber)?.uint8Value
-        }
-        guard !bytes.isEmpty else {
-            return nil
-        }
-        return .v1(Data(bytes))
-    }
-
-    private nonisolated static func awarenessClientIDs(from event: YObservationEvent) -> [UInt64] {
-        (event.array("added") + event.array("updated") + event.array("removed")).compactMap { value in
-            if let value = value as? UInt64 {
-                return value
-            }
-            return (value as? NSNumber)?.uint64Value
         }
     }
 }
