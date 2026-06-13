@@ -37,6 +37,7 @@ public actor CloudKitProvider {
     private let store: CloudKitSyncStore
     private let options: CloudKitProviderOptions
     private let capture = ClientDiffCapture()
+    private let recoveryPlanner = RecoveryPlanner()
     private nonisolated let syncedContinuation: AsyncStream<Bool>.Continuation
     private nonisolated let errorsContinuation: AsyncStream<Error>.Continuation
     private nonisolated let teardownQueue = DispatchQueue(label: "SwiftYrsCloudKit.CloudKitProvider.teardown")
@@ -44,6 +45,9 @@ public actor CloudKitProvider {
     private var clientID: UInt64 = 0
     /// The clock through which this session's writes are confirmed sent.
     private var marker: UInt32 = 0
+    /// Open writer sessions whose authored edits are not yet confirmed uploaded
+    /// (ADR-0024), persisted across launches. Normally 0–1 entries.
+    private var drainSet: [UInt64: UInt32] = [:]
     /// Records computed at flush time, supplied to the engine at send time.
     private var pendingRecords: [CKRecord.ID: CKRecord] = [:]
     private var observation: Observation?
@@ -71,7 +75,7 @@ public actor CloudKitProvider {
         self.errorsContinuation = errorsPair.continuation
     }
 
-    public func start() throws {
+    public func start() async throws {
         guard !destroyed else { throw CloudKitProviderError.destroyed }
         guard !started else { return }
 
@@ -85,6 +89,15 @@ public actor CloudKitProvider {
             Task { await self.scheduleFlush() }
         }
         started = true
+
+        // Recover prior sessions whose edits never confirmed (chained crashes
+        // leave more than one open clientID), then register this session.
+        let priorOpenClients = loadDrainSet()
+        drainSet = priorOpenClients
+        drainSet[clientID] = marker
+        persistDrainSet()
+        try await recover(priorOpenClients: priorOpenClients)
+
         syncedContinuation.yield(true)
     }
 
@@ -100,6 +113,13 @@ public actor CloudKitProvider {
     /// before a possible kill (ADR-0023). Equivalent to an explicit `flush()`.
     public func flushForBackground() async throws {
         try await flush()
+    }
+
+    /// Pull remote changes from CloudKit and apply them to the doc. Inbound
+    /// records arrive through the engine's `fetchedChanges` event.
+    public func fetch() async throws {
+        guard started, !destroyed else { return }
+        try await store.fetchChanges()
     }
 
     private func scheduleFlush() {
@@ -126,24 +146,93 @@ public actor CloudKitProvider {
         guard started, !destroyed else { return }
         guard let captured = try await captureOutstandingDiff() else { return }
 
+        if let recordID = enqueueIncremental(
+            clientID: clientID,
+            fromClock: marker,
+            toClock: captured.toClock,
+            update: captured.update
+        ) {
+            await store.enqueueSave(recordID)
+        }
+        try await store.sendChanges()
+    }
+
+    /// On (re)start, re-derive and re-enqueue each prior open session's
+    /// outstanding client-scoped diff so un-confirmed edits propagate, retiring
+    /// any whose diff is empty (ADR-0024). The current session is excluded — it
+    /// has authored nothing yet.
+    private func recover(priorOpenClients: [UInt64: UInt32]) async throws {
+        let others = priorOpenClients.filter { $0.key != clientID }
+        guard !others.isEmpty else { return }
+
+        let plan = try recoveryPlanner.plan(openClients: others, in: doc)
+        for retiredID in plan.retired {
+            drainSet[retiredID] = nil
+        }
+        var enqueued = false
+        for resend in plan.resends {
+            let toClock = try capture.currentClock(in: doc, clientID: resend.clientID)
+            if let recordID = enqueueIncremental(
+                clientID: resend.clientID,
+                fromClock: resend.fromClock,
+                toClock: toClock,
+                update: resend.update
+            ) {
+                await store.enqueueSave(recordID)
+                enqueued = true
+            }
+        }
+        persistDrainSet()
+        if enqueued {
+            try await store.sendChanges()
+        }
+    }
+
+    @discardableResult
+    private func enqueueIncremental(
+        clientID: UInt64,
+        fromClock: UInt32,
+        toClock: UInt32,
+        update: YUpdate
+    ) -> CKRecord.ID? {
         let recordID = store.codec.incrementalRecordID(
             documentName: documentName,
             clientID: clientID,
-            fromClock: marker,
-            toClock: captured.toClock
+            fromClock: fromClock,
+            toClock: toClock
         )
-        let record = try store.codec.encodeIncremental(
+        guard let record = try? store.codec.encodeIncremental(
             CloudKitIncrementalRecordPayload(
                 documentName: documentName,
                 clientID: clientID,
-                fromClock: marker,
-                toClock: captured.toClock,
-                update: captured.update
+                fromClock: fromClock,
+                toClock: toClock,
+                update: update
             )
-        )
+        ) else {
+            return nil
+        }
         pendingRecords[recordID] = record
-        await store.enqueueSave(recordID)
-        try await store.sendChanges()
+        return recordID
+    }
+
+    private func loadDrainSet() -> [UInt64: UInt32] {
+        guard let data = try? store.metadataStore.data(
+            forKey: CloudKitSyncStateKeys.drainSet,
+            documentName: documentName
+        ), let decoded = try? DrainSetCodec.decode(data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    private func persistDrainSet() {
+        guard let data = try? DrainSetCodec.encode(drainSet) else { return }
+        try? store.metadataStore.set(
+            data,
+            forKey: CloudKitSyncStateKeys.drainSet,
+            documentName: documentName
+        )
     }
 
     /// Capture this session's client-scoped diff since the marker, retrying on
@@ -177,11 +266,22 @@ public actor CloudKitProvider {
     }
 
     func handleSent(saved: [CKRecord], deleted: [CKRecord.ID], failed: [CloudKitSendFailure]) {
+        var drainSetChanged = false
         for record in saved {
             guard pendingRecords.removeValue(forKey: record.recordID) != nil else { continue }
-            if let payload = try? store.codec.decodeIncremental(record) {
+            guard let payload = try? store.codec.decodeIncremental(record) else { continue }
+            if payload.clientID == clientID {
+                // This session's writes are confirmed through toClock.
                 marker = max(marker, payload.toClock)
+                drainSet[clientID] = marker
+            } else {
+                // A prior dead session's full diff is confirmed → retire it.
+                drainSet[payload.clientID] = nil
             }
+            drainSetChanged = true
+        }
+        if drainSetChanged {
+            persistDrainSet()
         }
         for failure in failed {
             errorsContinuation.yield(failure.error)
@@ -191,8 +291,62 @@ public actor CloudKitProvider {
         }
     }
 
-    /// Inbound record apply (issue #65).
-    func handleFetched(modified: [CKRecord], deleted: [CKRecord.ID]) {}
+    /// Apply remote records to the doc (ADR-0023). Yjs updates are commutative
+    /// and idempotent, so applies are order-independent and safe to retry on
+    /// `transactionConflict`. Deletions are GC of subsumed incrementals — their
+    /// content already lives in the doc/snapshot — so they need no apply.
+    ///
+    /// This is echo-safe by construction: capture is client-scoped to *this*
+    /// session's clientID, and applying another writer's update never advances
+    /// our clientID's clock, so the flush that the apply schedules produces an
+    /// empty diff and re-uploads nothing.
+    func handleFetched(modified: [CKRecord], deleted: [CKRecord.ID]) async {
+        var applied = false
+        for record in modified {
+            guard let update = decodeUpdate(from: record) else { continue }
+            do {
+                try await applyWithRetry(update)
+                applied = true
+            } catch {
+                errorsContinuation.yield(error)
+            }
+        }
+        if applied {
+            syncedContinuation.yield(true)
+        }
+    }
+
+    private func decodeUpdate(from record: CKRecord) -> YUpdate? {
+        do {
+            switch record.recordType {
+            case CloudKitRecordType.incremental:
+                return try store.codec.decodeIncremental(record).update
+            case CloudKitRecordType.snapshot:
+                return try store.codec.decodeSnapshot(record).update
+            default:
+                return nil
+            }
+        } catch {
+            errorsContinuation.yield(error)
+            return nil
+        }
+    }
+
+    private func applyWithRetry(_ update: YUpdate) async throws {
+        var attempts = 0
+        while true {
+            do {
+                try doc.apply(update)
+                return
+            } catch YError.transactionConflict {
+                attempts += 1
+                guard attempts < options.maxTransactionRetries else {
+                    throw CloudKitProviderError.transactionConflict
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
+    }
 
     /// Account-change handling (issue #68).
     func handleAccountChange(_ change: CloudKitAccountChange) {}

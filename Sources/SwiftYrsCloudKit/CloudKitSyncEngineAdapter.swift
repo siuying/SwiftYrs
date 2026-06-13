@@ -65,6 +65,11 @@ public protocol CloudKitSyncEngineAdapter: Sendable {
     /// Wires the handler that supplies record bytes and receives events.
     func setHandler(_ handler: CloudKitSyncEngineHandler) async
 
+    /// Restore the engine from a previously-persisted state serialization so a
+    /// relaunch resumes from its change token instead of cold-fetching the whole
+    /// document. Called once at startup when persisted state exists.
+    func loadState(_ data: Data) async
+
     /// Enqueue a pending record save/delete. Bytes are supplied later via
     /// ``CloudKitSyncEngineHandler/recordToSave(_:)`` at send time.
     func enqueueSave(_ recordID: CKRecord.ID) async

@@ -35,8 +35,16 @@ public actor MockCloudKitSyncEngine: CloudKitSyncEngineAdapter {
 
     // MARK: CloudKitSyncEngineAdapter
 
+    /// The state serialization the engine was restored from, if any. A nil
+    /// value means a cold start (full re-fetch in the real engine).
+    public private(set) var restoredState: Data?
+
     public func setHandler(_ handler: CloudKitSyncEngineHandler) {
         self.handler = handler
+    }
+
+    public func loadState(_ data: Data) {
+        restoredState = data
     }
 
     public func enqueueSave(_ recordID: CKRecord.ID) {
