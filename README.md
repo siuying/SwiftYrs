@@ -14,8 +14,9 @@ Swift binding for [Yrs](https://github.com/y-crdt/y-crdt), the Rust port of the 
 SwiftYrs/
 ├── Sources/SwiftYrs/          # Swift 6 public API
 │   ├── YDoc.swift             # YDoc, YReadTransaction, YWriteTransaction, YUpdate, YStateVector
-│   ├── YSharedTypes.swift     # YText, YMap, YArray, YXmlFragment/Element/Text, YValue
-│   ├── YObservation.swift     # Observation, AsyncStream bridges, per-type observers
+│   ├── YSharedTypes.swift     # YSharedType base class; YText, YMap, YArray, YXmlFragment/Element/Text, YValue
+│   ├── YEvent.swift           # YEvent, YSharedEvent, YAwarenessChange — typed observation events
+│   ├── YObservation.swift     # Observation, AsyncStream bridges, document observers
 │   ├── YAwareness.swift       # YAwareness, YAwarenessUpdate, awareness observers
 │   ├── YSync.swift            # YSyncMessage — encode/decode y-protocols messages
 │   ├── YUndoManager.swift     # YUndoManager — undo/redo with origin filtering
