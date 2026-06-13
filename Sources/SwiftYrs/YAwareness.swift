@@ -1,7 +1,7 @@
 import Foundation
 import YrsBridgeFFI
 
-public struct YAwarenessUpdate: Equatable {
+public struct YAwarenessUpdate: Equatable, Sendable {
     public let data: Data
 
     public init(_ data: Data) {
@@ -13,6 +13,11 @@ public struct YAwarenessClientState {
     public let clientID: UInt64
     public let state: Any
 }
+
+/// Awareness wraps a native handle; like `YDoc` it is `@unchecked Sendable` on
+/// the contract that access is confined to one actor or serial queue. Declared
+/// in core so transports share the contract.
+extension YAwareness: @unchecked Sendable {}
 
 public final class YAwareness {
     private let document: YDoc
