@@ -49,6 +49,8 @@ public actor CloudKitProvider {
     public let doc: YDoc
     public nonisolated let synced: AsyncStream<Bool>
     public nonisolated let errors: AsyncStream<Error>
+    /// iCloud account-state changes the app can observe (ADR-0023).
+    public nonisolated let accountChanges: AsyncStream<CloudKitAccountChange>
 
     private let store: CloudKitSyncStore
     private let options: CloudKitProviderOptions
@@ -56,6 +58,7 @@ public actor CloudKitProvider {
     private let recoveryPlanner = RecoveryPlanner()
     private nonisolated let syncedContinuation: AsyncStream<Bool>.Continuation
     private nonisolated let errorsContinuation: AsyncStream<Error>.Continuation
+    private nonisolated let accountChangesContinuation: AsyncStream<CloudKitAccountChange>.Continuation
     private nonisolated let teardownQueue = DispatchQueue(label: "SwiftYrsCloudKit.CloudKitProvider.teardown")
 
     private var clientID: UInt64 = 0
@@ -79,6 +82,9 @@ public actor CloudKitProvider {
     private var debounceTask: Task<Void, Never>?
     private var started = false
     private var destroyed = false
+    /// Set after an account sign-out/switch: ingress stops and nothing is
+    /// enqueued, so the existing doc never leaks into a new account (ADR-0023).
+    private var suspended = false
 
     public init(
         documentName: String,
@@ -98,6 +104,10 @@ public actor CloudKitProvider {
         let errorsPair = AsyncStream.makeStream(of: Error.self)
         self.errors = errorsPair.stream
         self.errorsContinuation = errorsPair.continuation
+
+        let accountPair = AsyncStream.makeStream(of: CloudKitAccountChange.self)
+        self.accountChanges = accountPair.stream
+        self.accountChangesContinuation = accountPair.continuation
     }
 
     public func start() async throws {
@@ -156,7 +166,7 @@ public actor CloudKitProvider {
     }
 
     private func scheduleFlush() {
-        guard started, !destroyed else { return }
+        guard started, !destroyed, !suspended else { return }
         debounceTask?.cancel()
         debounceTask = Task { [weak self, debounce = options.debounce] in
             try? await Task.sleep(for: debounce)
@@ -176,7 +186,7 @@ public actor CloudKitProvider {
     }
 
     private func performFlush() async throws {
-        guard started, !destroyed else { return }
+        guard started, !destroyed, !suspended else { return }
         guard let captured = try await captureOutstandingDiff() else { return }
 
         if let recordID = enqueueIncremental(
@@ -276,7 +286,7 @@ public actor CloudKitProvider {
     /// pre-compaction fetch dampen the multi-device herd: if a freshly-fetched
     /// snapshot already subsumes the backlog, this trailing device backs off.
     private func compactIfNeeded() async {
-        guard started, !destroyed else { return }
+        guard started, !destroyed, !suspended else { return }
         let summaries = Array(knownIncrementals.values)
         let bytes = summaries.reduce(0) { $0 + $1.byteCount }
         guard options.compaction.shouldCompact(
@@ -404,7 +414,7 @@ public actor CloudKitProvider {
     // MARK: Handler callbacks (routed from the store)
 
     func recordToSave(_ recordID: CKRecord.ID) -> CKRecord? {
-        pendingRecords[recordID]
+        suspended ? nil : pendingRecords[recordID]
     }
 
     /// Records the outcome of a send. The compaction flow reads
@@ -534,8 +544,28 @@ public actor CloudKitProvider {
         }
     }
 
-    /// Account-change handling (issue #68).
-    func handleAccountChange(_ change: CloudKitAccountChange) {}
+    /// React to an iCloud account change (ADR-0023). On a sign-out/switch, stop
+    /// ingress and clear this document's local sync state; the existing doc is
+    /// never auto-uploaded into the newly-signed-in account (the fate of its
+    /// content is the app's decision).
+    func handleAccountChange(_ change: CloudKitAccountChange) {
+        accountChangesContinuation.yield(change)
+        switch change {
+        case .signOut, .switchAccounts:
+            suspended = true
+            debounceTask?.cancel()
+            debounceTask = nil
+            pendingRecords.removeAll()
+            knownIncrementals.removeAll()
+            drainSet.removeAll()
+            try? store.metadataStore.removeData(
+                forKey: CloudKitSyncStateKeys.drainSet,
+                documentName: documentName
+            )
+        case .signIn:
+            break
+        }
+    }
 
     public func destroy() {
         guard !destroyed else { return }
@@ -561,6 +591,7 @@ public actor CloudKitProvider {
 
         syncedContinuation.finish()
         errorsContinuation.finish()
+        accountChangesContinuation.finish()
     }
 }
 

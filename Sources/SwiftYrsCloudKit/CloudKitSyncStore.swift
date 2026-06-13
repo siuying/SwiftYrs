@@ -4,6 +4,7 @@ import Foundation
 
 public enum CloudKitProviderError: Error, Equatable {
     case duplicateProvider(documentName: String)
+    case activeProvider(documentName: String)
     case destroyed
     case transactionConflict
 }
@@ -71,6 +72,27 @@ public final class CloudKitSyncStore: CloudKitSyncEngineHandler, @unchecked Send
         }
     }
 
+    /// Remove a document's CloudKit data (its zone and records) and local sync
+    /// state — analogous to `SQLiteStore.removeDocument` (ADR-0023). Throws if a
+    /// provider is still attached to the document.
+    public func removeDocument(named documentName: String) async throws {
+        let zoneID = codec.zoneID(forDocumentName: documentName)
+        if provider(for: zoneID) != nil {
+            throw CloudKitProviderError.activeProvider(documentName: documentName)
+        }
+        try await adapter.deleteZone(zoneID)
+        try? metadataStore.removeData(forKey: CloudKitSyncStateKeys.drainSet, documentName: documentName)
+    }
+
+    /// Clear store-level CloudKit sync state on an account sign-out/switch so a
+    /// new account never resumes the previous account's engine state.
+    func clearEngineState() {
+        try? metadataStore.removeData(
+            forKey: CloudKitSyncStateKeys.engineState,
+            documentName: CloudKitSyncStateKeys.storeNamespace
+        )
+    }
+
     private func provider(for zoneID: CKRecordZone.ID) -> CloudKitProvider? {
         lock.lock()
         defer { lock.unlock() }
@@ -117,6 +139,11 @@ public final class CloudKitSyncStore: CloudKitSyncEngineHandler, @unchecked Send
                 documentName: CloudKitSyncStateKeys.storeNamespace
             )
         case let .accountChange(change):
+            // A sign-out/switch must not let a new account resume the old one's
+            // engine state (ADR-0023).
+            if change == .signOut || change == .switchAccounts {
+                clearEngineState()
+            }
             for provider in allProviders() {
                 await provider.handleAccountChange(change)
             }
