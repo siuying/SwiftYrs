@@ -131,21 +131,12 @@ extension YReadTransaction {
     }
 
     public func string(from text: YText) throws -> String {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_text_string(text.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return String(data: data(from: buffer), encoding: .utf8) ?? ""
+        let data = try readingBuffer { yrs_bridge_text_string(text.handle, handle, &$0) }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     public func chunks(from text: YText) throws -> [YTextChunk] {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_text_chunks_json(text.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return try decodeTextChunks(from: data(from: buffer))
+        try decodeTextChunks(from: readingBuffer { yrs_bridge_text_chunks_json(text.handle, handle, &$0) })
     }
 
     public func delta(from text: YText) throws -> [YTextDeltaOperation] {
@@ -166,12 +157,8 @@ extension YReadTransaction {
     }
 
     public func entriesJSON(from map: YMap) throws -> [String: Any] {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_map_entries_json(map.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        let object = try JSONSerialization.jsonObject(with: data(from: buffer))
+        let data = try readingBuffer { yrs_bridge_map_entries_json(map.handle, handle, &$0) }
+        let object = try JSONSerialization.jsonObject(with: data)
         return object as? [String: Any] ?? [:]
     }
 
@@ -191,12 +178,8 @@ extension YReadTransaction {
     }
 
     public func valuesJSON(from array: YArray) throws -> [Any] {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_array_values_json(array.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        let object = try JSONSerialization.jsonObject(with: data(from: buffer))
+        let data = try readingBuffer { yrs_bridge_array_values_json(array.handle, handle, &$0) }
+        let object = try JSONSerialization.jsonObject(with: data)
         return object as? [Any] ?? []
     }
 
@@ -207,12 +190,8 @@ extension YReadTransaction {
     }
 
     public func string(from xml: YXmlContainer) throws -> String {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_xml_string(xml.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return String(data: data(from: buffer), encoding: .utf8) ?? ""
+        let data = try readingBuffer { yrs_bridge_xml_string(xml.handle, handle, &$0) }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     public func child(at index: UInt32, in xml: YXmlContainer) throws -> YXmlNode {
@@ -234,12 +213,8 @@ extension YReadTransaction {
     }
 
     public func tag(of element: YXmlElement) throws -> String {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_xml_element_tag(element.handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return String(data: data(from: buffer), encoding: .utf8) ?? ""
+        let data = try readingBuffer { yrs_bridge_xml_element_tag(element.handle, &$0) }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     public func getAttribute(_ key: String, from xml: YXmlElement) throws -> YValue {
@@ -257,32 +232,20 @@ extension YReadTransaction {
     }
 
     public func string(from xmlText: YXmlText) throws -> String {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_xml_text_string(xmlText.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return String(data: data(from: buffer), encoding: .utf8) ?? ""
+        let data = try readingBuffer { yrs_bridge_xml_text_string(xmlText.handle, handle, &$0) }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     public func subdocGuids() throws -> [String] {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_transaction_subdoc_guids(handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        let object = try JSONSerialization.jsonObject(with: data(from: buffer))
+        let data = try readingBuffer { yrs_bridge_transaction_subdoc_guids(handle, &$0) }
+        let object = try JSONSerialization.jsonObject(with: data)
         return object as? [String] ?? []
     }
 
     public func subdoc(forKey key: String, in map: YMap) throws -> YSubdoc {
         try key.withCString { keyPointer in
-            var buffer = YrsBridgeBuffer(data: nil, len: 0)
-            try throwIfNeeded(yrs_bridge_map_get_subdoc_guid(map.handle, handle, keyPointer, &buffer))
-            defer {
-                yrs_bridge_buffer_destroy(buffer)
-            }
-            return YSubdoc(guid: String(data: data(from: buffer), encoding: .utf8) ?? "")
+            let data = try readingBuffer { yrs_bridge_map_get_subdoc_guid(map.handle, handle, keyPointer, &$0) }
+            return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
         }
     }
 }
@@ -474,12 +437,8 @@ extension YWriteTransaction {
 
     public func setNewSubdoc(forKey key: String, in map: YMap) throws -> YSubdoc {
         try key.withCString { keyPointer in
-            var buffer = YrsBridgeBuffer(data: nil, len: 0)
-            try throwIfNeeded(yrs_bridge_map_set_new_subdoc(map.handle, handle, keyPointer, &buffer))
-            defer {
-                yrs_bridge_buffer_destroy(buffer)
-            }
-            return YSubdoc(guid: String(data: data(from: buffer), encoding: .utf8) ?? "")
+            let data = try readingBuffer { yrs_bridge_map_set_new_subdoc(map.handle, handle, keyPointer, &$0) }
+            return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
         }
     }
 

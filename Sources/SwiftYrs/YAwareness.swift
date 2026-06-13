@@ -69,12 +69,8 @@ public final class YAwareness {
     }
 
     public func state(for clientID: UInt64) throws -> Any? {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_awareness_state_json(handle, clientID, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return try decodeOptionalJSON(from: buffer)
+        let data = try readingBuffer { yrs_bridge_awareness_state_json(handle, clientID, &$0) }
+        return try decodeOptionalJSON(from: data)
     }
 
     public func states() throws -> [YAwarenessClientState] {
@@ -92,31 +88,24 @@ public final class YAwareness {
     }
 
     public func encodeUpdate() throws -> YAwarenessUpdate {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_awareness_encode_update(handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return YAwarenessUpdate(data(from: buffer))
+        try YAwarenessUpdate(readingBuffer { yrs_bridge_awareness_encode_update(handle, &$0) })
     }
 
     public func encodeUpdate(for clientIDs: [UInt64]) throws -> YAwarenessUpdate {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try clientIDs.withUnsafeBufferPointer { clientIDs in
+        let data = try clientIDs.withUnsafeBufferPointer { clientIDs -> Data in
             guard let baseAddress = clientIDs.baseAddress else {
                 throw YError.decodeFailure
             }
-            try throwIfNeeded(yrs_bridge_awareness_encode_update_for_clients(
-                handle,
-                baseAddress,
-                UInt(clientIDs.count),
-                &buffer
-            ))
+            return try readingBuffer {
+                yrs_bridge_awareness_encode_update_for_clients(
+                    handle,
+                    baseAddress,
+                    UInt(clientIDs.count),
+                    &$0
+                )
+            }
         }
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return YAwarenessUpdate(data(from: buffer))
+        return YAwarenessUpdate(data)
     }
 
     public func applyUpdate(_ update: YAwarenessUpdate) throws {
@@ -153,16 +142,11 @@ public final class YAwareness {
     }
 
     private func jsonBuffer(_ operation: (OpaquePointer, UnsafeMutablePointer<YrsBridgeBuffer>) -> Int32) throws -> Any? {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(operation(handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return try decodeOptionalJSON(from: buffer)
+        let data = try readingBuffer { operation(handle, &$0) }
+        return try decodeOptionalJSON(from: data)
     }
 
-    private func decodeOptionalJSON(from buffer: YrsBridgeBuffer) throws -> Any? {
-        let data = data(from: buffer)
+    private func decodeOptionalJSON(from data: Data) throws -> Any? {
         if data.isEmpty {
             return nil
         }
