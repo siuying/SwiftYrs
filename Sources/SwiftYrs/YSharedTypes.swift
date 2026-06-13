@@ -150,7 +150,7 @@ extension YReadTransaction {
             defer {
                 yrs_bridge_value_destroy(output)
             }
-            return nativeValue(output)
+            return YValueCodec.value(from: output)
         }
     }
 
@@ -170,7 +170,7 @@ extension YReadTransaction {
         defer {
             yrs_bridge_value_destroy(output)
         }
-        return nativeValue(output)
+        return YValueCodec.value(from: output)
     }
 
     public func valuesJSON(from array: YArray) throws -> [Any] {
@@ -194,7 +194,7 @@ extension YReadTransaction {
         defer {
             yrs_bridge_value_destroy(value)
         }
-        switch nativeValue(value) {
+        switch YValueCodec.value(from: value) {
         case let .xmlFragment(value):
             return .fragment(value)
         case let .xmlElement(value):
@@ -275,7 +275,7 @@ extension YWriteTransaction {
 
     public func insertEmbed(_ value: YValue, into text: YText, at index: UInt32, attributes: YAttributes = [:]) throws {
         let attributes = try jsonString(from: attributes, rawScalars: true)
-        try withNativeValue(value) { nativeValue in
+        try YValueCodec.withBridgeValue(value) { nativeValue in
             try attributes.withCString { attributesPointer in
                 try throwIfNeeded(yrs_bridge_text_insert_embed(text.handle, handle, index, nativeValue, attributesPointer))
             }
@@ -295,7 +295,7 @@ extension YWriteTransaction {
 
     public func set(_ value: YValue, forKey key: String, in map: YMap) throws {
         try key.withCString { keyPointer in
-            try withNativeValue(value) { nativeValue in
+            try YValueCodec.withBridgeValue(value) { nativeValue in
                 try throwIfNeeded(yrs_bridge_map_set(map.handle, handle, keyPointer, nativeValue))
             }
         }
@@ -308,7 +308,7 @@ extension YWriteTransaction {
     }
 
     public func insert(_ value: YValue, into array: YArray, at index: UInt32) throws {
-        try withNativeValue(value) { nativeValue in
+        try YValueCodec.withBridgeValue(value) { nativeValue in
             try throwIfNeeded(yrs_bridge_array_insert(array.handle, handle, index, nativeValue))
         }
     }
@@ -414,13 +414,13 @@ private func xmlAttribute(_ key: String, from xml: OpaquePointer, transaction: O
         defer {
             yrs_bridge_value_destroy(output)
         }
-        return nativeValue(output)
+        return YValueCodec.value(from: output)
     }
 }
 
 private func setXmlAttribute(_ value: YValue, forKey key: String, in xml: OpaquePointer, transaction: OpaquePointer) throws {
     try key.withCString { keyPointer in
-        try withNativeValue(value) { nativeValue in
+        try YValueCodec.withBridgeValue(value) { nativeValue in
             try throwIfNeeded(yrs_bridge_xml_set_attribute(xml, transaction, keyPointer, nativeValue))
         }
     }
@@ -434,7 +434,7 @@ private func removeXmlAttribute(_ key: String, from xml: OpaquePointer, transact
 
 private func jsonString(from attributes: YAttributes, rawScalars: Bool) throws -> String {
     let object = try attributes.mapValues { value in
-        try jsonObject(from: value, rawScalars: rawScalars)
+        try YValueCodec.jsonObject(from: value, rawScalars: rawScalars)
     }
     let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     return String(data: data, encoding: .utf8) ?? "{}"
@@ -446,59 +446,19 @@ private func jsonString(from delta: [YTextDeltaOperation]) throws -> String {
         case let .retain(length, attributes):
             return [
                 "retain": Int(length),
-                "attributes": try attributes.mapValues { try jsonObject(from: $0, rawScalars: true) }
+                "attributes": try attributes.mapValues { try YValueCodec.jsonObject(from: $0, rawScalars: true) }
             ]
         case let .delete(length):
             return ["delete": Int(length)]
         case let .insert(value, attributes):
             return [
-                "insert": try jsonObject(from: value, rawScalars: false),
-                "attributes": try attributes.mapValues { try jsonObject(from: $0, rawScalars: true) }
+                "insert": try YValueCodec.jsonObject(from: value, rawScalars: false),
+                "attributes": try attributes.mapValues { try YValueCodec.jsonObject(from: $0, rawScalars: true) }
             ]
         }
     }
     let data = try JSONSerialization.data(withJSONObject: objects, options: [.sortedKeys])
     return String(data: data, encoding: .utf8) ?? "[]"
-}
-
-private func jsonObject(from value: YValue, rawScalars: Bool) throws -> Any {
-    if rawScalars {
-        switch value {
-        case .undefined, .null:
-            return NSNull()
-        case let .bool(value):
-            return value
-        case let .int(value):
-            return NSNumber(value: value)
-        case let .double(value):
-            return NSNumber(value: value)
-        case let .string(value):
-            return value
-        case let .binary(value):
-            return Array(value)
-        case .text, .map, .array, .document, .xmlFragment, .xmlElement, .xmlText, .weakLink:
-            throw YError.typeMismatch
-        }
-    }
-
-    switch value {
-    case .undefined:
-        return ["tag": "undefined"]
-    case .null:
-        return ["tag": "null"]
-    case let .bool(value):
-        return ["tag": "bool", "value": value]
-    case let .int(value):
-        return ["tag": "int", "value": NSNumber(value: value)]
-    case let .double(value):
-        return ["tag": "double", "value": NSNumber(value: value)]
-    case let .string(value):
-        return ["tag": "string", "value": value]
-    case let .binary(value):
-        return ["tag": "binary", "value": Array(value)]
-    case .text, .map, .array, .document, .xmlFragment, .xmlElement, .xmlText, .weakLink:
-        throw YError.typeMismatch
-    }
 }
 
 private func decodeTextChunks(from data: Data) throws -> [YTextChunk] {
@@ -507,202 +467,9 @@ private func decodeTextChunks(from data: Data) throws -> [YTextChunk] {
         return []
     }
     return chunks.map { chunk in
-        let insert = nativeValue(fromJSONObject: chunk["insert"])
+        let insert = YValueCodec.value(fromJSON: chunk["insert"])
         let attributesObject = chunk["attributes"] as? [String: Any] ?? [:]
-        let attributes = attributesObject.mapValues { nativeValue(fromJSONObject: $0) }
+        let attributes = attributesObject.mapValues { YValueCodec.value(fromJSON: $0) }
         return YTextChunk(insert: insert, attributes: attributes)
-    }
-}
-
-func nativeValue(fromJSONObject object: Any?) -> YValue {
-    guard let object = object as? [String: Any], let tag = object["tag"] as? String else {
-        return .undefined
-    }
-    switch tag {
-    case "null":
-        return .null
-    case "bool":
-        return .bool((object["value"] as? Bool) ?? false)
-    case "int":
-        if let value = object["value"] as? Int64 {
-            return .int(value)
-        }
-        return .int(Int64((object["value"] as? NSNumber)?.int64Value ?? 0))
-    case "double":
-        return .double((object["value"] as? NSNumber)?.doubleValue ?? 0)
-    case "string":
-        return .string((object["value"] as? String) ?? "")
-    case "binary":
-        let bytes = (object["value"] as? [NSNumber] ?? []).map { UInt8(truncating: $0) }
-        return .binary(Data(bytes))
-    case "array":
-        let values = object["value"] as? [[String: Any]] ?? []
-        let bytes = values.compactMap { value -> UInt8? in
-            let native = nativeValue(fromJSONObject: value)
-            let byte: Int64
-            switch native {
-            case let .int(value):
-                byte = value
-            case let .double(value) where value.rounded() == value:
-                byte = Int64(value)
-            default:
-                return nil
-            }
-            guard byte >= 0, byte <= 255 else {
-                return nil
-            }
-            return UInt8(byte)
-        }
-        return bytes.count == values.count ? .binary(Data(bytes)) : .undefined
-    case "text", "map-ref", "array-ref":
-        return .undefined
-    case "doc":
-        return .undefined
-    case "xml", "xml-fragment", "xml-element", "xml-text":
-        return .undefined
-    case "weak":
-        return .weakLink
-    default:
-        return .undefined
-    }
-}
-
-/// The `tag` discriminant of `YrsBridgeValue`, mirroring the Rust shim's value
-/// encoding. Must stay in sync with `yrs-bridge`.
-private enum BridgeValueTag: Int32 {
-    case undefined = 0
-    case null = 1
-    case bool = 2
-    case int = 3
-    case double = 4
-    case string = 5
-    case binary = 6
-    case text = 7
-    case map = 8
-    case array = 9
-    case document = 10
-    case xmlFragment = 11
-    case weakLink = 12
-    case xmlElement = 13
-    case xmlText = 14
-}
-
-func nativeValue(_ value: YrsBridgeValue) -> YValue {
-    switch BridgeValueTag(rawValue: value.tag) {
-    case .null:
-        return .null
-    case .bool:
-        return .bool(value.bool_value)
-    case .int:
-        return .int(value.int_value)
-    case .double:
-        return .double(value.double_value)
-    case .string:
-        guard let bytes = value.bytes else {
-            return .undefined
-        }
-        let data = Data(bytes: bytes, count: Int(value.len))
-        return .string(String(data: data, encoding: .utf8) ?? "")
-    case .binary:
-        guard let bytes = value.bytes else {
-            return .undefined
-        }
-        return .binary(Data(bytes: bytes, count: Int(value.len)))
-    case .text:
-        guard let branch = value.branch else {
-            return .undefined
-        }
-        return .text(YText(handle: branch))
-    case .map:
-        guard let branch = value.branch else {
-            return .undefined
-        }
-        return .map(YMap(handle: branch))
-    case .array:
-        guard let branch = value.branch else {
-            return .undefined
-        }
-        return .array(YArray(handle: branch))
-    case .xmlFragment:
-        guard let branch = value.branch else {
-            return .undefined
-        }
-        return .xmlFragment(YXmlFragment(handle: branch))
-    case .weakLink:
-        return .weakLink
-    case .xmlElement:
-        guard let branch = value.branch else {
-            return .undefined
-        }
-        return .xmlElement(YXmlElement(handle: branch))
-    case .xmlText:
-        guard let branch = value.branch else {
-            return .undefined
-        }
-        return .xmlText(YXmlText(handle: branch))
-    case .undefined, .document, .none:
-        return .undefined
-    }
-}
-
-private func withNativeValue<T>(_ value: YValue, _ body: (YrsBridgeValue) throws -> T) throws -> T {
-    switch value {
-    case .undefined:
-        return try body(YrsBridgeValue(tag: .undefined))
-    case .null:
-        return try body(YrsBridgeValue(tag: .null))
-    case let .bool(value):
-        return try body(YrsBridgeValue(tag: .bool, bool_value: value))
-    case let .int(value):
-        return try body(YrsBridgeValue(tag: .int, int_value: value))
-    case let .double(value):
-        return try body(YrsBridgeValue(tag: .double, double_value: value))
-    case let .string(value):
-        return try value.withCString { pointer in
-            let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
-            return try body(YrsBridgeValue(tag: .string, bytes: UnsafeMutablePointer(mutating: bytes), len: UInt(value.utf8.count)))
-        }
-    case let .binary(value):
-        return try value.withUnsafeBytes { bytes in
-            let pointer = bytes.bindMemory(to: UInt8.self).baseAddress
-            return try body(YrsBridgeValue(tag: .binary, bytes: UnsafeMutablePointer(mutating: pointer), len: UInt(bytes.count)))
-        }
-    case let .text(value):
-        return try body(YrsBridgeValue(tag: .text, branch: value.handle))
-    case let .map(value):
-        return try body(YrsBridgeValue(tag: .map, branch: value.handle))
-    case let .array(value):
-        return try body(YrsBridgeValue(tag: .array, branch: value.handle))
-    case .document:
-        throw YError.typeMismatch
-    case let .xmlFragment(value):
-        return try body(YrsBridgeValue(tag: .xmlFragment, branch: value.handle))
-    case let .xmlElement(value):
-        return try body(YrsBridgeValue(tag: .xmlElement, branch: value.handle))
-    case let .xmlText(value):
-        return try body(YrsBridgeValue(tag: .xmlText, branch: value.handle))
-    case .weakLink:
-        return try body(YrsBridgeValue(tag: .weakLink))
-    }
-}
-
-private extension YrsBridgeValue {
-    init(
-        tag: BridgeValueTag,
-        bool_value: Bool = false,
-        int_value: Int64 = 0,
-        double_value: Double = 0,
-        bytes: UnsafeMutablePointer<UInt8>? = nil,
-        len: UInt = 0,
-        branch: OpaquePointer? = nil
-    ) {
-        self.init()
-        self.tag = tag.rawValue
-        self.bool_value = bool_value
-        self.int_value = int_value
-        self.double_value = double_value
-        self.bytes = bytes
-        self.len = len
-        self.branch = branch
     }
 }
