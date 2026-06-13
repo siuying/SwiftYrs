@@ -110,7 +110,6 @@ public final class CloudKitSyncStore: CloudKitSyncEngineHandler, @unchecked Send
                 await provider.handleAccountChange(change)
             }
         case let .fetchedChanges(modified, deleted):
-            // Inbound apply / multi-device convergence is wired in issue #65.
             await dispatchFetched(modified: modified, deleted: deleted)
         case let .sentChanges(saved, deleted, failed):
             await dispatchSent(saved: saved, deleted: deleted, failed: failed)

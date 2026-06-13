@@ -102,6 +102,13 @@ public actor CloudKitProvider {
         try await flush()
     }
 
+    /// Pull remote changes from CloudKit and apply them to the doc. Inbound
+    /// records arrive through the engine's `fetchedChanges` event.
+    public func fetch() async throws {
+        guard started, !destroyed else { return }
+        try await store.fetchChanges()
+    }
+
     private func scheduleFlush() {
         guard started, !destroyed else { return }
         debounceTask?.cancel()
@@ -191,8 +198,62 @@ public actor CloudKitProvider {
         }
     }
 
-    /// Inbound record apply (issue #65).
-    func handleFetched(modified: [CKRecord], deleted: [CKRecord.ID]) {}
+    /// Apply remote records to the doc (ADR-0023). Yjs updates are commutative
+    /// and idempotent, so applies are order-independent and safe to retry on
+    /// `transactionConflict`. Deletions are GC of subsumed incrementals — their
+    /// content already lives in the doc/snapshot — so they need no apply.
+    ///
+    /// This is echo-safe by construction: capture is client-scoped to *this*
+    /// session's clientID, and applying another writer's update never advances
+    /// our clientID's clock, so the flush that the apply schedules produces an
+    /// empty diff and re-uploads nothing.
+    func handleFetched(modified: [CKRecord], deleted: [CKRecord.ID]) async {
+        var applied = false
+        for record in modified {
+            guard let update = decodeUpdate(from: record) else { continue }
+            do {
+                try await applyWithRetry(update)
+                applied = true
+            } catch {
+                errorsContinuation.yield(error)
+            }
+        }
+        if applied {
+            syncedContinuation.yield(true)
+        }
+    }
+
+    private func decodeUpdate(from record: CKRecord) -> YUpdate? {
+        do {
+            switch record.recordType {
+            case CloudKitRecordType.incremental:
+                return try store.codec.decodeIncremental(record).update
+            case CloudKitRecordType.snapshot:
+                return try store.codec.decodeSnapshot(record).update
+            default:
+                return nil
+            }
+        } catch {
+            errorsContinuation.yield(error)
+            return nil
+        }
+    }
+
+    private func applyWithRetry(_ update: YUpdate) async throws {
+        var attempts = 0
+        while true {
+            do {
+                try doc.apply(update)
+                return
+            } catch YError.transactionConflict {
+                attempts += 1
+                guard attempts < options.maxTransactionRetries else {
+                    throw CloudKitProviderError.transactionConflict
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
+    }
 
     /// Account-change handling (issue #68).
     func handleAccountChange(_ change: CloudKitAccountChange) {}
