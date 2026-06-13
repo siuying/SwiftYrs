@@ -43,8 +43,11 @@ void yrs_bridge_transaction_destroy(YrsBridgeTransaction *_Nonnull transaction);
 int yrs_bridge_transaction_is_writable(YrsBridgeTransaction *_Nonnull transaction, bool *_Nonnull out);
 
 int yrs_bridge_transaction_state_vector_v1(YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_transaction_client_clock(YrsBridgeTransaction *_Nonnull transaction, uint64_t client_id, uint32_t *_Nonnull out);
 int yrs_bridge_transaction_state_diff_v1(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nullable state_vector, unsigned long state_vector_len, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_state_diff_v2(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nullable state_vector, unsigned long state_vector_len, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_transaction_client_state_diff_v1(YrsBridgeTransaction *_Nonnull transaction, uint64_t client_id, uint32_t from_clock, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_transaction_client_state_diff_v2(YrsBridgeTransaction *_Nonnull transaction, uint64_t client_id, uint32_t from_clock, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_apply_v1(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nonnull update, unsigned long update_len);
 int yrs_bridge_transaction_apply_v2(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nonnull update, unsigned long update_len);
 

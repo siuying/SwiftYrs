@@ -782,6 +782,22 @@ pub unsafe extern "C" fn yrs_bridge_transaction_state_vector_v1(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_client_clock(
+    transaction: *mut YrsBridgeTransaction,
+    client_id: u64,
+    out: *mut u32,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+
+        *out = (*transaction).state_vector().get(&ClientID::new(client_id));
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_transaction_state_diff_v1(
     transaction: *mut YrsBridgeTransaction,
     state_vector: *const c_uchar,
@@ -817,6 +833,62 @@ pub unsafe extern "C" fn yrs_bridge_transaction_state_diff_v2(
             Ok(state_vector) => state_vector,
             Err(code) => return code,
         };
+        let mut encoder = EncoderV2::new();
+        (*transaction).encode_diff(&state_vector, &mut encoder);
+        write_buffer(encoder.to_vec(), out)
+    })
+}
+
+fn client_scoped_state_vector(
+    transaction: &YrsBridgeTransaction,
+    client_id: u64,
+    from_clock: u32,
+) -> StateVector {
+    let scoped_client = ClientID::new(client_id);
+    transaction
+        .state_vector()
+        .iter()
+        .map(|(client, clock)| {
+            if *client == scoped_client {
+                (*client, from_clock)
+            } else {
+                (*client, *clock)
+            }
+        })
+        .chain(std::iter::once((scoped_client, from_clock)))
+        .collect()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_client_state_diff_v1(
+    transaction: *mut YrsBridgeTransaction,
+    client_id: u64,
+    from_clock: u32,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+
+        let state_vector = client_scoped_state_vector(&*transaction, client_id, from_clock);
+        write_buffer((*transaction).encode_state_as_update_v1(&state_vector), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_client_state_diff_v2(
+    transaction: *mut YrsBridgeTransaction,
+    client_id: u64,
+    from_clock: u32,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+
+        let state_vector = client_scoped_state_vector(&*transaction, client_id, from_clock);
         let mut encoder = EncoderV2::new();
         (*transaction).encode_diff(&state_vector, &mut encoder);
         write_buffer(encoder.to_vec(), out)
