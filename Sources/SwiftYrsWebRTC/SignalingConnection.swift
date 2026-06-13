@@ -1,4 +1,5 @@
 import Foundation
+import SwiftYrs
 
 /// One WebSocket to one signaling server. Maintains the connection (open →
 /// receive loop → 30s keepalive ping → reconnect with exponential backoff) and
@@ -64,17 +65,6 @@ actor SignalingConnection {
         loop = nil
     }
 
-    static func reconnectDelay(attempt: Int, initialDelay: Duration, maxDelay: Duration) -> Duration {
-        var delay = initialDelay
-        guard attempt > 0 else {
-            return min(delay, maxDelay)
-        }
-        for _ in 0..<attempt {
-            delay = min(delay + delay, maxDelay)
-        }
-        return delay
-    }
-
     private func runLoop() async {
         var attempt = 0
         while !stopped {
@@ -87,7 +77,7 @@ actor SignalingConnection {
                 session.invalidateAndCancel()
                 if stopped { break }
                 guard attempt < maxRetries else { break }
-                let delay = Self.reconnectDelay(attempt: attempt, initialDelay: initialDelay, maxDelay: maxDelay)
+                let delay = Backoff.reconnectDelay(attempt: attempt, initialDelay: initialDelay, maxDelay: maxDelay)
                 attempt += 1
                 try? await Task.sleep(for: delay)
                 continue
@@ -115,7 +105,7 @@ actor SignalingConnection {
                 attempt = 0
             }
             guard attempt < maxRetries else { break }
-            let delay = Self.reconnectDelay(attempt: attempt, initialDelay: initialDelay, maxDelay: maxDelay)
+            let delay = Backoff.reconnectDelay(attempt: attempt, initialDelay: initialDelay, maxDelay: maxDelay)
             attempt += 1
             try? await Task.sleep(for: delay)
         }

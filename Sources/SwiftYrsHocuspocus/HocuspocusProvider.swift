@@ -141,17 +141,6 @@ public actor HocuspocusProvider {
         } catch {}
     }
 
-    static func reconnectDelay(attempt: Int, initialDelay: Duration, maxDelay: Duration) -> Duration {
-        var delay = initialDelay
-        guard attempt > 0 else {
-            return min(delay, maxDelay)
-        }
-        for _ in 0..<attempt {
-            delay = min(delay + delay, maxDelay)
-        }
-        return delay
-    }
-
     private func openWebSocket() async throws {
         connectionStatusContinuation.yield(.connecting)
         let webSocket = webSocketFactory(url)
@@ -204,7 +193,7 @@ public actor HocuspocusProvider {
         guard retryAttempt < maxRetries else {
             return
         }
-        let delay = Self.reconnectDelay(
+        let delay = Backoff.reconnectDelay(
             attempt: retryAttempt,
             initialDelay: initialDelay,
             maxDelay: maxDelay
