@@ -149,42 +149,49 @@ public actor WebRTCProvider {
         startReannounceLoop()
     }
 
+    /// Stops the provider while leaving its event streams open, so a later
+    /// `connect()` can resume. Signaling is stopped fire-and-forget; for a fully
+    /// awaited, terminal teardown use `destroy()`.
     public func disconnect() {
         guard started else { return }
-        started = false
+        beginTearDown()
         for connection in signalingConnections {
             Task { await connection.stop() }
         }
-        signalingConnections.removeAll()
-        openSignalingConnections.removeAll()
-        reannounceTask?.cancel()
-        reannounceTask = nil
-        for record in conns.values {
-            record.conn.close()
-        }
-        conns.removeAll()
-        documentObservation?.cancel()
-        documentObservation = nil
-        awarenessObservation?.cancel()
-        awarenessObservation = nil
-        emitStatus(.disconnected)
-        emitSynced(false)
+        finishTearDown()
     }
 
+    /// Terminal teardown: clears owned awareness, awaits signaling stop before
+    /// closing peers, then finishes the event streams so iterators end.
     public func destroy() async {
         guard started else { return }
         if ownsAwareness {
             await clearOwnedAwareness()
         }
+        beginTearDown()
+        // Stop signaling before closing peer connections so the receive loop
+        // cannot dispatch announces/signals into a provider that is tearing down.
+        for connection in signalingConnections {
+            await connection.stop()
+        }
+        finishTearDown()
+        statusContinuation.finish()
+        syncedContinuation.finish()
+        peersContinuation.finish()
+    }
+
+    /// Marks the provider stopped and halts the reannounce loop. Runs before
+    /// signaling is stopped so no further announces are queued; peers and
+    /// observations are torn down afterwards in `finishTearDown`.
+    private func beginTearDown() {
         started = false
         reannounceTask?.cancel()
         reannounceTask = nil
-        let signaling = signalingConnections
-        // Stop signaling before closing peer connections so the receive loop
-        // cannot dispatch announces/signals into a provider that is tearing down.
-        for connection in signaling {
-            await connection.stop()
-        }
+    }
+
+    /// Releases everything that does not need to outlive a stop: signaling
+    /// bookkeeping, peer connections, observations, and synced/status state.
+    private func finishTearDown() {
         signalingConnections.removeAll()
         openSignalingConnections.removeAll()
         documentObservation?.cancel()
@@ -197,9 +204,6 @@ public actor WebRTCProvider {
         conns.removeAll()
         emitStatus(.disconnected)
         emitSynced(false)
-        statusContinuation.finish()
-        syncedContinuation.finish()
-        peersContinuation.finish()
     }
 
     public var connected: Bool {
@@ -389,12 +393,17 @@ public actor WebRTCProvider {
             let syncStep1 = try YSyncMessage.syncStep1(doc.stateVector())
             record.conn.send(syncStep1.payload)
             record.conn.send(try YSyncMessage.awarenessQuery().payload)
-            let clientIDs = try awareness.states().map(\.clientID)
-            if !clientIDs.isEmpty {
-                let update = try awareness.encodeUpdate(for: clientIDs)
-                record.conn.send(try YSyncMessage.awareness(update).payload)
-            }
+            try sendKnownAwarenessStates(to: record)
         } catch {}
+    }
+
+    /// Sends every awareness state we currently know to one peer, as a single
+    /// awareness message. No-op when there are no states.
+    private func sendKnownAwarenessStates(to record: PeerRecord) throws {
+        let clientIDs = try awareness.states().map(\.clientID)
+        guard !clientIDs.isEmpty else { return }
+        let update = try awareness.encodeUpdate(for: clientIDs)
+        record.conn.send(try YSyncMessage.awareness(update).payload)
     }
 
     private func handle(_ message: YSyncMessage, from record: PeerRecord) {
@@ -412,11 +421,7 @@ public actor WebRTCProvider {
             case let .awareness(update, _):
                 try applyAwarenessUpdate(update, from: record)
             case .awarenessQuery:
-                let clientIDs = try awareness.states().map(\.clientID)
-                if !clientIDs.isEmpty {
-                    let update = try awareness.encodeUpdate(for: clientIDs)
-                    record.conn.send(try YSyncMessage.awareness(update).payload)
-                }
+                try sendKnownAwarenessStates(to: record)
             default:
                 break
             }
