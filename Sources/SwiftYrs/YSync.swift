@@ -44,30 +44,24 @@ public enum YSyncMessage: Equatable {
     }
 
     public static func awarenessQuery() throws -> YSyncMessage {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_sync_message_awareness_query(&buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return .awarenessQuery(payload: SwiftYrs.data(from: buffer))
+        let payload = try readingBuffer { yrs_bridge_sync_message_awareness_query(&$0) }
+        return .awarenessQuery(payload: payload)
     }
 
     public static func decodePayload(_ payload: Data) throws -> [YSyncMessage] {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try payload.withUnsafeBytes { bytes in
+        let data = try payload.withUnsafeBytes { bytes -> Data in
             guard let baseAddress = bytes.baseAddress else {
                 throw YError.decodeFailure
             }
-            try throwIfNeeded(yrs_bridge_sync_decode_messages(
-                baseAddress.assumingMemoryBound(to: UInt8.self),
-                UInt(bytes.count),
-                &buffer
-            ))
+            return try readingBuffer {
+                yrs_bridge_sync_decode_messages(
+                    baseAddress.assumingMemoryBound(to: UInt8.self),
+                    UInt(bytes.count),
+                    &$0
+                )
+            }
         }
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        let object = try JSONSerialization.jsonObject(with: SwiftYrs.data(from: buffer))
+        let object = try JSONSerialization.jsonObject(with: data)
         let entries = object as? [[String: Any]] ?? []
         return try entries.map { try message(from: $0) }
     }
@@ -82,21 +76,18 @@ public enum YSyncMessage: Equatable {
         _ data: Data,
         _ operation: (UnsafePointer<UInt8>, UInt, UnsafeMutablePointer<YrsBridgeBuffer>) -> Int32
     ) throws -> Data {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try data.withUnsafeBytes { bytes in
+        try data.withUnsafeBytes { bytes -> Data in
             guard let baseAddress = bytes.baseAddress else {
                 throw YError.decodeFailure
             }
-            try throwIfNeeded(operation(
-                baseAddress.assumingMemoryBound(to: UInt8.self),
-                UInt(bytes.count),
-                &buffer
-            ))
+            return try readingBuffer {
+                operation(
+                    baseAddress.assumingMemoryBound(to: UInt8.self),
+                    UInt(bytes.count),
+                    &$0
+                )
+            }
         }
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return SwiftYrs.data(from: buffer)
     }
 
     private static func message(from entry: [String: Any]) throws -> YSyncMessage {
@@ -146,30 +137,22 @@ public enum YSyncMessage: Equatable {
 
 public enum YSyncProtocol {
     public static func start(awareness: YAwareness) throws -> Data {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_sync_start(awareness.handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return SwiftYrs.data(from: buffer)
+        try readingBuffer { yrs_bridge_sync_start(awareness.handle, &$0) }
     }
 
     public static func handle(_ payload: Data, awareness: YAwareness) throws -> Data {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try payload.withUnsafeBytes { bytes in
+        try payload.withUnsafeBytes { bytes -> Data in
             guard let baseAddress = bytes.baseAddress else {
                 throw YError.decodeFailure
             }
-            try throwIfNeeded(yrs_bridge_sync_handle(
-                awareness.handle,
-                baseAddress.assumingMemoryBound(to: UInt8.self),
-                UInt(bytes.count),
-                &buffer
-            ))
+            return try readingBuffer {
+                yrs_bridge_sync_handle(
+                    awareness.handle,
+                    baseAddress.assumingMemoryBound(to: UInt8.self),
+                    UInt(bytes.count),
+                    &$0
+                )
+            }
         }
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return SwiftYrs.data(from: buffer)
     }
 }

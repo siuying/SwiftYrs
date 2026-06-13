@@ -22,31 +22,23 @@ public struct YRelativePosition: Equatable, Sendable {
     }
 
     public init(data bytes: Data) throws {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try bytes.withUnsafeBytes { rawBytes in
+        let json = try bytes.withUnsafeBytes { rawBytes -> Data in
             guard let pointer = rawBytes.bindMemory(to: UInt8.self).baseAddress else {
                 throw YError.nullPointer
             }
-            try throwIfNeeded(yrs_bridge_relative_position_json_from_v1(pointer, UInt(rawBytes.count), &buffer))
+            return try readingBuffer { yrs_bridge_relative_position_json_from_v1(pointer, UInt(rawBytes.count), &$0) }
         }
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        self.init(data: bytes, json: SwiftYrs.data(from: buffer))
+        self.init(data: bytes, json: json)
     }
 
     public init(json: Data) throws {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try json.withUnsafeBytes { bytes in
+        let data = try json.withUnsafeBytes { bytes -> Data in
             guard let pointer = bytes.bindMemory(to: UInt8.self).baseAddress else {
                 throw YError.nullPointer
             }
-            try throwIfNeeded(yrs_bridge_relative_position_v1_from_json(pointer, UInt(bytes.count), &buffer))
+            return try readingBuffer { yrs_bridge_relative_position_v1_from_json(pointer, UInt(bytes.count), &$0) }
         }
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        self.init(data: SwiftYrs.data(from: buffer), json: json)
+        self.init(data: data, json: json)
     }
 }
 
@@ -72,23 +64,15 @@ extension YReadTransaction {
     }
 
     public func values(from weakLink: YWeakLink) throws -> [YValue] {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_weak_values_json(weakLink.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        let object = try JSONSerialization.jsonObject(with: SwiftYrs.data(from: buffer))
+        let data = try readingBuffer { yrs_bridge_weak_values_json(weakLink.handle, handle, &$0) }
+        let object = try JSONSerialization.jsonObject(with: data)
         let values = object as? [Any] ?? []
         return values.map(nativeValue(fromJSONObject:))
     }
 
     public func string(from weakLink: YWeakLink) throws -> String {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_weak_string(weakLink.handle, handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return String(data: SwiftYrs.data(from: buffer), encoding: .utf8) ?? ""
+        let data = try readingBuffer { yrs_bridge_weak_string(weakLink.handle, handle, &$0) }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     public func offset(of position: YRelativePosition, in _: YText) throws -> UInt32 {
@@ -188,18 +172,12 @@ extension YWriteTransaction {
     }
 
     public func relativePosition(in text: YText, at index: UInt32, association: YAssociation) throws -> YRelativePosition {
-        var jsonBuffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_text_relative_position_json(text.handle, handle, index, association.rawValue, &jsonBuffer))
-        defer {
-            yrs_bridge_buffer_destroy(jsonBuffer)
+        let json = try readingBuffer {
+            yrs_bridge_text_relative_position_json(text.handle, handle, index, association.rawValue, &$0)
         }
-
-        var dataBuffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_text_relative_position_v1(text.handle, handle, index, association.rawValue, &dataBuffer))
-        defer {
-            yrs_bridge_buffer_destroy(dataBuffer)
+        let data = try readingBuffer {
+            yrs_bridge_text_relative_position_v1(text.handle, handle, index, association.rawValue, &$0)
         }
-
-        return YRelativePosition(data: SwiftYrs.data(from: dataBuffer), json: SwiftYrs.data(from: jsonBuffer))
+        return YRelativePosition(data: data, json: json)
     }
 }

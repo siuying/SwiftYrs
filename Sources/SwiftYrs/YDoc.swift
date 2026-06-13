@@ -218,34 +218,19 @@ public class YReadTransaction {
     }
 
     public func stateVector() throws -> YStateVector {
-        var buffer = YrsBridgeBuffer(data: nil, len: 0)
-        try throwIfNeeded(yrs_bridge_transaction_state_vector_v1(handle, &buffer))
-        defer {
-            yrs_bridge_buffer_destroy(buffer)
-        }
-        return YStateVector(data(from: buffer))
+        try YStateVector(readingBuffer { yrs_bridge_transaction_state_vector_v1(handle, &$0) })
     }
 
     public func encodeStateAsUpdateV1(from stateVector: YStateVector? = nil) throws -> YUpdate {
         let updateData = try withOptionalBytes(stateVector?.data) { pointer, count in
-            var buffer = YrsBridgeBuffer(data: nil, len: 0)
-            try throwIfNeeded(yrs_bridge_transaction_state_diff_v1(handle, pointer, UInt(count), &buffer))
-            defer {
-                yrs_bridge_buffer_destroy(buffer)
-            }
-            return data(from: buffer)
+            try readingBuffer { yrs_bridge_transaction_state_diff_v1(handle, pointer, UInt(count), &$0) }
         }
         return .v1(updateData)
     }
 
     public func encodeStateAsUpdateV2(from stateVector: YStateVector? = nil) throws -> YUpdate {
         let updateData = try withOptionalBytes(stateVector?.data) { pointer, count in
-            var buffer = YrsBridgeBuffer(data: nil, len: 0)
-            try throwIfNeeded(yrs_bridge_transaction_state_diff_v2(handle, pointer, UInt(count), &buffer))
-            defer {
-                yrs_bridge_buffer_destroy(buffer)
-            }
-            return data(from: buffer)
+            try readingBuffer { yrs_bridge_transaction_state_diff_v2(handle, pointer, UInt(count), &$0) }
         }
         return .v2(updateData)
     }
