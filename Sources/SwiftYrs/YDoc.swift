@@ -280,15 +280,12 @@ public class YReadTransaction {
 /// `YReadTransaction` is available here through inheritance.
 public final class YWriteTransaction: YReadTransaction {
     public func apply(_ update: YUpdate) throws {
-        try update.data.withUnsafeBytes { bytes in
-            guard let baseAddress = bytes.bindMemory(to: UInt8.self).baseAddress else {
-                throw YError.nullPointer
-            }
+        try withUInt8Pointer(update.data) { pointer, length in
             switch update.encoding {
             case .v1:
-                try throwIfNeeded(yrs_bridge_transaction_apply_v1(handle, baseAddress, UInt(bytes.count)))
+                try throwIfNeeded(yrs_bridge_transaction_apply_v1(handle, pointer, length))
             case .v2:
-                try throwIfNeeded(yrs_bridge_transaction_apply_v2(handle, baseAddress, UInt(bytes.count)))
+                try throwIfNeeded(yrs_bridge_transaction_apply_v2(handle, pointer, length))
             }
         }
     }
@@ -301,7 +298,7 @@ private func withOptionalBytes<T>(
     guard let data else {
         return try body(nil, 0)
     }
-    return try data.withUnsafeBytes { bytes in
-        try body(bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count)
+    return try withUInt8Pointer(data) { pointer, length in
+        try body(pointer, Int(length))
     }
 }

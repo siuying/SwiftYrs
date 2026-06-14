@@ -47,17 +47,20 @@ private final class ObservationStreamState: @unchecked Sendable {
     var observation: Observation?
 }
 
-func makeObservation(
-    _ callback: @escaping (YEvent) -> Void,
-    start: (UnsafeMutableRawPointer, YrsBridgeEventCallback) -> OpaquePointer?
+typealias BridgeObserve = (OpaquePointer, UnsafeMutableRawPointer?, YrsBridgeEventCallback) -> OpaquePointer?
+
+func registerObservation(
+    handle: OpaquePointer,
+    observe: BridgeObserve,
+    _ callback: @escaping (YEvent) -> Void
 ) throws -> Observation {
     let box = ObservationCallbackBox(callback: callback)
     let context = Unmanaged.passRetained(box).toOpaque()
-    guard let handle = start(context, observationCallback) else {
+    guard let observationHandle = observe(handle, context, observationCallback) else {
         Unmanaged<ObservationCallbackBox>.fromOpaque(context).release()
         throw YError.nullPointer
     }
-    return Observation(handle: handle, context: context)
+    return Observation(handle: observationHandle, context: context)
 }
 
 func makeEventStream(observe: (@escaping (YEvent) -> Void) throws -> Observation) throws -> AsyncStream<YEvent> {
@@ -75,27 +78,19 @@ func makeEventStream(observe: (@escaping (YEvent) -> Void) throws -> Observation
 
 extension YDoc {
     public func observeUpdates(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_doc_observe_update_v1(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_doc_observe_update_v1, callback)
     }
 
     public func observeSubdocs(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_doc_observe_subdocs(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_doc_observe_subdocs, callback)
     }
 
     public func observeTransactionCleanup(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_doc_observe_transaction_cleanup(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_doc_observe_transaction_cleanup, callback)
     }
 
     public func observeDestroy(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_doc_observe_destroy(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_doc_observe_destroy, callback)
     }
 
     public func updateEvents() throws -> AsyncStream<YEvent> {

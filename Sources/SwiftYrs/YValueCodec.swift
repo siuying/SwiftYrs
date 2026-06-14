@@ -91,9 +91,13 @@ enum YValueCodec {
         case let .double(value):
             return try body(YrsBridgeValue(tag: .double, double_value: value))
         case let .string(value):
-            return try value.withCString { pointer in
-                let bytes = UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self)
-                return try body(YrsBridgeValue(tag: .string, bytes: UnsafeMutablePointer(mutating: bytes), len: UInt(value.utf8.count)))
+            let bytes = Array(value.utf8)
+            return try bytes.withUnsafeBufferPointer { buffer in
+                return try body(YrsBridgeValue(
+                    tag: .string,
+                    bytes: UnsafeMutablePointer(mutating: buffer.baseAddress),
+                    len: UInt(buffer.count)
+                ))
             }
         case let .binary(value):
             return try value.withUnsafeBytes { bytes in

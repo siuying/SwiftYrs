@@ -66,14 +66,10 @@ public final class YUndoManager {
     }
 
     public func observeItemAdded(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_undo_manager_observe_item_added(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_undo_manager_observe_item_added, callback)
     }
 
     public func observeItemPopped(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_undo_manager_observe_item_popped(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_undo_manager_observe_item_popped, callback)
     }
 }
