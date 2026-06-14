@@ -1,0 +1,39 @@
+name: TodoCloudKit
+
+options:
+  bundleIdPrefix: com.swiftyrs
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+
+packages:
+  SwiftYrs:
+    # The local SwiftYrs package (this repository).
+    path: ../..
+
+targets:
+  TodoCloudKit:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - TodoCloudKit
+    dependencies:
+      - package: SwiftYrs
+        product: SwiftYrs
+      - package: SwiftYrs
+        product: SwiftYrsSQLite
+      - package: SwiftYrs
+        product: SwiftYrsCloudKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.swiftyrs.TodoCloudKit
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: TodoCloudKit/TodoCloudKit.entitlements
+        CODE_SIGN_STYLE: Automatic
+        # Set your Apple Developer Team ID here (or in Xcode's Signing & Capabilities).
+        DEVELOPMENT_TEAM: ""
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Todos
+        SWIFT_VERSION: "6.0"
+        # CKSyncEngine delivers changes via silent push.
+        INFOPLIST_KEY_UIBackgroundModes: remote-notification
