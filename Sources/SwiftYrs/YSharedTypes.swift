@@ -134,7 +134,7 @@ extension YReadTransaction {
     }
 
     public func chunks(from text: YText) throws -> [YTextChunk] {
-        try decodeTextChunks(from: readingBuffer { yrs_bridge_text_chunks_json(text.handle, handle, &$0) })
+        try YValueCodec.textChunks(from: readingBuffer { yrs_bridge_text_chunks_json(text.handle, handle, &$0) })
     }
 
     public func delta(from text: YText) throws -> [YTextDeltaOperation] {
@@ -250,7 +250,7 @@ extension YWriteTransaction {
     }
 
     public func insert(_ value: String, into text: YText, at index: UInt32, attributes: YAttributes) throws {
-        let attributes = try jsonString(from: attributes, rawScalars: true)
+        let attributes = try YValueCodec.jsonString(from: attributes, rawScalars: true)
         try value.withCString { valuePointer in
             try attributes.withCString { attributesPointer in
                 try throwIfNeeded(
@@ -267,14 +267,14 @@ extension YWriteTransaction {
     }
 
     public func format(_ text: YText, at index: UInt32, length: UInt32, attributes: YAttributes) throws {
-        let attributes = try jsonString(from: attributes, rawScalars: true)
+        let attributes = try YValueCodec.jsonString(from: attributes, rawScalars: true)
         try attributes.withCString { pointer in
             try throwIfNeeded(yrs_bridge_text_format_json(text.handle, handle, index, length, pointer))
         }
     }
 
     public func insertEmbed(_ value: YValue, into text: YText, at index: UInt32, attributes: YAttributes = [:]) throws {
-        let attributes = try jsonString(from: attributes, rawScalars: true)
+        let attributes = try YValueCodec.jsonString(from: attributes, rawScalars: true)
         try YValueCodec.withBridgeValue(value) { nativeValue in
             try attributes.withCString { attributesPointer in
                 try throwIfNeeded(yrs_bridge_text_insert_embed(text.handle, handle, index, nativeValue, attributesPointer))
@@ -283,7 +283,7 @@ extension YWriteTransaction {
     }
 
     public func applyDelta(_ delta: [YTextDeltaOperation], to text: YText) throws {
-        let delta = try jsonString(from: delta)
+        let delta = try YValueCodec.jsonString(from: delta)
         try delta.withCString { pointer in
             try throwIfNeeded(yrs_bridge_text_apply_delta_json(text.handle, handle, pointer))
         }
@@ -429,47 +429,5 @@ private func setXmlAttribute(_ value: YValue, forKey key: String, in xml: Opaque
 private func removeXmlAttribute(_ key: String, from xml: OpaquePointer, transaction: OpaquePointer) throws {
     try key.withCString { keyPointer in
         try throwIfNeeded(yrs_bridge_xml_remove_attribute(xml, transaction, keyPointer))
-    }
-}
-
-private func jsonString(from attributes: YAttributes, rawScalars: Bool) throws -> String {
-    let object = try attributes.mapValues { value in
-        try YValueCodec.jsonObject(from: value, rawScalars: rawScalars)
-    }
-    let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-    return String(data: data, encoding: .utf8) ?? "{}"
-}
-
-private func jsonString(from delta: [YTextDeltaOperation]) throws -> String {
-    let objects = try delta.map { operation -> [String: Any] in
-        switch operation {
-        case let .retain(length, attributes):
-            return [
-                "retain": Int(length),
-                "attributes": try attributes.mapValues { try YValueCodec.jsonObject(from: $0, rawScalars: true) }
-            ]
-        case let .delete(length):
-            return ["delete": Int(length)]
-        case let .insert(value, attributes):
-            return [
-                "insert": try YValueCodec.jsonObject(from: value, rawScalars: false),
-                "attributes": try attributes.mapValues { try YValueCodec.jsonObject(from: $0, rawScalars: true) }
-            ]
-        }
-    }
-    let data = try JSONSerialization.data(withJSONObject: objects, options: [.sortedKeys])
-    return String(data: data, encoding: .utf8) ?? "[]"
-}
-
-private func decodeTextChunks(from data: Data) throws -> [YTextChunk] {
-    let object = try JSONSerialization.jsonObject(with: data)
-    guard let chunks = object as? [[String: Any]] else {
-        return []
-    }
-    return chunks.map { chunk in
-        let insert = YValueCodec.value(fromJSON: chunk["insert"])
-        let attributesObject = chunk["attributes"] as? [String: Any] ?? [:]
-        let attributes = attributesObject.mapValues { YValueCodec.value(fromJSON: $0) }
-        return YTextChunk(insert: insert, attributes: attributes)
     }
 }

@@ -126,7 +126,7 @@ enum YValueCodec {
     /// carries scalar content, never live handles.
     static func value(fromJSON object: Any?) -> YValue {
         guard let object = object as? [String: Any], let tag = object["tag"] as? String else {
-            return .undefined
+            return value(fromRawJSON: object)
         }
         switch tag {
         case "null":
@@ -177,6 +177,72 @@ enum YValueCodec {
         }
     }
 
+    static func attributes(fromJSON object: Any?) -> YAttributes {
+        guard let object = object as? [String: Any] else {
+            return [:]
+        }
+        return object.mapValues { value(fromJSON: $0) }
+    }
+
+    static func jsonString(from attributes: YAttributes, rawScalars: Bool) throws -> String {
+        let object = try attributes.mapValues { value in
+            try jsonObject(from: value, rawScalars: rawScalars)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    /// Decodes either the shared-type delta JSON shape (`retain`/`delete`/
+    /// `insert`) or the event JSON shape (`kind`, `length`, `values`).
+    static func delta(fromJSON object: Any?) -> [YTextDeltaOperation] {
+        guard let entries = object as? [[String: Any]] else {
+            return []
+        }
+        var operations: [YTextDeltaOperation] = []
+        for entry in entries {
+            if let kind = entry["kind"] as? String {
+                appendEventDelta(entry, kind: kind, to: &operations)
+            } else {
+                appendSharedTypeDelta(entry, to: &operations)
+            }
+        }
+        return operations
+    }
+
+    static func jsonString(from delta: [YTextDeltaOperation]) throws -> String {
+        let objects = try delta.map { operation -> [String: Any] in
+            switch operation {
+            case let .retain(length, attributes):
+                return [
+                    "retain": Int(length),
+                    "attributes": try attributesObject(from: attributes, rawScalars: true)
+                ]
+            case let .delete(length):
+                return ["delete": Int(length)]
+            case let .insert(value, attributes):
+                return [
+                    "insert": try jsonObject(from: value, rawScalars: false),
+                    "attributes": try attributesObject(from: attributes, rawScalars: true)
+                ]
+            }
+        }
+        let data = try JSONSerialization.data(withJSONObject: objects, options: [.sortedKeys])
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
+    static func textChunks(from data: Data) throws -> [YTextChunk] {
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let chunks = object as? [[String: Any]] else {
+            return []
+        }
+        return chunks.map { chunk in
+            YTextChunk(
+                insert: value(fromJSON: chunk["insert"]),
+                attributes: attributes(fromJSON: chunk["attributes"])
+            )
+        }
+    }
+
     /// Lowers a `YValue` to a JSON-shaped object.
     ///
     /// `rawScalars` selects the encoding: `true` produces bare scalars (for
@@ -222,6 +288,90 @@ enum YValueCodec {
         case .text, .map, .array, .document, .xmlFragment, .xmlElement, .xmlText, .weakLink:
             throw YError.typeMismatch
         }
+    }
+
+    private static func value(fromRawJSON object: Any?) -> YValue {
+        switch object {
+        case is NSNull:
+            return .null
+        case let value as Bool:
+            return .bool(value)
+        case let value as String:
+            return .string(value)
+        case let value as NSNumber:
+            let double = value.doubleValue
+            if double.rounded() == double,
+               double >= Double(Int64.min),
+               double <= Double(Int64.max) {
+                return .int(value.int64Value)
+            }
+            return .double(double)
+        case let values as [Any]:
+            let bytes = values.compactMap { value -> UInt8? in
+                if let byte = value as? UInt8 {
+                    return byte
+                }
+                guard let number = value as? NSNumber else {
+                    return nil
+                }
+                let int = number.int64Value
+                guard int >= 0, int <= 255, Double(int) == number.doubleValue else {
+                    return nil
+                }
+                return UInt8(int)
+            }
+            return bytes.count == values.count ? .binary(Data(bytes)) : .undefined
+        default:
+            return .undefined
+        }
+    }
+
+    private static func attributesObject(from attributes: YAttributes, rawScalars: Bool) throws -> [String: Any] {
+        try attributes.mapValues { value in
+            try jsonObject(from: value, rawScalars: rawScalars)
+        }
+    }
+
+    private static func appendEventDelta(
+        _ entry: [String: Any],
+        kind: String,
+        to operations: inout [YTextDeltaOperation]
+    ) {
+        switch kind {
+        case "insert":
+            let attributes = attributes(fromJSON: entry["attributes"])
+            if let values = entry["values"] as? [Any] {
+                for value in values {
+                    operations.append(.insert(YValueCodec.value(fromJSON: value), attributes: attributes))
+                }
+            } else {
+                operations.append(.insert(YValueCodec.value(fromJSON: entry["insert"]), attributes: attributes))
+            }
+        case "delete":
+            operations.append(.delete(uint32(entry["length"])))
+        case "retain":
+            operations.append(.retain(uint32(entry["length"]), attributes: attributes(fromJSON: entry["attributes"])))
+        default:
+            break
+        }
+    }
+
+    private static func appendSharedTypeDelta(
+        _ entry: [String: Any],
+        to operations: inout [YTextDeltaOperation]
+    ) {
+        let attributes = attributes(fromJSON: entry["attributes"])
+        if let length = entry["retain"] {
+            operations.append(.retain(uint32(length), attributes: attributes))
+        } else if let length = entry["delete"] {
+            operations.append(.delete(uint32(length)))
+        } else if let insert = entry["insert"] {
+            operations.append(.insert(value(fromJSON: insert), attributes: attributes))
+        }
+    }
+
+    private static func uint32(_ value: Any?) -> UInt32 {
+        (value as? UInt32) ?? (value as? NSNumber)?.uint32Value ?? 0
     }
 }
 
