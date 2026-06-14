@@ -16,3 +16,4 @@
 - **`peers` carries `{added, removed, webrtcPeers}`** — `bcPeers` is dropped (no BroadcastChannel equivalent in Swift).
 - **`room` is private** (implementation detail) and **`destroy()` must be called explicitly** (an actor `deinit` cannot run isolated teardown; `deinit` is best-effort only).
 - A provider-created `awareness` is fully torn down on `destroy()`; a caller-supplied one is left intact (`ownsAwareness`).
+- Sync-protocol choreography is delegated to core `YSyncEngine`; this internal extraction does not change the provider's public actor shape.

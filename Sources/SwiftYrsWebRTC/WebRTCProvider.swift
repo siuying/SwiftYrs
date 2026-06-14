@@ -406,54 +406,46 @@ public actor WebRTCProvider {
 
     private func sendInitialSync(to record: PeerRecord) {
         do {
-            let syncStep1 = try YSyncMessage.syncStep1(doc.stateVector())
-            record.conn.send(syncStep1.payload)
-            record.conn.send(try YSyncMessage.awarenessQuery().payload)
-            try sendKnownAwarenessStates(to: record)
+            let syncEngine = makeSyncEngine(for: record)
+            try syncEngine.initialSync()
         } catch {
             webRTCLogger.error("failed to send initial sync to peer: \(error, privacy: .public)")
         }
     }
 
-    /// Sends every awareness state we currently know to one peer, as a single
-    /// awareness message. No-op when there are no states.
-    private func sendKnownAwarenessStates(to record: PeerRecord) throws {
-        let clientIDs = try awareness.states().map(\.clientID)
-        guard !clientIDs.isEmpty else { return }
-        let update = try awareness.encodeUpdate(for: clientIDs)
-        record.conn.send(try YSyncMessage.awareness(update).payload)
-    }
-
     private func handle(_ message: YSyncMessage, from record: PeerRecord) {
         do {
-            switch message {
-            case let .syncStep1(stateVector, _):
-                let update = try doc.encodeStateAsUpdateV1(from: stateVector)
-                record.conn.send(try YSyncMessage.syncStep2(update).payload)
-            case let .syncStep2(update, _):
-                try applyRemote(update)
+            let result = try makeSyncEngine(for: record).handle(message)
+            if result.didSync {
                 record.synced = true
                 recomputeSynced()
-            case let .update(update, _):
-                try applyRemote(update)
-            case let .awareness(update, _):
-                try applyAwarenessUpdate(update, from: record)
-            case .awarenessQuery:
-                try sendKnownAwarenessStates(to: record)
-            default:
-                break
             }
+            record.awarenessClientIDs.formUnion(result.awarenessAddedClientIDs)
+            record.awarenessClientIDs.subtract(result.awarenessRemovedClientIDs)
         } catch {
             webRTCLogger.error("failed to handle sync message from peer: \(error, privacy: .public)")
         }
     }
 
-    private func applyAwarenessUpdate(_ update: YAwarenessUpdate, from record: PeerRecord) throws {
-        let before = try Set(awareness.states().map(\.clientID))
-        try awareness.applyUpdate(update)
-        let after = try Set(awareness.states().map(\.clientID))
-        record.awarenessClientIDs.formUnion(after.subtracting(before).filter { $0 != awareness.clientID })
-        record.awarenessClientIDs.subtract(before.subtracting(after))
+    private func makeSyncEngine(for record: PeerRecord) -> YSyncEngine {
+        YSyncEngine(
+            doc: doc,
+            awareness: awareness,
+            send: { message in
+                record.conn.send(message.payload)
+            },
+            applyUpdate: { [doc] update in
+                // Mesh gossip: applying a remote update fires the document
+                // observer, which re-broadcasts it to every peer. CRDT
+                // idempotency terminates the flood, so no echo gate is needed.
+                try doc.write(origin: "SwiftYrsWebRTC") { transaction in
+                    try transaction.apply(update)
+                }
+            },
+            applyAwarenessUpdate: { [awareness] update in
+                try awareness.applyUpdate(update)
+            }
+        )
     }
 
     private func removeAwarenessStatesIntroduced(by record: PeerRecord) {
@@ -461,16 +453,6 @@ public actor WebRTCProvider {
             awareness.removeState(for: clientID)
         }
         record.awarenessClientIDs.removeAll()
-    }
-
-    private func applyRemote(_ update: YUpdate) throws {
-        // Mesh gossip: applying a remote update fires the document observer, which
-        // re-broadcasts it to every peer. CRDT idempotency (a redundant apply
-        // produces no observer event) terminates the flood, so no echo gate is
-        // needed — unlike the single-peer HocuspocusProvider.
-        try doc.write(origin: "SwiftYrsWebRTC") { transaction in
-            try transaction.apply(update)
-        }
     }
 
     // MARK: - Observation & broadcast
