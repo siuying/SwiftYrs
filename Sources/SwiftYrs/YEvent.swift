@@ -101,7 +101,7 @@ extension YEvent {
             self = .shared(YSharedEvent(
                 target: YSharedEvent.Target(rawValue: kind) ?? .weak,
                 path: eventPath(object["path"]),
-                delta: eventDelta(object["delta"]),
+                delta: YValueCodec.delta(fromJSON: object["delta"]),
                 keys: eventKeys(object["keys"])
             ))
         case "awarenessUpdate":
@@ -153,42 +153,6 @@ private func eventPath(_ value: Any?) -> [YPathSegment] {
         }
         return .index(eventUInt32(segment))
     }
-}
-
-private func eventAttributes(_ value: Any?) -> YAttributes {
-    guard let object = value as? [String: Any] else {
-        return [:]
-    }
-    return object.mapValues { YValueCodec.value(fromJSON: $0) }
-}
-
-/// Normalises the shim's two delta encodings (text-style single `insert`,
-/// array/xml-style multi `values`) into one `[YTextDeltaOperation]`.
-private func eventDelta(_ value: Any?) -> [YTextDeltaOperation] {
-    guard let entries = value as? [[String: Any]] else {
-        return []
-    }
-    var operations: [YTextDeltaOperation] = []
-    for entry in entries {
-        switch entry["kind"] as? String {
-        case "insert":
-            let attributes = eventAttributes(entry["attributes"])
-            if let values = entry["values"] as? [Any] {
-                for value in values {
-                    operations.append(.insert(YValueCodec.value(fromJSON: value), attributes: attributes))
-                }
-            } else {
-                operations.append(.insert(YValueCodec.value(fromJSON: entry["insert"]), attributes: attributes))
-            }
-        case "delete":
-            operations.append(.delete(eventUInt32(entry["length"])))
-        case "retain":
-            operations.append(.retain(eventUInt32(entry["length"]), attributes: eventAttributes(entry["attributes"])))
-        default:
-            break
-        }
-    }
-    return operations
 }
 
 private func eventKeys(_ value: Any?) -> [String: YEventChange] {
