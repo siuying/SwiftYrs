@@ -155,8 +155,15 @@ public actor HocuspocusProvider {
         try startObservingIfNeeded()
         try await sendAuthToken(on: webSocket)
 
-        let syncStep1 = try YSyncMessage.syncStep1(document.stateVector())
-        try await webSocket.send(HocuspocusMessage.sync(documentName: name, syncStep1).encoded())
+        var initialMessages: [YSyncMessage] = []
+        let initialSyncEngine = makeSyncEngine { message in
+            initialMessages.append(message)
+        }
+        try initialSyncEngine.initialSync(
+            includeAwarenessQuery: false,
+            includeKnownAwarenessStates: false
+        )
+        try await sendEngineMessages(initialMessages, on: webSocket)
         if let awareness, try awareness.localState() != nil {
             try await webSocket.send(HocuspocusMessage.awareness(
                 documentName: name,
@@ -272,23 +279,17 @@ public actor HocuspocusProvider {
     }
 
     private func handle(_ syncMessage: YSyncMessage) async throws {
-        switch syncMessage {
-        case let .syncStep1(stateVector, _):
-            guard let webSocket else {
-                return
-            }
-            let update = try document.encodeStateAsUpdateV1(from: stateVector)
-            try await webSocket.send(HocuspocusMessage.sync(
-                documentName: name,
-                YSyncMessage.syncStep2(update)
-            ).encoded())
-        case let .syncStep2(update, _):
-            try applyRemote(update)
-            isSyncedContinuation.yield(true)
-        case let .update(update, _):
-            try applyRemote(update)
-        default:
+        guard let webSocket else {
             return
+        }
+        var outgoing: [YSyncMessage] = []
+        let syncEngine = makeSyncEngine { message in
+            outgoing.append(message)
+        }
+        let result = try syncEngine.handle(syncMessage)
+        try await sendEngineMessages(outgoing, on: webSocket)
+        if result.didSync {
+            isSyncedContinuation.yield(true)
         }
     }
 
@@ -338,26 +339,50 @@ public actor HocuspocusProvider {
     }
 
     private func sendKnownAwarenessStates() async throws {
-        guard let webSocket, let awareness else {
+        guard let webSocket, awareness != nil else {
             return
         }
-        let clientIDs = try awareness.states().map(\.clientID)
-        guard !clientIDs.isEmpty else {
-            return
+        var outgoing: [YSyncMessage] = []
+        let syncEngine = makeSyncEngine { message in
+            outgoing.append(message)
         }
-        try await webSocket.send(HocuspocusMessage.awareness(
-            documentName: name,
-            awareness.encodeUpdate(for: clientIDs)
-        ).encoded())
+        try syncEngine.sendKnownAwarenessStates()
+        try await sendEngineMessages(outgoing, on: webSocket)
     }
 
-    private func applyRemote(_ update: YUpdate) throws {
-        // The update observer fires synchronously during commit; gate it so our
-        // own applied remote update is not echoed back to the server. This is
-        // robust regardless of how yrs re-encodes the update bytes.
-        try documentObservationGate.withApplyingRemote {
-            try document.write(origin: "SwiftYrsHocuspocus") { transaction in
-                try transaction.apply(update)
+    private func makeSyncEngine(send: @escaping (YSyncMessage) throws -> Void) -> YSyncEngine {
+        YSyncEngine(
+            doc: document,
+            awareness: awareness,
+            send: send,
+            applyUpdate: { [document, documentObservationGate] update in
+                try documentObservationGate.withApplyingRemote {
+                    try document.write(origin: "SwiftYrsHocuspocus") { transaction in
+                        try transaction.apply(update)
+                    }
+                }
+            },
+            applyAwarenessUpdate: { [awareness, awarenessObservationGate] update in
+                guard let awareness else {
+                    return
+                }
+                try awarenessObservationGate.withApplyingRemote {
+                    try awareness.applyUpdate(update)
+                }
+            }
+        )
+    }
+
+    private func sendEngineMessages(
+        _ messages: [YSyncMessage],
+        on webSocket: any HocuspocusWebSocket
+    ) async throws {
+        for message in messages {
+            switch message {
+            case let .awareness(update, _):
+                try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
+            default:
+                try await webSocket.send(HocuspocusMessage.sync(documentName: name, message).encoded())
             }
         }
     }
