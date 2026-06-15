@@ -53,8 +53,6 @@ public struct YSubdoc: Equatable {
 /// borrowed from the document and is valid for the document's lifetime
 /// (ADR-0015).
 public class YSharedType: Equatable {
-    typealias BridgeObserve = (OpaquePointer, UnsafeMutableRawPointer?, YrsBridgeEventCallback) -> OpaquePointer?
-
     let handle: OpaquePointer
     private let bridgeObserve: BridgeObserve
 
@@ -70,9 +68,7 @@ public class YSharedType: Equatable {
     /// Observes changes to this shared type. The returned token cancels the
     /// observation when cancelled or deallocated.
     public func observe(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, eventCallback in
-            bridgeObserve(handle, context, eventCallback)
-        }
+        try registerObservation(handle: handle, observe: bridgeObserve, callback)
     }
 
     /// An `AsyncStream` of this shared type's change events; the observation is

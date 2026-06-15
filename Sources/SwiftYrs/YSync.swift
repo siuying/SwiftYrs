@@ -49,14 +49,11 @@ public enum YSyncMessage: Equatable {
     }
 
     public static func decodePayload(_ payload: Data) throws -> [YSyncMessage] {
-        let data = try payload.withUnsafeBytes { bytes -> Data in
-            guard let baseAddress = bytes.baseAddress else {
-                throw YError.decodeFailure
-            }
+        let data = try withUInt8Pointer(payload) { pointer, length in
             return try readingBuffer {
                 yrs_bridge_sync_decode_messages(
-                    baseAddress.assumingMemoryBound(to: UInt8.self),
-                    UInt(bytes.count),
+                    pointer,
+                    length,
                     &$0
                 )
             }
@@ -76,14 +73,11 @@ public enum YSyncMessage: Equatable {
         _ data: Data,
         _ operation: (UnsafePointer<UInt8>, UInt, UnsafeMutablePointer<YrsBridgeBuffer>) -> Int32
     ) throws -> Data {
-        try data.withUnsafeBytes { bytes -> Data in
-            guard let baseAddress = bytes.baseAddress else {
-                throw YError.decodeFailure
-            }
+        try withUInt8Pointer(data) { pointer, length in
             return try readingBuffer {
                 operation(
-                    baseAddress.assumingMemoryBound(to: UInt8.self),
-                    UInt(bytes.count),
+                    pointer,
+                    length,
                     &$0
                 )
             }
@@ -141,15 +135,12 @@ public enum YSyncProtocol {
     }
 
     public static func handle(_ payload: Data, awareness: YAwareness) throws -> Data {
-        try payload.withUnsafeBytes { bytes -> Data in
-            guard let baseAddress = bytes.baseAddress else {
-                throw YError.decodeFailure
-            }
+        try withUInt8Pointer(payload) { pointer, length in
             return try readingBuffer {
                 yrs_bridge_sync_handle(
                     awareness.handle,
-                    baseAddress.assumingMemoryBound(to: UInt8.self),
-                    UInt(bytes.count),
+                    pointer,
+                    length,
                     &$0
                 )
             }

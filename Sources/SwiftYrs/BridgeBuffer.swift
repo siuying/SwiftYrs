@@ -10,8 +10,7 @@ import YrsBridgeFFI
 /// through here instead of re-typing that four-step dance.
 ///
 /// `fill` receives the zeroed buffer by reference and returns the FFI status
-/// code; it should do nothing but invoke the shim call. Input-pointer guards
-/// (e.g. `withUnsafeBytes`/`withCString`) belong outside, wrapping this call.
+/// code; it should do nothing but invoke the shim call.
 func readingBuffer(_ fill: (inout YrsBridgeBuffer) -> Int32) throws -> Data {
     var buffer = YrsBridgeBuffer(data: nil, len: 0)
     try throwIfNeeded(fill(&buffer))
@@ -47,4 +46,18 @@ func readingScalar<T>(_ initial: T, _ fill: (inout T) -> Int32) throws -> T {
     var output = initial
     try throwIfNeeded(fill(&output))
     return output
+}
+
+/// Runs a shim call with bytes borrowed from Swift `Data`, concentrating the
+/// input-side pointer binding ritual in one auditable place.
+func withUInt8Pointer<T>(
+    _ data: Data,
+    _ body: (UnsafePointer<UInt8>, UInt) throws -> T
+) throws -> T {
+    try data.withUnsafeBytes { bytes in
+        guard let baseAddress = bytes.baseAddress else {
+            throw YError.decodeFailure
+        }
+        return try body(baseAddress.assumingMemoryBound(to: UInt8.self), UInt(bytes.count))
+    }
 }
