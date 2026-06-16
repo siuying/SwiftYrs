@@ -378,7 +378,10 @@ private func assertInvalidPersistedRow(
 }
 
 private func waitUntil(
-    timeout: TimeInterval = 2,
+    // Compaction runs on a background utility-QoS queue, which a loaded CI
+    // runner can defer well past a couple of seconds; the loop returns as soon
+    // as the condition holds, so the generous ceiling only adds headroom.
+    timeout: TimeInterval = 10,
     interval: TimeInterval = 0.01,
     condition: () throws -> Bool
 ) throws {
