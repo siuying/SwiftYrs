@@ -1802,6 +1802,37 @@ pub unsafe extern "C" fn yrs_bridge_xml_get_attribute(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_xml_attributes_json(
+    xml: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if xml.is_null() || transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let mut map = serde_json::Map::new();
+        match (*xml).type_ref() {
+            TypeRef::XmlElement(_) => {
+                for (key, value) in XmlElementRef::from_raw_branch(xml).attributes(&*transaction) {
+                    map.insert(key.to_string(), plain_json_from_out(&value));
+                }
+            }
+            TypeRef::XmlText => {
+                for (key, value) in XmlTextRef::from_raw_branch(xml).attributes(&*transaction) {
+                    map.insert(key.to_string(), plain_json_from_out(&value));
+                }
+            }
+            _ => return YRS_BRIDGE_ERR_TYPE_MISMATCH,
+        }
+        match serde_json::to_vec(&serde_json::Value::Object(map)) {
+            Ok(bytes) => write_buffer(bytes, out),
+            Err(_) => YRS_BRIDGE_ERR_DECODE,
+        }
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_xml_remove_attribute(
     xml: *mut Branch,
     transaction: *mut YrsBridgeTransaction,

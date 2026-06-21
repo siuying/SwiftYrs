@@ -215,6 +215,13 @@ extension YReadTransaction {
         try xmlAttribute(key, from: xml.handle, transaction: handle)
     }
 
+    /// All of an element's attributes as a natural-JSON object (`{ key: value }`),
+    /// for reading a node's full attribute set — including keys the caller does
+    /// not know in advance — which per-key `getAttribute` cannot do.
+    public func attributesJSON(from xml: YXmlElement) throws -> Data {
+        try readingBuffer { yrs_bridge_xml_attributes_json(xml.handle, handle, &$0) }
+    }
+
     public func getAttribute(_ key: String, from xml: YXmlText) throws -> YValue {
         try xmlAttribute(key, from: xml.handle, transaction: handle)
     }
