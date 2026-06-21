@@ -523,7 +523,9 @@ private func decodeTextChunks(from data: Data) throws -> [YTextChunk] {
 /// never contains an interior NUL, so the bytes are forwarded verbatim with a
 /// terminator appended — no intermediate `String` round-trip.
 private func withJSONCString<R>(_ json: Data, _ body: (UnsafePointer<CChar>) throws -> R) throws -> R {
-    var bytes = [CChar](repeating: 0, count: json.count + 1)
-    json.copyBytes(to: UnsafeMutableRawBufferPointer(start: &bytes, count: json.count))
-    return try body(bytes)
+    var bytes = [UInt8](json)
+    bytes.append(0)
+    return try bytes.withUnsafeBytes { raw in
+        try body(raw.bindMemory(to: CChar.self).baseAddress!)
+    }
 }
