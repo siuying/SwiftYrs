@@ -45,14 +45,11 @@ public final class YAwareness {
     }
 
     public func setLocalStateJSON(_ data: Data) throws {
-        try data.withUnsafeBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else {
-                throw YError.decodeFailure
-            }
-            let json = String(decoding: UnsafeRawBufferPointer(start: baseAddress, count: bytes.count), as: UTF8.self)
-            try json.withCString { pointer in
-                try throwIfNeeded(yrs_bridge_awareness_set_local_state_json(handle, pointer))
-            }
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw YError.decodeFailure
+        }
+        try json.withCString { pointer in
+            try throwIfNeeded(yrs_bridge_awareness_set_local_state_json(handle, pointer))
         }
     }
 
@@ -109,28 +106,21 @@ public final class YAwareness {
     }
 
     public func applyUpdate(_ update: YAwarenessUpdate) throws {
-        try update.data.withUnsafeBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else {
-                throw YError.decodeFailure
-            }
+        try withUInt8Pointer(update.data) { pointer, length in
             try throwIfNeeded(yrs_bridge_awareness_apply_update(
                 handle,
-                baseAddress.assumingMemoryBound(to: UInt8.self),
-                UInt(bytes.count)
+                pointer,
+                length
             ))
         }
     }
 
     public func observeUpdate(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_awareness_observe_update(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_awareness_observe_update, callback)
     }
 
     public func observeChange(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, callback in
-            yrs_bridge_awareness_observe_change(handle, context, callback)
-        }
+        try registerObservation(handle: handle, observe: yrs_bridge_awareness_observe_change, callback)
     }
 
     public func updateEvents() throws -> AsyncStream<YEvent> {

@@ -81,7 +81,8 @@ public final class CloudKitSyncStore: CloudKitSyncEngineHandler, @unchecked Send
             throw CloudKitProviderError.activeProvider(documentName: documentName)
         }
         try await adapter.deleteZone(zoneID)
-        try? metadataStore.removeData(forKey: CloudKitSyncStateKeys.drainSet, documentName: documentName)
+        var drainSetManager = DrainSetManager(metadataStore: metadataStore, documentName: documentName)
+        drainSetManager.clear()
     }
 
     /// Clear store-level CloudKit sync state on an account sign-out/switch so a

@@ -22,21 +22,15 @@ public struct YRelativePosition: Equatable, Sendable {
     }
 
     public init(data bytes: Data) throws {
-        let json = try bytes.withUnsafeBytes { rawBytes -> Data in
-            guard let pointer = rawBytes.bindMemory(to: UInt8.self).baseAddress else {
-                throw YError.nullPointer
-            }
-            return try readingBuffer { yrs_bridge_relative_position_json_from_v1(pointer, UInt(rawBytes.count), &$0) }
+        let json = try withUInt8Pointer(bytes) { pointer, length in
+            return try readingBuffer { yrs_bridge_relative_position_json_from_v1(pointer, length, &$0) }
         }
         self.init(data: bytes, json: json)
     }
 
     public init(json: Data) throws {
-        let data = try json.withUnsafeBytes { bytes -> Data in
-            guard let pointer = bytes.bindMemory(to: UInt8.self).baseAddress else {
-                throw YError.nullPointer
-            }
-            return try readingBuffer { yrs_bridge_relative_position_v1_from_json(pointer, UInt(bytes.count), &$0) }
+        let data = try withUInt8Pointer(json) { pointer, length in
+            return try readingBuffer { yrs_bridge_relative_position_v1_from_json(pointer, length, &$0) }
         }
         self.init(data: data, json: json)
     }
@@ -71,12 +65,9 @@ extension YReadTransaction {
     }
 
     public func offset(of position: YRelativePosition, in _: YText) throws -> UInt32 {
-        try position.json.withUnsafeBytes { bytes -> UInt32 in
-            guard let pointer = bytes.bindMemory(to: UInt8.self).baseAddress else {
-                throw YError.nullPointer
-            }
+        try withUInt8Pointer(position.json) { pointer, length in
             return try readingScalar(UInt32(0)) {
-                yrs_bridge_relative_position_offset(pointer, UInt(bytes.count), handle, &$0)
+                yrs_bridge_relative_position_offset(pointer, length, handle, &$0)
             }
         }
     }

@@ -53,8 +53,6 @@ public struct YSubdoc: Equatable {
 /// borrowed from the document and is valid for the document's lifetime
 /// (ADR-0015).
 public class YSharedType: Equatable {
-    typealias BridgeObserve = (OpaquePointer, UnsafeMutableRawPointer?, YrsBridgeEventCallback) -> OpaquePointer?
-
     let handle: OpaquePointer
     private let bridgeObserve: BridgeObserve
 
@@ -70,9 +68,7 @@ public class YSharedType: Equatable {
     /// Observes changes to this shared type. The returned token cancels the
     /// observation when cancelled or deallocated.
     public func observe(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try makeObservation(callback) { context, eventCallback in
-            bridgeObserve(handle, context, eventCallback)
-        }
+        try registerObservation(handle: handle, observe: bridgeObserve, callback)
     }
 
     /// An `AsyncStream` of this shared type's change events; the observation is
@@ -134,7 +130,7 @@ extension YReadTransaction {
     }
 
     public func chunks(from text: YText) throws -> [YTextChunk] {
-        try decodeTextChunks(from: readingBuffer { yrs_bridge_text_chunks_json(text.handle, handle, &$0) })
+        try YValueCodec.textChunks(from: readingBuffer { yrs_bridge_text_chunks_json(text.handle, handle, &$0) })
     }
 
     public func delta(from text: YText) throws -> [YTextDeltaOperation] {
@@ -267,7 +263,7 @@ extension YWriteTransaction {
     }
 
     public func insert(_ value: String, into text: YText, at index: UInt32, attributes: YAttributes) throws {
-        let attributes = try jsonString(from: attributes, rawScalars: true)
+        let attributes = try YValueCodec.jsonString(from: attributes, rawScalars: true)
         try value.withCString { valuePointer in
             try attributes.withCString { attributesPointer in
                 try throwIfNeeded(
@@ -284,14 +280,14 @@ extension YWriteTransaction {
     }
 
     public func format(_ text: YText, at index: UInt32, length: UInt32, attributes: YAttributes) throws {
-        let attributes = try jsonString(from: attributes, rawScalars: true)
+        let attributes = try YValueCodec.jsonString(from: attributes, rawScalars: true)
         try attributes.withCString { pointer in
             try throwIfNeeded(yrs_bridge_text_format_json(text.handle, handle, index, length, pointer))
         }
     }
 
     public func insertEmbed(_ value: YValue, into text: YText, at index: UInt32, attributes: YAttributes = [:]) throws {
-        let attributes = try jsonString(from: attributes, rawScalars: true)
+        let attributes = try YValueCodec.jsonString(from: attributes, rawScalars: true)
         try YValueCodec.withBridgeValue(value) { nativeValue in
             try attributes.withCString { attributesPointer in
                 try throwIfNeeded(yrs_bridge_text_insert_embed(text.handle, handle, index, nativeValue, attributesPointer))
@@ -300,7 +296,7 @@ extension YWriteTransaction {
     }
 
     public func applyDelta(_ delta: [YTextDeltaOperation], to text: YText) throws {
-        let delta = try jsonString(from: delta)
+        let delta = try YValueCodec.jsonString(from: delta)
         try delta.withCString { pointer in
             try throwIfNeeded(yrs_bridge_text_apply_delta_json(text.handle, handle, pointer))
         }
