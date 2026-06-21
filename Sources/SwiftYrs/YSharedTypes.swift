@@ -228,6 +228,16 @@ extension YReadTransaction {
         return String(data: data, encoding: .utf8) ?? ""
     }
 
+    /// The `YXmlText` content as a natural-JSON delta: UTF-8 JSON encoding an
+    /// array of `{ "insert": <string>, "attributes": { ... } }` operations,
+    /// matching y-prosemirror's `Y.XmlText.toDelta()`. Attribute values keep
+    /// their natural JSON shape (objects intact), which the `YValue`-based
+    /// `delta`/`chunks` readers cannot represent — use this for rich formatting
+    /// such as ProseMirror marks (`{ "bold": {} }`, `{ "link": { "href": … } }`).
+    public func deltaJSON(from xmlText: YXmlText) throws -> Data {
+        try readingBuffer { yrs_bridge_xml_text_delta_json(xmlText.handle, handle, &$0) }
+    }
+
     public func subdocGuids() throws -> [String] {
         let data = try readingBuffer { yrs_bridge_transaction_subdoc_guids(handle, &$0) }
         let object = try JSONSerialization.jsonObject(with: data)
@@ -383,6 +393,41 @@ extension YWriteTransaction {
         }
     }
 
+    /// Inserts `value` carrying inline formatting given as natural JSON
+    /// (`attributesJSON` is a UTF-8 JSON object whose values keep their shape,
+    /// e.g. `{ "bold": {}, "link": { "href": "…" } }`). Use this for ProseMirror
+    /// marks, whose attribute values are objects the `YValue` codec cannot carry.
+    public func insert(_ value: String, into xmlText: YXmlText, at index: UInt32, attributesJSON: Data) throws {
+        try value.withCString { valuePointer in
+            try withJSONCString(attributesJSON) { attributesPointer in
+                try throwIfNeeded(
+                    yrs_bridge_xml_text_insert_with_attributes_json(
+                        xmlText.handle,
+                        handle,
+                        index,
+                        valuePointer,
+                        attributesPointer
+                    )
+                )
+            }
+        }
+    }
+
+    /// Formats an existing range with inline attributes given as natural JSON.
+    public func format(_ xmlText: YXmlText, at index: UInt32, length: UInt32, attributesJSON: Data) throws {
+        try withJSONCString(attributesJSON) { pointer in
+            try throwIfNeeded(yrs_bridge_xml_text_format_json(xmlText.handle, handle, index, length, pointer))
+        }
+    }
+
+    /// Applies a natural-JSON delta (`[{ "retain"/"insert"/"delete", "attributes" }]`)
+    /// to a `YXmlText`, with attribute values kept as their natural JSON.
+    public func applyDeltaJSON(_ deltaJSON: Data, to xmlText: YXmlText) throws {
+        try withJSONCString(deltaJSON) { pointer in
+            try throwIfNeeded(yrs_bridge_xml_text_apply_delta_json(xmlText.handle, handle, pointer))
+        }
+    }
+
     public func remove(from xmlText: YXmlText, at index: UInt32, length: UInt32) throws {
         try throwIfNeeded(yrs_bridge_xml_text_remove(xmlText.handle, handle, index, length))
     }
@@ -472,4 +517,13 @@ private func decodeTextChunks(from data: Data) throws -> [YTextChunk] {
         let attributes = attributesObject.mapValues { YValueCodec.value(fromJSON: $0) }
         return YTextChunk(insert: insert, attributes: attributes)
     }
+}
+
+/// Passes UTF-8 `json` to a C function expecting a NUL-terminated string. JSON
+/// never contains an interior NUL, so the bytes are forwarded verbatim with a
+/// terminator appended — no intermediate `String` round-trip.
+private func withJSONCString<R>(_ json: Data, _ body: (UnsafePointer<CChar>) throws -> R) throws -> R {
+    var bytes = [CChar](repeating: 0, count: json.count + 1)
+    json.copyBytes(to: UnsafeMutableRawBufferPointer(start: &bytes, count: json.count))
+    return try body(bytes)
 }

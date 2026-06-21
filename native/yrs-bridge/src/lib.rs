@@ -288,6 +288,36 @@ fn json_from_diff(diff: yrs::types::text::Diff<YChange>) -> serde_json::Value {
     })
 }
 
+/// Like `json_from_diff`, but emits natural (untagged) JSON: a string `insert`
+/// and an `attributes` object whose values are their plain JSON. This is the
+/// shape y-prosemirror's `Y.XmlText.toDelta()` produces, where a mark is a key
+/// whose value is the mark's attribute object (e.g. `{ "bold": {} }`).
+fn plain_json_from_diff(diff: yrs::types::text::Diff<YChange>) -> serde_json::Value {
+    serde_json::json!({
+        "insert": plain_json_from_out(&diff.insert),
+        "attributes": plain_json_from_attrs(&diff.attributes),
+    })
+}
+
+fn plain_json_from_out(value: &Out) -> serde_json::Value {
+    match value {
+        Out::Any(value) => plain_json_from_any(value),
+        _ => serde_json::Value::Null,
+    }
+}
+
+fn plain_json_from_attrs(attrs: &Option<Box<Attrs>>) -> serde_json::Value {
+    match attrs {
+        Some(attrs) => serde_json::Value::Object(
+            attrs
+                .iter()
+                .map(|(key, value)| (key.to_string(), plain_json_from_any(value)))
+                .collect(),
+        ),
+        None => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
 unsafe fn emit_json(callback: YrsBridgeEventCallback, context: usize, value: serde_json::Value) {
     if let Ok(bytes) = serde_json::to_vec(&value) {
         callback(context as *mut c_void, bytes.as_ptr(), bytes.len());
@@ -1867,6 +1897,155 @@ pub unsafe extern "C" fn yrs_bridge_xml_text_string(
         }
         let value = XmlTextRef::from_raw_branch(text).get_string(&*transaction);
         write_buffer(value.into_bytes(), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_xml_text_insert_with_attributes_json(
+    text: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    index: u32,
+    value: *const c_char,
+    attributes_json: *const c_char,
+) -> i32 {
+    ffi_boundary(|| {
+        if text.is_null() || transaction.is_null() || value.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let attrs = match attrs_from_json(attributes_json) {
+            Ok(attrs) => attrs,
+            Err(code) => return code,
+        };
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        let value = CStr::from_ptr(value).to_string_lossy();
+        XmlTextRef::from_raw_branch(text).insert_with_attributes(
+            transaction,
+            index,
+            value.as_ref(),
+            attrs,
+        );
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_xml_text_format_json(
+    text: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    index: u32,
+    len: u32,
+    attributes_json: *const c_char,
+) -> i32 {
+    ffi_boundary(|| {
+        if text.is_null() || transaction.is_null() || attributes_json.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let attrs = match attrs_from_json(attributes_json) {
+            Ok(attrs) => attrs,
+            Err(code) => return code,
+        };
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        XmlTextRef::from_raw_branch(text).format(transaction, index, len, attrs);
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_xml_text_apply_delta_json(
+    text: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    delta_json: *const c_char,
+) -> i32 {
+    ffi_boundary(|| {
+        if text.is_null() || transaction.is_null() || delta_json.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let delta_json = CStr::from_ptr(delta_json).to_string_lossy();
+        let ops: serde_json::Value = match serde_json::from_str(&delta_json) {
+            Ok(value) => value,
+            Err(_) => return YRS_BRIDGE_ERR_DECODE,
+        };
+        let Some(ops) = ops.as_array() else {
+            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+        };
+
+        let mut delta = Vec::with_capacity(ops.len());
+        for op in ops {
+            let Some(op) = op.as_object() else {
+                return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+            };
+            if let Some(len) = op.get("retain").and_then(|value| value.as_u64()) {
+                let attrs = match op.get("attributes") {
+                    Some(serde_json::Value::Object(values)) if !values.is_empty() => {
+                        Some(Box::new(
+                            values
+                                .iter()
+                                .map(|(key, value)| {
+                                    (Arc::<str>::from(key.as_str()), any_from_json(value.clone()))
+                                })
+                                .collect(),
+                        ))
+                    }
+                    _ => None,
+                };
+                delta.push(Delta::Retain(len as u32, attrs));
+            } else if let Some(len) = op.get("delete").and_then(|value| value.as_u64()) {
+                delta.push(Delta::Deleted(len as u32));
+            } else if let Some(insert) = op.get("insert") {
+                let input = match input_from_json(insert.clone()) {
+                    Ok(input) => input,
+                    Err(code) => return code,
+                };
+                let attrs = match op.get("attributes") {
+                    Some(serde_json::Value::Object(values)) if !values.is_empty() => {
+                        Some(Box::new(
+                            values
+                                .iter()
+                                .map(|(key, value)| {
+                                    (Arc::<str>::from(key.as_str()), any_from_json(value.clone()))
+                                })
+                                .collect(),
+                        ))
+                    }
+                    _ => None,
+                };
+                delta.push(Delta::Inserted(input, attrs));
+            } else {
+                return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+            }
+        }
+
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        XmlTextRef::from_raw_branch(text).apply_delta(transaction, delta);
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_xml_text_delta_json(
+    text: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if text.is_null() || transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let ops: Vec<_> = XmlTextRef::from_raw_branch(text)
+            .diff(&*transaction, YChange::identity)
+            .into_iter()
+            .map(plain_json_from_diff)
+            .collect();
+        match serde_json::to_vec(&ops) {
+            Ok(bytes) => write_buffer(bytes, out),
+            Err(_) => YRS_BRIDGE_ERR_DECODE,
+        }
     })
 }
 
