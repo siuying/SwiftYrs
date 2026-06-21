@@ -94,11 +94,16 @@ int yrs_bridge_xml_remove(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_
 int yrs_bridge_xml_element_tag(YrsBridgeBranch *_Nonnull xml, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_xml_set_attribute(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeValue value);
 int yrs_bridge_xml_get_attribute(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeValue *_Nonnull out);
+int yrs_bridge_xml_attributes_json(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_xml_remove_attribute(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key);
 int yrs_bridge_xml_text_insert(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, const char *_Nonnull value);
 int yrs_bridge_xml_text_remove(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, uint32_t len);
 int yrs_bridge_xml_text_len(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t *_Nonnull out);
 int yrs_bridge_xml_text_string(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_xml_text_insert_with_attributes_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, const char *_Nonnull value, const char *_Nullable attributes_json);
+int yrs_bridge_xml_text_format_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, uint32_t len, const char *_Nonnull attributes_json);
+int yrs_bridge_xml_text_apply_delta_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull delta_json);
+int yrs_bridge_xml_text_delta_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 
 int yrs_bridge_map_set_new_subdoc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull guid_out);
 int yrs_bridge_map_get_subdoc_guid(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull out);
