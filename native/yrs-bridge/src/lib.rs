@@ -2443,6 +2443,27 @@ pub unsafe extern "C" fn yrs_bridge_weak_string(
     })
 }
 
+/// A sticky index into a text branch: `Text` and `XmlText` share the same
+/// sequence structure, so both anchor character positions.
+unsafe fn text_sticky_index(
+    text: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    index: u32,
+    assoc: i32,
+) -> Option<StickyIndex> {
+    match (*text).type_ref() {
+        TypeRef::Text => {
+            TextRef::from_raw_branch(text).sticky_index(&*transaction, index, assoc_from_i32(assoc))
+        }
+        TypeRef::XmlText => XmlTextRef::from_raw_branch(text).sticky_index(
+            &*transaction,
+            index,
+            assoc_from_i32(assoc),
+        ),
+        _ => None,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_text_relative_position_json(
     text: *mut Branch,
@@ -2455,9 +2476,7 @@ pub unsafe extern "C" fn yrs_bridge_text_relative_position_json(
         if text.is_null() || transaction.is_null() {
             return YRS_BRIDGE_ERR_NULL_POINTER;
         }
-        let Some(position) =
-            TextRef::from_raw_branch(text).sticky_index(&*transaction, index, assoc_from_i32(assoc))
-        else {
+        let Some(position) = text_sticky_index(text, transaction, index, assoc) else {
             return YRS_BRIDGE_ERR_TYPE_MISMATCH;
         };
         match serde_json::to_vec(&position) {
@@ -2479,11 +2498,49 @@ pub unsafe extern "C" fn yrs_bridge_text_relative_position_v1(
         if text.is_null() || transaction.is_null() {
             return YRS_BRIDGE_ERR_NULL_POINTER;
         }
-        let Some(position) =
-            TextRef::from_raw_branch(text).sticky_index(&*transaction, index, assoc_from_i32(assoc))
-        else {
+        let Some(position) = text_sticky_index(text, transaction, index, assoc) else {
             return YRS_BRIDGE_ERR_TYPE_MISMATCH;
         };
+        write_buffer(position.encode_v1(), out)
+    })
+}
+
+/// A sticky index anchored to a shared type itself (yrs "nested"/"root" scope)
+/// rather than to a character offset — how y-prosemirror anchors a caret in an
+/// element with no text children.
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_type_relative_position_json(
+    branch: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    assoc: i32,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if branch.is_null() || transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let anchor = BranchPtr::from(&*branch);
+        let position = StickyIndex::from_type(&*transaction, &anchor, assoc_from_i32(assoc));
+        match serde_json::to_vec(&position) {
+            Ok(bytes) => write_buffer(bytes, out),
+            Err(_) => YRS_BRIDGE_ERR_DECODE,
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_type_relative_position_v1(
+    branch: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    assoc: i32,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if branch.is_null() || transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let anchor = BranchPtr::from(&*branch);
+        let position = StickyIndex::from_type(&*transaction, &anchor, assoc_from_i32(assoc));
         write_buffer(position.encode_v1(), out)
     })
 }
@@ -2549,6 +2606,43 @@ pub unsafe extern "C" fn yrs_bridge_relative_position_offset(
         };
         unsafe {
             *out = offset.index;
+        }
+        YRS_BRIDGE_OK
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_relative_position_resolve(
+    json: *const c_uchar,
+    len: usize,
+    transaction: *mut YrsBridgeTransaction,
+    out_value: *mut YrsBridgeValue,
+    out_index: *mut u32,
+) -> i32 {
+    ffi_boundary(|| {
+        if json.is_null() || transaction.is_null() || out_value.is_null() || out_index.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(json, len) };
+        let Ok(position) = serde_json::from_slice::<StickyIndex>(bytes) else {
+            return YRS_BRIDGE_ERR_DECODE;
+        };
+        let Some(offset) = position.get_offset(&*transaction) else {
+            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+        };
+        let branch = offset.branch;
+        let value = match branch.type_ref() {
+            TypeRef::Text => Out::YText(TextRef::from(branch)),
+            TypeRef::Array => Out::YArray(ArrayRef::from(branch)),
+            TypeRef::Map => Out::YMap(MapRef::from(branch)),
+            TypeRef::XmlElement(_) => Out::YXmlElement(XmlElementRef::from(branch)),
+            TypeRef::XmlFragment => Out::YXmlFragment(XmlFragmentRef::from(branch)),
+            TypeRef::XmlText => Out::YXmlText(XmlTextRef::from(branch)),
+            _ => return YRS_BRIDGE_ERR_TYPE_MISMATCH,
+        };
+        unsafe {
+            *out_value = output_value(value);
+            *out_index = offset.index;
         }
         YRS_BRIDGE_OK
     })

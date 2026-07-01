@@ -71,6 +71,27 @@ extension YReadTransaction {
             }
         }
     }
+
+    /// The node and offset a relative position currently points at, resolved
+    /// against this transaction's document state.
+    public func resolve(_ position: YRelativePosition) throws -> YResolvedPosition {
+        try withUInt8Pointer(position.json) { pointer, length in
+            var value = YrsBridgeValue()
+            var index: UInt32 = 0
+            try throwIfNeeded(yrs_bridge_relative_position_resolve(pointer, length, handle, &value, &index))
+            defer {
+                yrs_bridge_value_destroy(value)
+            }
+            return YResolvedPosition(node: YValueCodec.value(from: value), offset: index)
+        }
+    }
+}
+
+/// Where a relative position lands in the current document state: the shared
+/// node it anchors into and the offset within that node.
+public struct YResolvedPosition: Equatable {
+    public let node: YValue
+    public let offset: UInt32
 }
 
 extension YWriteTransaction {
@@ -149,11 +170,34 @@ extension YWriteTransaction {
     }
 
     public func relativePosition(in text: YText, at index: UInt32, association: YAssociation) throws -> YRelativePosition {
+        try relativePosition(inTextBranch: text.handle, at: index, association: association)
+    }
+
+    /// A relative position inside a `YXmlText` — the text node y-prosemirror
+    /// documents anchor cursors into.
+    public func relativePosition(in text: YXmlText, at index: UInt32, association: YAssociation) throws -> YRelativePosition {
+        try relativePosition(inTextBranch: text.handle, at: index, association: association)
+    }
+
+    /// A relative position anchored to an element itself rather than to a
+    /// character offset — how y-prosemirror anchors a caret in an element with
+    /// no text children (e.g. an empty paragraph).
+    public func relativePosition(anchoredTo element: YXmlElement, association: YAssociation) throws -> YRelativePosition {
         let json = try readingBuffer {
-            yrs_bridge_text_relative_position_json(text.handle, handle, index, association.rawValue, &$0)
+            yrs_bridge_type_relative_position_json(element.handle, handle, association.rawValue, &$0)
         }
         let data = try readingBuffer {
-            yrs_bridge_text_relative_position_v1(text.handle, handle, index, association.rawValue, &$0)
+            yrs_bridge_type_relative_position_v1(element.handle, handle, association.rawValue, &$0)
+        }
+        return YRelativePosition(data: data, json: json)
+    }
+
+    private func relativePosition(inTextBranch branch: OpaquePointer, at index: UInt32, association: YAssociation) throws -> YRelativePosition {
+        let json = try readingBuffer {
+            yrs_bridge_text_relative_position_json(branch, handle, index, association.rawValue, &$0)
+        }
+        let data = try readingBuffer {
+            yrs_bridge_text_relative_position_v1(branch, handle, index, association.rawValue, &$0)
         }
         return YRelativePosition(data: data, json: json)
     }

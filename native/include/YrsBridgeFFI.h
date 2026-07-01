@@ -119,9 +119,12 @@ int yrs_bridge_weak_values_json(YrsBridgeBranch *_Nonnull weak, YrsBridgeTransac
 int yrs_bridge_weak_string(YrsBridgeBranch *_Nonnull weak, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_text_relative_position_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, int assoc, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_text_relative_position_v1(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, int assoc, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_type_relative_position_json(YrsBridgeBranch *_Nonnull branch, YrsBridgeTransaction *_Nonnull transaction, int assoc, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_type_relative_position_v1(YrsBridgeBranch *_Nonnull branch, YrsBridgeTransaction *_Nonnull transaction, int assoc, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_relative_position_json_from_v1(const unsigned char *_Nonnull data, unsigned long len, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_relative_position_v1_from_json(const unsigned char *_Nonnull data, unsigned long len, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_relative_position_offset(const unsigned char *_Nonnull json, unsigned long len, YrsBridgeTransaction *_Nonnull transaction, uint32_t *_Nonnull out);
+int yrs_bridge_relative_position_resolve(const unsigned char *_Nonnull json, unsigned long len, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeValue *_Nonnull out_value, uint32_t *_Nonnull out_index);
 void yrs_bridge_value_destroy(YrsBridgeValue value);
 
 void yrs_bridge_observation_destroy(YrsBridgeObservation *_Nonnull observation);
