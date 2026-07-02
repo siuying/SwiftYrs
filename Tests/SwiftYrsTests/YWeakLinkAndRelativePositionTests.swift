@@ -111,6 +111,127 @@ func relativePositionsStayStableAcrossTextEditsAndRoundtripEncoding() throws {
 }
 
 @Test
+func relativePositionsAnchorInsideXmlTextAndResolveToTheirNode() throws {
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    let (textNode, position) = try doc.write { transaction -> (YXmlText, YRelativePosition) in
+        let paragraph = try transaction.insertElement(named: "paragraph", into: fragment, at: 0)
+        let textNode = try transaction.insertText(into: paragraph, at: 0)
+        try transaction.insert("hello", into: textNode, at: 0)
+        let position = try transaction.relativePosition(in: textNode, at: 4, association: .after)
+        return (textNode, position)
+    }
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(position)
+        #expect(resolved.node == .xmlText(textNode))
+        #expect(resolved.offset == 4)
+    }
+}
+
+@Test
+func xmlTextRelativePositionsStayAnchoredToTheirNodeAcrossEdits() throws {
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    let (secondText, position) = try doc.write { transaction -> (YXmlText, YRelativePosition) in
+        let first = try transaction.insertElement(named: "paragraph", into: fragment, at: 0)
+        let firstText = try transaction.insertText(into: first, at: 0)
+        try transaction.insert("one", into: firstText, at: 0)
+        let second = try transaction.insertElement(named: "paragraph", into: fragment, at: 1)
+        let secondText = try transaction.insertText(into: second, at: 0)
+        try transaction.insert("two", into: secondText, at: 0)
+        return (secondText, try transaction.relativePosition(in: secondText, at: 1, association: .after))
+    }
+
+    try doc.write { transaction in
+        try transaction.insert("YY", into: secondText, at: 0)
+    }
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(position)
+        #expect(resolved.node == .xmlText(secondText))
+        #expect(resolved.offset == 3)
+    }
+}
+
+@Test
+func webPeerRelativePositionJSONWithExplicitNullFieldsResolves() throws {
+    // y-prosemirror awareness cursors serialize every RelativePosition field,
+    // so absent scopes arrive as explicit nulls; they must decode and resolve.
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    let (textNode, position) = try doc.write { transaction -> (YXmlText, YRelativePosition) in
+        let paragraph = try transaction.insertElement(named: "paragraph", into: fragment, at: 0)
+        let textNode = try transaction.insertText(into: paragraph, at: 0)
+        try transaction.insert("hello", into: textNode, at: 0)
+        return (textNode, try transaction.relativePosition(in: textNode, at: 2, association: .after))
+    }
+
+    var json = try JSONSerialization.jsonObject(with: position.json) as? [String: Any] ?? [:]
+    json["type"] = NSNull()
+    json["tname"] = NSNull()
+    let webShaped = try YRelativePosition(json: JSONSerialization.data(withJSONObject: json))
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(webShaped)
+        #expect(resolved.node == .xmlText(textNode))
+        #expect(resolved.offset == 2)
+    }
+}
+
+@Test
+func rootScopedRelativePositionsResolveToTheFragmentEnd() throws {
+    // y-prosemirror anchors a document-end cursor to the root type by name
+    // (`tname`), not to an item.
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    try doc.write { transaction in
+        let paragraph = try transaction.insertElement(named: "paragraph", into: fragment, at: 0)
+        let textNode = try transaction.insertText(into: paragraph, at: 0)
+        try transaction.insert("hello", into: textNode, at: 0)
+    }
+
+    let json = try JSONSerialization.data(withJSONObject: [
+        "type": NSNull(), "tname": "prosemirror", "item": NSNull(), "assoc": 0,
+    ])
+    let position = try YRelativePosition(json: json)
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(position)
+        #expect(resolved.node == .xmlFragment(fragment))
+        let childCount = try transaction.childCount(of: fragment)
+        #expect(resolved.offset == childCount)
+    }
+}
+
+@Test
+func elementAnchoredRelativePositionsResolveToTheElement() throws {
+    // A caret in an empty paragraph has no text node to anchor into;
+    // y-prosemirror anchors it to the paragraph element itself.
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    let (paragraph, position) = try doc.write { transaction -> (YXmlElement, YRelativePosition) in
+        let paragraph = try transaction.insertElement(named: "paragraph", into: fragment, at: 0)
+        return (paragraph, try transaction.relativePosition(anchoredTo: paragraph, association: .after))
+    }
+
+    try doc.write { transaction in
+        _ = try transaction.insertElement(named: "heading", into: fragment, at: 0)
+    }
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(position)
+        #expect(resolved.node == .xmlElement(paragraph))
+        #expect(resolved.offset == 0)
+    }
+}
+
+@Test
 func relativePositionsDecodeJavaScriptYjsFixture() throws {
     let fixture = try YjsRelativePositionFixture.load("relative-position-document")
     let doc = YDoc()
