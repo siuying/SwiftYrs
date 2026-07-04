@@ -1,0 +1,3 @@
+# Text Offsets Use UTF-16 Code Units
+
+All docs created by the Shim ABI use `OffsetKind::Utf16`, so every integer text position — insert/remove/format indexes, lengths, delta offsets, and resolved sticky-index offsets — is counted in UTF-16 code units. Yrs's default (`OffsetKind::Bytes`, UTF-8) silently diverges from Yjs peers on any non-ASCII text: a y-prosemirror cursor published from a browser resolved two units too far past a `’`. UTF-16 is the only encoding Yjs supports, and yrs encodes it as the Yjs-compatible doc option, so this refines ADR 0016's "CRDT indexes match cross-language behavior" to a concrete unit. Swift callers converting from `String` positions must count `utf16` code units, not `Character`s.

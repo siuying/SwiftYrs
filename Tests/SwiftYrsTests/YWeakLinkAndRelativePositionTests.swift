@@ -292,6 +292,27 @@ func elementAnchoredRelativePositionsResolveToTheElement() throws {
 }
 
 @Test
+func relativePositionOffsetsUseUTF16CodeUnits() throws {
+    // Yjs counts text offsets in UTF-16 code units. "\u{2019}" is one UTF-16
+    // unit but three UTF-8 bytes; under yrs's default byte offsets a position
+    // after it would resolve two units too far.
+    let doc = YDoc()
+    let text = try doc.text(named: "body")
+
+    let position = try doc.write { transaction -> YRelativePosition in
+        try transaction.insert("a\u{2019}bc", into: text, at: 0)
+        return try transaction.relativePosition(in: text, at: 3, association: .before)
+    }
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(position)
+        #expect(resolved.node == .text(text))
+        #expect(resolved.offset == 3)
+        try #expect(transaction.offset(of: position, in: text) == 3)
+    }
+}
+
+@Test
 func relativePositionsDecodeJavaScriptYjsFixture() throws {
     let fixture = try YjsRelativePositionFixture.load("relative-position-document")
     let doc = YDoc()
@@ -303,7 +324,7 @@ func relativePositionsDecodeJavaScriptYjsFixture() throws {
     let fromJSON = try YRelativePosition(json: fixture.relativePositionJSON)
 
     try doc.read { transaction in
-        try #expect(transaction.string(from: text) == "hello")
+        try #expect(transaction.string(from: text) == "he\u{2019}llo")
         try #expect(transaction.offset(of: fromData, in: text) == 4)
         try #expect(transaction.offset(of: fromJSON, in: text) == 4)
     }
