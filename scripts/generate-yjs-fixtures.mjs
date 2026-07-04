@@ -60,7 +60,9 @@ writeFileSync(
 const relativePositionDoc = new Y.Doc()
 relativePositionDoc.clientID = 3
 const relativeText = relativePositionDoc.getText('body')
-relativeText.insert(0, 'hello')
+// Non-ASCII before the anchor: '\u2019' is 1 UTF-16 unit but 3 UTF-8 bytes,
+// so this fixture catches offset-encoding mismatches with Yjs.
+relativeText.insert(0, 'he\u2019llo')
 const relativePosition = Y.createRelativePositionFromTypeIndex(relativeText, 4, 0)
 
 const relativePositionFixture = {

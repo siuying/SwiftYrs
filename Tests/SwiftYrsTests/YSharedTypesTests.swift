@@ -19,6 +19,25 @@ func textSupportsInsertRemoveLengthAndStringReads() throws {
 }
 
 @Test
+func textIndexesAndLengthsUseUTF16CodeUnits() throws {
+    // Yjs interprets text indexes as UTF-16 code units: "\u{1F600}" is two
+    // UTF-16 units (four UTF-8 bytes), so inserting at 3 lands after it.
+    let doc = YDoc()
+    let text = try doc.text(named: "body")
+
+    try doc.write { transaction in
+        try transaction.insert("a\u{1F600}b", into: text, at: 0)
+        try #expect(transaction.length(of: text) == 4)
+
+        try transaction.insert("X", into: text, at: 3)
+        try #expect(transaction.string(from: text) == "a\u{1F600}Xb")
+
+        try transaction.remove(from: text, at: 1, length: 2)
+        try #expect(transaction.string(from: text) == "aXb")
+    }
+}
+
+@Test
 func mapSupportsMixedScalarBinaryValuesAndRemoval() throws {
     let doc = YDoc()
     let map = try doc.map(named: "meta")

@@ -20,10 +20,29 @@ use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1, EncoderV2};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexScope,
-    IndexedSequence, Map, MapPrelim, MapRef, Offset, Out, Quotable, ReadTxn, StateVector,
-    StickyIndex, Store, Text, TextPrelim, Subscription, TextRef, Transact, Update, UndoManager,
-    WeakRef, Xml,
+    IndexedSequence, Map, MapPrelim, MapRef, Offset, OffsetKind, Options, Out, Quotable, ReadTxn,
+    StateVector, StickyIndex, Store, Text, TextPrelim, Subscription, TextRef, Transact, Update,
+    UndoManager, WeakRef, Xml,
 };
+
+/// All docs use UTF-16 text offsets so index-based APIs (text insert/remove,
+/// deltas, sticky-index offsets) match Yjs semantics; yrs defaults to UTF-8
+/// byte offsets, which diverge from JS peers on any non-ASCII text.
+fn yjs_compatible_options() -> Options {
+    let mut options = Options::default();
+    options.offset_kind = OffsetKind::Utf16;
+    options
+}
+
+fn new_doc() -> Doc {
+    Doc::with_options(yjs_compatible_options())
+}
+
+fn new_doc_with_client_id(client_id: u64) -> Doc {
+    let mut options = yjs_compatible_options();
+    options.client_id = ClientID::new(client_id);
+    Doc::with_options(options)
+}
 
 const YRS_BRIDGE_OK: i32 = 0;
 const YRS_BRIDGE_ERR_NULL_POINTER: i32 = 1;
@@ -683,13 +702,13 @@ pub unsafe extern "C" fn yrs_bridge_doc_get_xml_fragment(
 
 #[no_mangle]
 pub extern "C" fn yrs_bridge_doc_new() -> *mut Doc {
-    catch_unwind(AssertUnwindSafe(|| Box::into_raw(Box::new(Doc::new())))).unwrap_or(null_mut())
+    catch_unwind(AssertUnwindSafe(|| Box::into_raw(Box::new(new_doc())))).unwrap_or(null_mut())
 }
 
 #[no_mangle]
 pub extern "C" fn yrs_bridge_doc_new_with_client_id(client_id: u64) -> *mut Doc {
     catch_unwind(AssertUnwindSafe(|| {
-        Box::into_raw(Box::new(Doc::with_client_id(client_id)))
+        Box::into_raw(Box::new(new_doc_with_client_id(client_id)))
     }))
     .unwrap_or(null_mut())
 }
@@ -2099,7 +2118,7 @@ pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc(
         let Some(transaction) = (*transaction).as_write_mut() else {
             return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
         };
-        let subdoc = MapRef::from_raw_branch(map).insert(transaction, key, Doc::new());
+        let subdoc = MapRef::from_raw_branch(map).insert(transaction, key, new_doc());
         write_buffer(subdoc.guid().to_string().into_bytes(), guid_out)
     })
 }
