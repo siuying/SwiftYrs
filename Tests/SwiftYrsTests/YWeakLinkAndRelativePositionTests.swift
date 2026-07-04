@@ -183,6 +183,66 @@ func webPeerRelativePositionJSONWithExplicitNullFieldsResolves() throws {
 }
 
 @Test
+func typeScopedRelativePositionsWithRightAssociationResolveToTheTypeEnd() throws {
+    // y-prosemirror encodes a cursor at the *end* of a textblock's text as a
+    // relative position scoped to the text node itself: {type: <text node
+    // id>, item: null, assoc: 0}. Yjs resolves that shape to the type's end
+    // (`index = assoc >= 0 ? type._length : 0`); yrs's StickyIndex left the
+    // nested-type scope at offset 0, so the bridge compensates — otherwise a
+    // web peer's end-of-line cursor resolves to the line's start.
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    let (textNode, seed) = try doc.write { transaction -> (YXmlText, YRelativePosition) in
+        let paragraph = try transaction.insertElement(named: "paragraph", into: fragment, at: 0)
+        let textNode = try transaction.insertText(into: paragraph, at: 0)
+        try transaction.insert("hello", into: textNode, at: 0)
+        // An index-0 `.before` anchor is also scoped to the text node itself
+        // ({type: …, assoc: -1}), so flipping assoc yields the web peer's
+        // end-of-line shape deterministically.
+        return (textNode, try transaction.relativePosition(in: textNode, at: 0, association: .before))
+    }
+
+    var json = try #require(JSONSerialization.jsonObject(with: seed.json) as? [String: Any])
+    #expect(json["type"] != nil)
+    #expect(json["item"] == nil)
+    json["assoc"] = 0
+    let endOfLine = try YRelativePosition(json: JSONSerialization.data(withJSONObject: json))
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(endOfLine)
+        #expect(resolved.node == .xmlText(textNode))
+        #expect(resolved.offset == 5)
+
+        // The left-associated twin keeps Yjs's other branch: assoc < 0 → offset 0.
+        let leftAssociated = try transaction.resolve(seed)
+        #expect(leftAssociated.node == .xmlText(textNode))
+        #expect(leftAssociated.offset == 0)
+    }
+}
+
+@Test
+func elementScopedRelativePositionsWithRightAssociationResolveAfterTheLastChild() throws {
+    // The same Yjs rule for elements: {type: <element id>, item: null,
+    // assoc: 0} resolves to the element's child count, not its first child.
+    let doc = YDoc()
+    let fragment = try doc.xmlFragment(named: "prosemirror")
+
+    let (paragraph, position) = try doc.write { transaction -> (YXmlElement, YRelativePosition) in
+        let paragraph = try transaction.insertElement(named: "blockquote", into: fragment, at: 0)
+        _ = try transaction.insertElement(named: "paragraph", into: paragraph, at: 0)
+        _ = try transaction.insertElement(named: "paragraph", into: paragraph, at: 1)
+        return (paragraph, try transaction.relativePosition(anchoredTo: paragraph, association: .after))
+    }
+
+    try doc.read { transaction in
+        let resolved = try transaction.resolve(position)
+        #expect(resolved.node == .xmlElement(paragraph))
+        #expect(resolved.offset == 2)
+    }
+}
+
+@Test
 func rootScopedRelativePositionsResolveToTheFragmentEnd() throws {
     // y-prosemirror anchors a document-end cursor to the root type by name
     // (`tname`), not to an item.

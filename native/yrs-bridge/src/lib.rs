@@ -19,9 +19,10 @@ use yrs::encoding::read::Cursor;
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1, EncoderV2};
 use yrs::{
-    Any, Array, ArrayPrelim, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexedSequence, Map,
-    MapPrelim, MapRef, Out, Quotable, ReadTxn, StateVector, StickyIndex, Store, Text, TextPrelim,
-    Subscription, TextRef, Transact, Update, UndoManager, WeakRef, Xml,
+    Any, Array, ArrayPrelim, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexScope,
+    IndexedSequence, Map, MapPrelim, MapRef, Offset, Out, Quotable, ReadTxn, StateVector,
+    StickyIndex, Store, Text, TextPrelim, Subscription, TextRef, Transact, Update, UndoManager,
+    WeakRef, Xml,
 };
 
 const YRS_BRIDGE_OK: i32 = 0;
@@ -2586,6 +2587,25 @@ pub unsafe extern "C" fn yrs_bridge_relative_position_v1_from_json(
     })
 }
 
+/// The offset a sticky index resolves to, adjusted to match Yjs.
+///
+/// Yjs resolves a relative position scoped to a *type* with `item: null` and
+/// `assoc >= 0` to the type's **end** (`index = assoc >= 0 ? type._length : 0`
+/// in `createAbsolutePositionFromRelativePosition`) — y-prosemirror publishes
+/// exactly that shape for a cursor at the end of a textblock's text. yrs's
+/// `StickyIndex::get_offset` honours that for root-scoped types but leaves the
+/// *nested*-type scope at offset 0, so an end-of-line cursor from a Yjs peer
+/// would land at the line's start. Compensate at the resolve boundary so both
+/// wire encodings agree. If yrs fixes this upstream the branch computes the
+/// same value — the adjustment is idempotent, never double-applied.
+fn yjs_compatible_index(position: &StickyIndex, offset: &Offset) -> u32 {
+    if position.assoc == Assoc::After && matches!(position.scope(), IndexScope::Nested(_)) {
+        offset.branch.content_len()
+    } else {
+        offset.index
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_relative_position_offset(
     json: *const c_uchar,
@@ -2605,7 +2625,7 @@ pub unsafe extern "C" fn yrs_bridge_relative_position_offset(
             return YRS_BRIDGE_ERR_TYPE_MISMATCH;
         };
         unsafe {
-            *out = offset.index;
+            *out = yjs_compatible_index(&position, &offset);
         }
         YRS_BRIDGE_OK
     })
@@ -2642,7 +2662,7 @@ pub unsafe extern "C" fn yrs_bridge_relative_position_resolve(
         };
         unsafe {
             *out_value = output_value(value);
-            *out_index = offset.index;
+            *out_index = yjs_compatible_index(&position, &offset);
         }
         YRS_BRIDGE_OK
     })
