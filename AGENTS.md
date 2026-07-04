@@ -19,6 +19,8 @@ No "Generated with" line.
 
 ## Agent skills
 
+- **Keep visible reasoning short.** No filler/hedging. Drop articles, fragments OK, short synonyms.
+
 ### Issue tracker
 
 Issues live in this repo's GitHub Issues (`siuying/SwiftYrs`), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
