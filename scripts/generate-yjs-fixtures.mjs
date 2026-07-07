@@ -146,3 +146,31 @@ writeFileSync(
   join(root, 'Tests/SwiftYrsTests/Fixtures/nested-container-document.json'),
   `${JSON.stringify(nestedFixture, null, 2)}\n`
 )
+
+// A y-prosemirror-style document whose block element carries non-scalar node
+// attributes: `colwidth` (an array, as prosemirror-tables stores it) and an
+// object attr. Yjs stores each as a single ContentAny on the element, so a
+// Swift peer must decode them back as a plain array/object — the parity this
+// fixture proves for SwiftYrs#105 / ProseKit#118.
+const anyAttrDoc = new Y.Doc()
+anyAttrDoc.clientID = 8
+const anyAttrFragment = anyAttrDoc.getXmlFragment('prosemirror')
+const tableCell = new Y.XmlElement('tableCell')
+tableCell.setAttribute('colwidth', [100, 200])
+tableCell.setAttribute('meta', { rowspan: 2, header: false })
+tableCell.setAttribute('scalar', 'kept')
+const cellText = new Y.XmlText()
+cellText.insert(0, 'Cell')
+tableCell.insert(0, [cellText])
+anyAttrFragment.insert(0, [tableCell])
+
+const anyAttrFixture = {
+  stateVector: Buffer.from(Y.encodeStateVector(anyAttrDoc)).toString('base64'),
+  updateV1: Buffer.from(Y.encodeStateAsUpdate(anyAttrDoc)).toString('base64'),
+  updateV2: Buffer.from(Y.encodeStateAsUpdateV2(anyAttrDoc)).toString('base64')
+}
+
+writeFileSync(
+  join(root, 'Tests/SwiftYrsTests/Fixtures/xml-any-attribute-document.json'),
+  `${JSON.stringify(anyAttrFixture, null, 2)}\n`
+)

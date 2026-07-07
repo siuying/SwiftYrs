@@ -1794,6 +1794,48 @@ pub unsafe extern "C" fn yrs_bridge_xml_set_attribute(
     })
 }
 
+/// Sets an XML attribute from a natural-JSON value, stored as a single lib0
+/// `Any` (`ContentAny`) rather than a nested shared type. This matches how
+/// y-prosemirror stores non-scalar node attributes (e.g. prosemirror-tables
+/// `colwidth: [100, 200]`), so a JS peer reads the value back as a plain
+/// array/object. Scalars are accepted too and stored as their `Any` scalar.
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_xml_set_attribute_json(
+    xml: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    value_json: *const c_char,
+) -> i32 {
+    ffi_boundary(|| {
+        if xml.is_null() || transaction.is_null() || key.is_null() || value_json.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let key = match read_name(key) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        let json = CStr::from_ptr(value_json).to_string_lossy();
+        let value: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(value) => value,
+            Err(_) => return YRS_BRIDGE_ERR_DECODE,
+        };
+        let input = In::Any(any_from_json(value));
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        match (*xml).type_ref() {
+            TypeRef::XmlElement(_) => {
+                XmlElementRef::from_raw_branch(xml).insert_attribute(transaction, key, input);
+            }
+            TypeRef::XmlText => {
+                XmlTextRef::from_raw_branch(xml).insert_attribute(transaction, key, input);
+            }
+            _ => return YRS_BRIDGE_ERR_TYPE_MISMATCH,
+        }
+        YRS_BRIDGE_OK
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_xml_get_attribute(
     xml: *mut Branch,

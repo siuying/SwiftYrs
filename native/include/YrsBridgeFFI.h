@@ -93,6 +93,7 @@ int yrs_bridge_xml_get(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Non
 int yrs_bridge_xml_remove(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, uint32_t index, uint32_t len);
 int yrs_bridge_xml_element_tag(YrsBridgeBranch *_Nonnull xml, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_xml_set_attribute(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeValue value);
+int yrs_bridge_xml_set_attribute_json(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, const char *_Nonnull value_json);
 int yrs_bridge_xml_get_attribute(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeValue *_Nonnull out);
 int yrs_bridge_xml_attributes_json(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_xml_remove_attribute(YrsBridgeBranch *_Nonnull xml, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key);
