@@ -382,6 +382,22 @@ extension YWriteTransaction {
         try setXmlAttribute(value, forKey: key, in: xml.handle, transaction: handle)
     }
 
+    /// Sets an XML attribute from a natural-JSON value (`valueJSON` is UTF-8
+    /// JSON whose shape is preserved, e.g. `[100, 200]` or `{ "a": 1 }`). The
+    /// value is stored as a single lib0 `Any` (`ContentAny`), matching how
+    /// y-prosemirror stores non-scalar node attributes; a JS peer reads it back
+    /// as a plain array/object. Use this for ProseMirror node attrs whose
+    /// values are arrays/objects the scalar `YValue` codec cannot carry (e.g. a
+    /// prosemirror-tables `colwidth` array). Reads round-trip through
+    /// `attributesJSON(from:)`.
+    public func setAttribute(json valueJSON: Data, forKey key: String, in xml: YXmlElement) throws {
+        try setXmlAttributeJSON(valueJSON, forKey: key, in: xml.handle, transaction: handle)
+    }
+
+    public func setAttribute(json valueJSON: Data, forKey key: String, in xml: YXmlText) throws {
+        try setXmlAttributeJSON(valueJSON, forKey: key, in: xml.handle, transaction: handle)
+    }
+
     public func removeAttribute(_ key: String, from xml: YXmlElement) throws {
         try removeXmlAttribute(key, from: xml.handle, transaction: handle)
     }
@@ -470,6 +486,14 @@ private func setXmlAttribute(_ value: YValue, forKey key: String, in xml: Opaque
     try key.withCString { keyPointer in
         try YValueCodec.withBridgeValue(value) { nativeValue in
             try throwIfNeeded(yrs_bridge_xml_set_attribute(xml, transaction, keyPointer, nativeValue))
+        }
+    }
+}
+
+private func setXmlAttributeJSON(_ valueJSON: Data, forKey key: String, in xml: OpaquePointer, transaction: OpaquePointer) throws {
+    try key.withCString { keyPointer in
+        try withJSONCString(valueJSON) { valuePointer in
+            try throwIfNeeded(yrs_bridge_xml_set_attribute_json(xml, transaction, keyPointer, valuePointer))
         }
     }
 }
