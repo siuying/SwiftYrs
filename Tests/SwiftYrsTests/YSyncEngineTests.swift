@@ -80,3 +80,43 @@ func syncEngineHandlesAwarenessQueryAndTracksAppliedAwarenessStates() throws {
     let state = try #require(awareness.state(for: peerAwareness.clientID) as? [String: Any])
     #expect(state["name"] as? String == "Grace")
 }
+
+@Test
+func syncEngineCanDiscardInboundDocumentUpdatesWhileHandlingAwareness() throws {
+    let authorDoc = YDoc(clientID: 1)
+    let authorText = try authorDoc.text(named: "body")
+    let authorAwareness = YAwareness(document: authorDoc)
+    let peerDoc = YDoc(clientID: 2)
+    let peerText = try peerDoc.text(named: "body")
+    try peerDoc.write { try $0.insert("peer", into: peerText, at: 0) }
+    let peerUpdate = try peerDoc.encodeStateAsUpdateV1(from: authorDoc.stateVector())
+
+    var sent: [YSyncMessage] = []
+    let engine = YSyncEngine(
+        doc: authorDoc,
+        awareness: authorAwareness,
+        send: { sent.append($0) },
+        applyUpdate: { _ in },
+        applyAwarenessUpdate: { try authorAwareness.applyUpdate($0) }
+    )
+
+    _ = try engine.handle(.syncStep1(peerDoc.stateVector()))
+    #expect(sent.count == 1)
+    if case .syncStep2 = sent[0] {} else {
+        Issue.record("Expected sync step 2 reply")
+    }
+
+    _ = try engine.handle(.syncStep2(peerUpdate))
+    _ = try engine.handle(.update(peerUpdate))
+    for _ in 0..<10 {
+        _ = try engine.handle(.update(peerUpdate))
+    }
+    try authorDoc.read { try #expect($0.string(from: authorText).isEmpty) }
+    #expect(sent.count == 1)
+
+    let peerAwareness = YAwareness(document: peerDoc)
+    try peerAwareness.setLocalState(["name": "reader"])
+    _ = try engine.handle(.awareness(peerAwareness.encodeUpdate()))
+    let state = try #require(authorAwareness.state(for: peerAwareness.clientID) as? [String: Any])
+    #expect(state["name"] as? String == "reader")
+}

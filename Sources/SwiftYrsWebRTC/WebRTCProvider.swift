@@ -18,8 +18,19 @@ func webRTCDebug(_ message: @autoclosure () -> String) {
 /// lifecycle — see ADR-0021 (shape) and ADR-0020 (the simple-peer seam).
 public actor WebRTCProvider {
     public struct Options: Sendable {
+        /// Controls whether document updates received from WebRTC peers are
+        /// applied to this provider's document.
+        public enum InboundUpdatePolicy: Sendable, Equatable {
+            /// Apply inbound document updates, preserving normal collaborative sync.
+            case apply
+
+            /// Discard inbound document updates while continuing sync replies and awareness.
+            case discard
+        }
+
         public var password: String?
         public var awareness: YAwareness?
+        public var inboundUpdatePolicy: InboundUpdatePolicy
         public var maxConns: Int
         public var iceServers: [WebRTCIceServer]
         public var maxRetries: Int
@@ -36,10 +47,12 @@ public actor WebRTCProvider {
             iceServers: [WebRTCIceServer] = .defaultSTUN,
             maxRetries: Int = .max,
             initialDelay: Duration = .seconds(1),
-            maxDelay: Duration = .seconds(30)
+            maxDelay: Duration = .seconds(30),
+            inboundUpdatePolicy: InboundUpdatePolicy = .apply
         ) {
             self.password = password
             self.awareness = awareness
+            self.inboundUpdatePolicy = inboundUpdatePolicy
             self.maxConns = maxConns
             self.iceServers = iceServers
             self.maxRetries = maxRetries
@@ -434,7 +447,8 @@ public actor WebRTCProvider {
             send: { message in
                 record.conn.send(message.payload)
             },
-            applyUpdate: { [doc] update in
+            applyUpdate: { [doc, inboundUpdatePolicy = options.inboundUpdatePolicy] update in
+                guard inboundUpdatePolicy == .apply else { return }
                 // Mesh gossip: applying a remote update fires the document
                 // observer, which re-broadcasts it to every peer. CRDT
                 // idempotency terminates the flood, so no echo gate is needed.

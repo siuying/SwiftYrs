@@ -61,6 +61,67 @@ extension RealNetworkE2E {
         }
 
         @Test
+        func discardInboundUpdatesKeepsAuthorDocumentReadOnly() async throws {
+            let server = try JSONLineProcess.node(script: "webrtc-signaling-server.ts")
+            defer { server.stop() }
+            let ready = try await server.waitForLine("signaling server ready") { $0["type"] as? String == "ready" }
+            let port = try #require(ready["port"] as? Int)
+            let url = try #require(URL(string: "ws://127.0.0.1:\(port)"))
+
+            let authorDoc = YDoc(clientID: 71)
+            let authorText = try authorDoc.text(named: "body")
+            let authorProvider = WebRTCProvider(
+                "room-read-only",
+                doc: authorDoc,
+                signaling: [url],
+                options: WebRTCProvider.Options(iceServers: [], inboundUpdatePolicy: .discard)
+            )
+
+            let peerDoc = YDoc(clientID: 72)
+            let peerText = try peerDoc.text(named: "body")
+            try peerDoc.write { try $0.insert("step two", into: peerText, at: 0) }
+            let peerProvider = WebRTCProvider("room-read-only", doc: peerDoc, signaling: [url], options: loopbackOptions())
+
+            try await withE2ETeardown([authorProvider, peerProvider]) {
+                try await authorProvider.connect()
+                try await peerProvider.connect()
+                try await e2eEventually("peers connected", timeout: .seconds(10)) {
+                    let authorPeers = await authorProvider.connectedPeers
+                    let peerPeers = await peerProvider.connectedPeers
+                    return authorPeers.count == 1 && peerPeers.count == 1
+                }
+
+                try await Task.sleep(for: .milliseconds(250))
+                try authorDoc.read { try #expect($0.string(from: authorText).isEmpty) }
+
+                try peerDoc.write { try $0.insert(" update", into: peerText, at: 8) }
+                try await Task.sleep(for: .milliseconds(250))
+                try authorDoc.read { try #expect($0.string(from: authorText).isEmpty) }
+
+                let peerAwareness = await peerProvider.awareness
+                try peerAwareness.setLocalState(["name": "reader"])
+                let authorAwareness = await authorProvider.awareness
+                try await e2eEventually("peer awareness reaches author", timeout: .seconds(5)) {
+                    try (authorAwareness.state(for: peerAwareness.clientID) as? [String: Any])?["name"] as? String == "reader"
+                }
+
+                try authorDoc.write { try $0.insert("author", into: authorText, at: 0) }
+                try await e2eEventually("author update reaches peer", timeout: .seconds(5)) {
+                    try peerDoc.read { try $0.string(from: peerText) == "authorstep two update" }
+                }
+
+                for _ in 0..<10 {
+                    let end = try peerDoc.read { try UInt32($0.string(from: peerText).utf16.count) }
+                    try peerDoc.write { try $0.insert("!", into: peerText, at: end) }
+                }
+                try await Task.sleep(for: .milliseconds(250))
+                try authorDoc.read { try #expect($0.string(from: authorText) == "author") }
+                #expect(await authorProvider.connectedPeers.count == 1)
+                #expect(await peerProvider.connectedPeers.count == 1)
+            }
+        }
+
+        @Test
         func destroyBroadcastsOwnedAwarenessRemoval() async throws {
             let server = try JSONLineProcess.node(script: "webrtc-signaling-server.ts")
             defer { server.stop() }

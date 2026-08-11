@@ -17,3 +17,4 @@
 - **`room` is private** (implementation detail) and **`destroy()` must be called explicitly** (an actor `deinit` cannot run isolated teardown; `deinit` is best-effort only).
 - A provider-created `awareness` is fully torn down on `destroy()`; a caller-supplied one is left intact (`ownsAwareness`).
 - Sync-protocol choreography is delegated to core `YSyncEngine`; this internal extraction does not change the provider's public actor shape.
+- `Options.inboundUpdatePolicy` defaults to `.apply`. Set it to `.discard` for an author-hosted read-only room: inbound document updates are ignored, while awareness and sync replies continue normally. A discarded update does not advance the local state vector, so a peer can offer it again; each offer is a silent no-op and creates no per-peer state.

@@ -5,6 +5,7 @@ This matrix defines the initial completeness target for the Swift binding. It is
 Status values:
 
 - `ffi-covered` — `yrs` supports the feature and current `yffi` exposes enough symbols for the Swift shim to wrap.
+- `shim-covered` — `yrs` supports the feature and the project-owned Rust shim supplies exports missing from current `yffi`.
 - `shim-gap` — `yrs` supports the feature, but current `yffi` does not expose enough symbols; the project-owned Rust shim must call `yrs` directly or extend/fork `yffi`.
 - `upstream-removed` — the feature existed in older `y-crdt` history but was removed from the checked-out upstream; do not expose it in the initial Swift API unless the project explicitly restores it.
 - `unresolved` — the feature is claimed by the README but could not be found in the checked-out `yrs`/`yffi` source.
@@ -32,10 +33,9 @@ Every completed row needs Swift API tests. Rows involving encoded updates, state
 | Snapshots | Snapshots | yes: `Snapshot`, encode state from snapshot | yes: `ytransaction_snapshot`, `ytransaction_encode_state_from_snapshot_v1/v2` | `YSnapshot`, encode state from snapshot | no | snapshot encode/read, state-from-snapshot, Yjs fixture | ffi-covered |
 | Sticky indexes | Sticky indexes | yes: `StickyIndex` | yes: `ysticky_index_from_index`, encode/decode/json/read/destroy | `YRelativePosition`/sticky index | no | position stability across edits, JSON/binary roundtrip, Yjs RelativePosition fixture | ffi-covered |
 | Undo manager | Undo Manager | yes: `UndoManager` scopes, origins, undo/redo, events | yes: `yundo_manager_*` scope/origin/clear/stop/undo/redo/stack/event exports | `YUndoManager` | no | undo/redo stacks, origins, scopes, events, transaction interaction | ffi-covered |
-| Awareness | Awareness | yes: `yrs::sync::Awareness` and `AwarenessUpdate` | no: no awareness C exports; yffi README table also marks yffi Awareness unsupported | `YAwareness`, `YAwarenessUpdate` | yes: Rust shim must expose awareness state/update/event APIs | local/remote states, encode/apply update, events, Yjs awareness fixture | shim-gap |
-| Sync protocol messages | Network provider protocol payloads | yes: `yrs::sync::Protocol`, `Message`, `SyncMessage`, `MessageReader` | no: no y-sync protocol C exports | `YSyncMessage`, `YUpdate`, `YStateVector`, `YAwarenessUpdate` | yes: Rust shim must expose message encode/decode/handle helpers or direct typed payload constructors | protocol roundtrip, multi-message payloads, Yjs/y-protocols interop fixtures | shim-gap |
+| Awareness | Awareness | yes: `yrs::sync::Awareness` and `AwarenessUpdate` | no: no awareness C exports; yffi README table also marks yffi Awareness unsupported | `YAwareness`, `YAwarenessUpdate` | no: the Rust shim exports awareness state/update/event APIs | local/remote states, encode/apply update, events, Yjs awareness fixture | shim-covered |
+| Sync protocol messages | Network provider protocol payloads | yes: `yrs::sync::Protocol`, `Message`, `SyncMessage`, `MessageReader` | no: no y-sync protocol C exports | `YSyncMessage`, `YUpdate`, `YStateVector`, `YAwarenessUpdate` | no: the Rust shim exports typed message encode/decode support | protocol roundtrip, multi-message payloads, Yjs/y-protocols interop fixtures | shim-covered |
 
 ## Follow-up Work
 
-- Define the Rust Shim Crate exports for Awareness and sync protocol payloads. These are confirmed `yrs` features, but current `yffi` does not expose them.
 - Do not expose YArray move in the initial Swift API. The local README claims support, but the current checkout explicitly removed the feature in commit `2d52291` after earlier `move_to`/`yarray_move` implementations existed. Revisit only if upstream restores it or this project intentionally takes on move semantics as new Rust work.
