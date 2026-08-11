@@ -80,6 +80,7 @@ public actor WebRTCProvider {
     public nonisolated let status: AsyncStream<WebRTCConnectionStatus>
     public nonisolated let synced: AsyncStream<Bool>
     public nonisolated let peers: AsyncStream<PeersEvent>
+    public nonisolated let inboundUpdatePolicy: Options.InboundUpdatePolicy
 
     private let signalingURLs: [URL]
     private let options: Options
@@ -116,6 +117,7 @@ public actor WebRTCProvider {
         self.doc = doc
         self.signalingURLs = signaling
         self.options = options
+        self.inboundUpdatePolicy = options.inboundUpdatePolicy
         if let password = options.password {
             guard let cipher = try? SignalingCipher(password: password, roomName: roomName) else {
                 preconditionFailure("Failed to derive WebRTC signaling password key")
