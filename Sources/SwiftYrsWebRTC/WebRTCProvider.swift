@@ -32,6 +32,9 @@ public actor WebRTCProvider {
         public var awareness: YAwareness?
         public var inboundUpdatePolicy: InboundUpdatePolicy
         public var maxConns: Int
+        /// Caps the number of remote peers, including peers whose data channel
+        /// is still connecting. `nil` leaves the room unlimited.
+        public var maxPeers: Int?
         public var iceServers: [WebRTCIceServer]
         public var maxRetries: Int
         public var initialDelay: Duration
@@ -44,6 +47,7 @@ public actor WebRTCProvider {
             // so peers in a large room don't all hit the connection cap at the
             // same size and deterministically reject the same inbound peers.
             maxConns: Int = 20 + Int.random(in: 0..<15),
+            maxPeers: Int? = nil,
             iceServers: [WebRTCIceServer] = .defaultSTUN,
             maxRetries: Int = .max,
             initialDelay: Duration = .seconds(1),
@@ -54,6 +58,7 @@ public actor WebRTCProvider {
             self.awareness = awareness
             self.inboundUpdatePolicy = inboundUpdatePolicy
             self.maxConns = maxConns
+            self.maxPeers = maxPeers
             self.iceServers = iceServers
             self.maxRetries = maxRetries
             self.initialDelay = initialDelay
@@ -81,6 +86,7 @@ public actor WebRTCProvider {
     public nonisolated let synced: AsyncStream<Bool>
     public nonisolated let peers: AsyncStream<PeersEvent>
     public nonisolated let inboundUpdatePolicy: Options.InboundUpdatePolicy
+    public nonisolated let maxPeers: Int?
 
     private let signalingURLs: [URL]
     private let options: Options
@@ -118,6 +124,7 @@ public actor WebRTCProvider {
         self.signalingURLs = signaling
         self.options = options
         self.inboundUpdatePolicy = options.inboundUpdatePolicy
+        self.maxPeers = options.maxPeers
         if let password = options.password {
             guard let cipher = try? SignalingCipher(password: password, roomName: roomName) else {
                 preconditionFailure("Failed to derive WebRTC signaling password key")
@@ -276,9 +283,10 @@ public actor WebRTCProvider {
         }
     }
 
-    private func handleAnnounce(from: String) async {
+    func handleAnnounce(from: String) async {
         guard started else { return }
         guard conns[from] == nil else { return }
+        guard hasPeerCapacity else { return }
         guard conns.count < options.maxConns else {
             // At capacity we cannot initiate, but peers still need our announce so
             // they can open an inbound WebRTC connection. Re-announce on every
@@ -292,8 +300,9 @@ public actor WebRTCProvider {
         emitPeers(added: [from], removed: [])
     }
 
-    private func handleSignal(from: String, token: Double, signal: PeerSignal) {
+    func handleSignal(from: String, token: Double, signal: PeerSignal) {
         guard started else { return }
+        guard conns[from] != nil || hasPeerCapacity else { return }
         if case .offer = signal, let existing = conns[from] {
             if GlareResolver.shouldRejectIncomingOffer(localToken: existing.glareToken, remoteToken: token) {
                 return
@@ -380,6 +389,18 @@ public actor WebRTCProvider {
             Task { await self?.peerClosed(peerId: remotePeerId, record: record) }
         }
         return record
+    }
+
+    var peerCount: Int {
+        conns.count
+    }
+
+    func peerRecordIdentifier(for remotePeerId: String) -> ObjectIdentifier? {
+        conns[remotePeerId].map(ObjectIdentifier.init)
+    }
+
+    private var hasPeerCapacity: Bool {
+        options.maxPeers.map { conns.count < $0 } ?? true
     }
 
     private func peerEmittedSignal(peerId remotePeerId: String, record: PeerRecord?, signal: PeerSignal) async {
