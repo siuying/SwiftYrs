@@ -17,6 +17,12 @@ public enum PeerSignal: Equatable, Sendable {
         public let sdpMid: String?
         public let sdpMLineIndex: Int32?
 
+        /// `simple-peer` and browsers signal "no more candidates" as an empty
+        /// candidate string rather than omitting the signal.
+        public var isEndOfCandidates: Bool {
+            candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
         public init(candidate: String, sdpMid: String?, sdpMLineIndex: Int32?) {
             self.candidate = candidate
             self.sdpMid = sdpMid
