@@ -37,8 +37,10 @@ extension PeerSignal {
         }
     }
 
+    /// Browsers trickle an end-of-candidates sentinel with an empty candidate
+    /// string; `RTCIceCandidate.init` asserts on it, so it maps to no candidate.
     var iceCandidate: RTCIceCandidate? {
-        guard case let .candidate(candidate) = self else {
+        guard case let .candidate(candidate) = self, !candidate.isEndOfCandidates else {
             return nil
         }
         return RTCIceCandidate(

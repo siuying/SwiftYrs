@@ -43,6 +43,21 @@ func candidatePeerSignalRoundTripsThroughRTCIceCandidate() throws {
 }
 
 @Test
+func endOfCandidatesSentinelHasNoIceCandidate() {
+    #expect(PeerSignal.candidate(.init(candidate: "", sdpMid: "0", sdpMLineIndex: 0)).iceCandidate == nil)
+    #expect(PeerSignal.candidate(.init(candidate: " ", sdpMid: nil, sdpMLineIndex: nil)).iceCandidate == nil)
+}
+
+@Test
+func browserEndOfCandidatesSignalDecodesAndConvertsToNoCandidate() throws {
+    let json = Data(#"{"type":"candidate","candidate":{"candidate":"","sdpMid":"0","sdpMLineIndex":0}}"#.utf8)
+    let signal = try PeerSignal.decode(from: json)
+
+    #expect(signal == .candidate(.init(candidate: "", sdpMid: "0", sdpMLineIndex: 0)))
+    #expect(signal.iceCandidate == nil)
+}
+
+@Test
 func nonCandidateSignalsHaveNoIceCandidate() {
     #expect(PeerSignal.offer(sdp: "x").iceCandidate == nil)
     #expect(PeerSignal.candidate(.init(candidate: "c", sdpMid: nil, sdpMLineIndex: nil)).sessionDescription == nil)
