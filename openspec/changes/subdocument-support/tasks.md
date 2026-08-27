@@ -3,15 +3,15 @@ the Rust code turns it green.
 
 ## 1. Decision record
 
-- [ ] 1.1 Write the ADR: a subdocument handle is a boxed `Doc` clone; the
+- [x] 1.1 Write the ADR: a subdocument handle is a boxed `Doc` clone; the
       existing destroy drops one reference; `YSubdoc` stays a GUID
       reference. Commit it with the first bridge code.
 
 ## 2. Bridge: content access
 
-- [ ] 2.1 Red: a Swift test opens a subdocument by key and reads a text
+- [x] 2.1 Red: a Swift test opens a subdocument by key and reads a text
       written through another handle.
-- [ ] 2.2 Green: `yrs_bridge_map_get_subdoc_doc(map, txn, key, doc_out)` —
+- [x] 2.2 Green: `yrs_bridge_map_get_subdoc_doc(map, txn, key, doc_out)` —
       cast the map value to `Doc`, box a clone, write the pointer.
       Type-mismatch error for a non-subdocument value.
 - [ ] 2.3 Red: a Swift test opens a subdocument by GUID.

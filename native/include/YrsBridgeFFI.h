@@ -34,6 +34,7 @@ typedef struct YrsBridgeValue {
 YrsBridgeDoc *_Nullable yrs_bridge_doc_new(void);
 YrsBridgeDoc *_Nullable yrs_bridge_doc_new_with_client_id(uint64_t client_id);
 uint64_t yrs_bridge_doc_client_id(YrsBridgeDoc *_Nonnull doc);
+int yrs_bridge_doc_guid(YrsBridgeDoc *_Nonnull doc, YrsBridgeBuffer *_Nonnull out);
 void yrs_bridge_doc_destroy(YrsBridgeDoc *_Nonnull doc);
 
 int yrs_bridge_doc_read_transaction(YrsBridgeDoc *_Nonnull doc, YrsBridgeTransaction *_Nullable *_Nonnull out);
@@ -108,6 +109,8 @@ int yrs_bridge_xml_text_delta_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTran
 
 int yrs_bridge_map_set_new_subdoc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull guid_out);
 int yrs_bridge_map_get_subdoc_guid(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_map_get_subdoc_doc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeDoc *_Nullable *_Nonnull doc_out);
+int yrs_bridge_transaction_get_subdoc_doc_by_guid(YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull guid, YrsBridgeDoc *_Nullable *_Nonnull doc_out);
 int yrs_bridge_map_load_subdoc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key);
 int yrs_bridge_map_clear_subdoc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key);
 int yrs_bridge_transaction_subdoc_guids(YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);

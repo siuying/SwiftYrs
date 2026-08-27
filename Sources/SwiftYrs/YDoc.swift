@@ -99,8 +99,26 @@ public final class YDoc: Equatable {
         self.handle = handle
     }
 
+    /// Wraps an owned document handle produced by the bridge, such as the boxed
+    /// clone returned for a subdocument (ADR-0024). The handle is released in
+    /// `deinit`; for a subdocument that drops one reference to a shared store,
+    /// never the subdocument's content.
+    init(handle: OpaquePointer) {
+        self.handle = handle
+    }
+
     public var clientID: UInt64 {
         yrs_bridge_doc_client_id(handle)
+    }
+
+    /// The document's globally unique identifier. A subdocument keeps its GUID
+    /// across replicas, which makes it the natural key for a provider's
+    /// `documentName`.
+    public var guid: String {
+        get throws {
+            let data = try readingBuffer { yrs_bridge_doc_guid(handle, &$0) }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
     }
 
     deinit {

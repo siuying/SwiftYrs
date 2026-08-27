@@ -725,6 +725,16 @@ pub unsafe extern "C" fn yrs_bridge_doc_client_id(doc: *mut Doc) -> u64 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_doc_guid(doc: *mut Doc, out: *mut YrsBridgeBuffer) -> i32 {
+    ffi_boundary(|| {
+        if doc.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        write_buffer((*doc).guid().to_string().into_bytes(), out)
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_doc_destroy(doc: *mut Doc) {
     if !doc.is_null() {
         drop(Box::from_raw(doc));
@@ -2187,6 +2197,64 @@ pub unsafe extern "C" fn yrs_bridge_map_get_subdoc_guid(
             return YRS_BRIDGE_ERR_TYPE_MISMATCH;
         };
         write_buffer(subdoc.guid().to_string().into_bytes(), out)
+    })
+}
+
+/// Returns the subdocument stored at `key` as an owned document handle: a
+/// boxed clone of the subdocument's `Doc`, sharing one store with the parent's
+/// entry (see ADR-0024). The caller releases it with `yrs_bridge_doc_destroy`,
+/// in any order relative to the parent.
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_get_subdoc_doc(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    doc_out: *mut *mut Doc,
+) -> i32 {
+    ffi_boundary(|| {
+        if map.is_null() || transaction.is_null() || key.is_null() || doc_out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let key = match read_name(key) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        let Some(value) = MapRef::from_raw_branch(map).get(&*transaction, &key) else {
+            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+        };
+        let Ok(subdoc) = value.cast::<Doc>() else {
+            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+        };
+        *doc_out = Box::into_raw(Box::new(subdoc));
+        YRS_BRIDGE_OK
+    })
+}
+
+/// Returns the subdocument registered in this document tree under `guid` as an
+/// owned document handle. GUID uniqueness is the application's contract: when
+/// two subdocuments share a GUID, the first match wins.
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_get_subdoc_doc_by_guid(
+    transaction: *mut YrsBridgeTransaction,
+    guid: *const c_char,
+    doc_out: *mut *mut Doc,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() || guid.is_null() || doc_out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let guid = match read_name(guid) {
+            Ok(guid) => guid,
+            Err(code) => return code,
+        };
+        let Some(subdoc) = (*transaction)
+            .subdocs()
+            .find(|subdoc| subdoc.guid().as_ref() == guid.as_str())
+        else {
+            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
+        };
+        *doc_out = Box::into_raw(Box::new(subdoc.clone()));
+        YRS_BRIDGE_OK
     })
 }
 
