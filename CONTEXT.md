@@ -112,6 +112,14 @@ _Avoid_: Transliterated C function, Rust method spelling
 The synchronous Swift reference type representing a Yrs document. It owns the native document pointer and exposes access through closure-scoped reads and writes.
 _Avoid_: Actor, async document
 
+**Subdocument Reference**:
+The GUID a parent document stores at a map key to name a nested document, surfaced in Swift as `YSubdoc`. It replicates with the parent's updates and carries no content.
+_Avoid_: Subdocument Handle, nested document object
+
+**Subdocument Handle**:
+A Document Handle for the nested document itself, returned by `subdocDoc(forKey:in:)` or `subdocDoc(guid:)`. It is a second reference to one shared native store, so every document API applies to it, its updates and state vector are its own, and it needs its own Provider.
+_Avoid_: Subdocument Reference, copy of the subdocument
+
 **Observation**:
 A cancellable Swift reference that owns a native `yffi` subscription. Cancelling or deinitializing it unregisters the callback.
 _Avoid_: Event stream, transaction

@@ -51,16 +51,16 @@ the Rust code turns it green.
 
 ## 6. Provider proof
 
-- [ ] 6.1 `SQLiteProvider` test: parent provider plus subdocument provider
+- [x] 6.1 `SQLiteProvider` test: parent provider plus subdocument provider
       on one `SQLiteStore`, restart, both reconstruct
       (`documentName` = subdocument GUID).
-- [ ] 6.2 Document the pattern in the SQLite provider README section:
+- [x] 6.2 Document the pattern in the SQLite provider README section:
       lazy open — start a subdocument provider when the app needs the
       content, stop it when done.
 
 ## 7. Docs
 
-- [ ] 7.1 `docs/feature-coverage.md`: move Subdocuments to full coverage
+- [x] 7.1 `docs/feature-coverage.md`: move Subdocuments to full coverage
       with the new functions listed.
-- [ ] 7.2 `README.md` feature table and a short subdocument example.
-- [ ] 7.3 `CONTEXT.md`: subdocument glossary entry (reference vs handle).
+- [x] 7.2 `README.md` feature table and a short subdocument example.
+- [x] 7.3 `CONTEXT.md`: subdocument glossary entry (reference vs handle).
