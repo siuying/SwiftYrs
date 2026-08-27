@@ -398,6 +398,34 @@ private func waitUntil(
 @Test
 func providersPersistAParentAndItsSubdocumentInOneStore() throws {
     let databaseURL = try temporaryDatabaseURL()
+    let page = try writeVaultAndPage(at: databaseURL)
+
+    // Restart: a fresh connection, store, and documents, as after a relaunch.
+    let store = try SQLiteStore(Connection(databaseURL.path))
+    let reloadedVault = YDoc()
+    let reloadedVaultProvider = SQLiteProvider(documentName: "vault", doc: reloadedVault, store: store)
+    try reloadedVaultProvider.start()
+    defer { reloadedVaultProvider.destroy() }
+
+    let reloadedPages = try reloadedVault.map(named: "pages")
+    let reloadedPage = try reloadedVault.read { transaction in
+        try transaction.subdocDoc(forKey: "home", in: reloadedPages)
+    }
+    #expect(try reloadedPage.guid == page.guid)
+    // The parent's log carried the entry only; the body needs the
+    // subdocument's own provider.
+    #expect(try string(in: reloadedPage, named: "body") == "")
+
+    let reloadedPageProvider = SQLiteProvider(documentName: page.guid, doc: reloadedPage, store: store)
+    try reloadedPageProvider.start()
+    defer { reloadedPageProvider.destroy() }
+    #expect(try string(in: reloadedPage, named: "body") == "page body")
+}
+
+/// Writes a vault document and one subdocument page through their own
+/// providers, then tears the whole SQLite stack down again, so the caller can
+/// reopen the database as a restarted app would.
+private func writeVaultAndPage(at databaseURL: URL) throws -> YSubdoc {
     let store = try SQLiteStore(Connection(databaseURL.path))
 
     let vault = YDoc()
@@ -420,23 +448,5 @@ func providersPersistAParentAndItsSubdocumentInOneStore() throws {
 
     pageProvider.destroy()
     vaultProvider.destroy()
-
-    // Restart: the parent reconstructs the entry, and the subdocument's own
-    // provider reconstructs the content behind it.
-    let reloadedVault = YDoc()
-    let reloadedVaultProvider = SQLiteProvider(documentName: "vault", doc: reloadedVault, store: store)
-    try reloadedVaultProvider.start()
-    defer { reloadedVaultProvider.destroy() }
-
-    let reloadedPages = try reloadedVault.map(named: "pages")
-    let reloadedPage = try reloadedVault.read { transaction in
-        try transaction.subdocDoc(forKey: "home", in: reloadedPages)
-    }
-    #expect(try reloadedPage.guid == page.guid)
-    #expect(try string(in: reloadedPage, named: "body") == "")
-
-    let reloadedPageProvider = SQLiteProvider(documentName: page.guid, doc: reloadedPage, store: store)
-    try reloadedPageProvider.start()
-    defer { reloadedPageProvider.destroy() }
-    #expect(try string(in: reloadedPage, named: "body") == "page body")
+    return page
 }

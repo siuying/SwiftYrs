@@ -262,8 +262,10 @@ extension YReadTransaction {
     /// the handle stays valid after the parent transaction ends.
     ///
     /// The parent's update stream never carries subdocument content: a
-    /// subdocument has its own updates, state vector, and client ID, so it
-    /// needs its own provider — its GUID is the natural `documentName`.
+    /// subdocument has its own updates and its own state vector, so it needs
+    /// its own provider — its GUID is the natural `documentName`. (It does
+    /// share the parent's client ID, which yrs assigns when the transaction
+    /// that added it commits.)
     ///
     /// - Throws: `YError.typeMismatch` when the key is absent or holds a value
     ///   that is not a subdocument.
@@ -509,6 +511,16 @@ extension YWriteTransaction {
         }
     }
 
+    /// Destroys the subdocument stored at `key`, following yrs: its destroy
+    /// observers fire, the instance detaches from the parent, and the parent
+    /// entry stays as a fresh, unloaded subdocument reference with the same
+    /// GUID. Removing the entry itself is a separate map remove.
+    ///
+    /// A `YDoc` handle held across the clear stays safe to use and to release
+    /// in any order, but it now points at the detached instance: writes
+    /// through it succeed silently and reach neither the parent nor any
+    /// replica. yrs has no destroyed flag, so there is no error to raise;
+    /// observe the destroy event, or the parent's `observeSubdocs`, instead.
     public func clearSubdoc(forKey key: String, in map: YMap) throws {
         try key.withCString { keyPointer in
             try throwIfNeeded(yrs_bridge_map_clear_subdoc(map.handle, handle, keyPointer))

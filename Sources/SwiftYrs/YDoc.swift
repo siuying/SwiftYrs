@@ -111,9 +111,9 @@ public final class YDoc: Equatable {
         yrs_bridge_doc_client_id(handle)
     }
 
-    /// The document's globally unique identifier. A subdocument keeps its GUID
-    /// across replicas, which makes it the natural key for a provider's
-    /// `documentName`.
+    /// The document's GUID. A subdocument keeps its GUID across replicas, which
+    /// makes it the natural key for a provider's `documentName`. Uniqueness is
+    /// the application's contract, not something the CRDT enforces.
     public var guid: String {
         get throws {
             let data = try readingBuffer { yrs_bridge_doc_guid(handle, &$0) }
