@@ -17,7 +17,7 @@ the Rust code turns it green.
 - [x] 2.3 Red: a Swift test opens a subdocument by GUID.
 - [x] 2.4 Green: `yrs_bridge_transaction_get_subdoc_doc_by_guid(txn, guid,
       doc_out)` over `transaction.subdocs()`.
-- [ ] 2.5 Regenerate the bridge header, and rebuild for Mac and Linux.
+- [x] 2.5 Regenerate the bridge header, and rebuild for Mac and Linux.
 
 ## 3. Swift surface
 
