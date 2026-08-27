@@ -174,3 +174,27 @@ writeFileSync(
   join(root, 'Tests/SwiftYrsTests/Fixtures/xml-any-attribute-document.json'),
   `${JSON.stringify(anyAttrFixture, null, 2)}\n`
 )
+
+// A Yjs document whose map holds a subdocument. The parent update carries only
+// the subdocument entry (GUID and flags); the content travels in the
+// subdocument's own update, which is exported separately.
+const subdocParent = new Y.Doc()
+subdocParent.clientID = 9
+const subdocPages = subdocParent.getMap('pages')
+const subdocPage = new Y.Doc({ guid: 'e6f4b3d2-5c1a-4f8e-9b7d-2a1c3e5f7089' })
+subdocPages.set('home', subdocPage)
+subdocPage.clientID = 10
+subdocPage.getText('body').insert(0, 'Yjs page body')
+
+const subdocFixture = {
+  guid: subdocPage.guid,
+  stateVector: Buffer.from(Y.encodeStateVector(subdocParent)).toString('base64'),
+  updateV1: Buffer.from(Y.encodeStateAsUpdate(subdocParent)).toString('base64'),
+  updateV2: Buffer.from(Y.encodeStateAsUpdateV2(subdocParent)).toString('base64'),
+  subdocUpdateV1: Buffer.from(Y.encodeStateAsUpdate(subdocPage)).toString('base64')
+}
+
+writeFileSync(
+  join(root, 'Tests/SwiftYrsTests/Fixtures/subdocument-document.json'),
+  `${JSON.stringify(subdocFixture, null, 2)}\n`
+)

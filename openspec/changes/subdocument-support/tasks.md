@@ -43,10 +43,10 @@ the Rust code turns it green.
 
 ## 5. Interop fixture
 
-- [ ] 5.1 Extend `scripts/generate-yjs-fixtures.mjs`: a Yjs doc with a map
+- [x] 5.1 Extend `scripts/generate-yjs-fixtures.mjs`: a Yjs doc with a map
       that holds a subdocument, exported as parent update, subdocument
       GUID, and subdocument update.
-- [ ] 5.2 Swift test: apply the fixture, list the GUID, open the
+- [x] 5.2 Swift test: apply the fixture, list the GUID, open the
       subdocument, read the content.
 
 ## 6. Provider proof

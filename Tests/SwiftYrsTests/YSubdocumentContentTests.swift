@@ -51,3 +51,79 @@ func subdocumentLookupRejectsValuesThatAreNotSubdocuments() throws {
         }
     }
 }
+
+@Test
+func subdocumentMadeByYjsMaterialisesWithTheSameGuid() throws {
+    let fixture = try YjsSubdocumentFixture.load("subdocument-document")
+
+    let doc = YDoc()
+    try doc.apply(.v1(fixture.updateV1))
+
+    let map = try doc.map(named: "pages")
+    try doc.read { transaction in
+        #expect(try transaction.subdocGuids() == [fixture.guid])
+        try #expect(transaction.subdoc(forKey: "home", in: map).guid == fixture.guid)
+    }
+
+    let subdoc = try doc.read { transaction in
+        try transaction.subdocDoc(forKey: "home", in: map)
+    }
+    try #expect(subdoc.guid == fixture.guid)
+
+    let body = try subdoc.text(named: "body")
+    // The parent update carried the entry only; the content arrives separately.
+    try #expect(subdoc.read { try $0.string(from: body) } == "")
+
+    try subdoc.apply(.v1(fixture.subdocUpdateV1))
+    try #expect(subdoc.read { try $0.string(from: body) } == "Yjs page body")
+
+    // The same subdocument is reachable by its GUID alone.
+    let byGuid = try doc.read { try $0.subdocDoc(guid: fixture.guid) }
+    let byGuidBody = try byGuid.text(named: "body")
+    try #expect(byGuid.read { try $0.string(from: byGuidBody) } == "Yjs page body")
+}
+
+struct YjsSubdocumentFixture: Decodable {
+    let guid: String
+    let updateV1: Data
+    let subdocUpdateV1: Data
+
+    private enum CodingKeys: String, CodingKey {
+        case guid
+        case updateV1
+        case subdocUpdateV1
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guid = try container.decode(String.self, forKey: .guid)
+        updateV1 = try Self.decodeBase64(.updateV1, from: container)
+        subdocUpdateV1 = try Self.decodeBase64(.subdocUpdateV1, from: container)
+    }
+
+    static func load(_ name: String) throws -> YjsSubdocumentFixture {
+        let url = try #require(
+            Bundle.module.url(
+                forResource: name,
+                withExtension: "json",
+                subdirectory: "Fixtures"
+            ) ?? Bundle.module.url(forResource: name, withExtension: "json")
+        )
+        return try JSONDecoder().decode(YjsSubdocumentFixture.self, from: Data(contentsOf: url))
+    }
+
+    private static func decodeBase64(
+        _ key: CodingKeys,
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> Data {
+        let value = try container.decode(String.self, forKey: key)
+        guard let data = Data(base64Encoded: value) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: key,
+                in: container,
+                debugDescription: "Expected base64-encoded bytes"
+            )
+        }
+        return data
+    }
+}
