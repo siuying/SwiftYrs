@@ -14,31 +14,31 @@ the Rust code turns it green.
 - [x] 2.2 Green: `yrs_bridge_map_get_subdoc_doc(map, txn, key, doc_out)` —
       cast the map value to `Doc`, box a clone, write the pointer.
       Type-mismatch error for a non-subdocument value.
-- [ ] 2.3 Red: a Swift test opens a subdocument by GUID.
-- [ ] 2.4 Green: `yrs_bridge_transaction_get_subdoc_doc_by_guid(txn, guid,
+- [x] 2.3 Red: a Swift test opens a subdocument by GUID.
+- [x] 2.4 Green: `yrs_bridge_transaction_get_subdoc_doc_by_guid(txn, guid,
       doc_out)` over `transaction.subdocs()`.
 - [ ] 2.5 Regenerate the bridge header, and rebuild for Mac and Linux.
 
 ## 3. Swift surface
 
-- [ ] 3.1 `subdocDoc(forKey:in:) -> YDoc` and `subdocDoc(guid:) -> YDoc`
+- [x] 3.1 `subdocDoc(forKey:in:) -> YDoc` and `subdocDoc(guid:) -> YDoc`
       on the transaction types, next to the existing subdoc methods.
-- [ ] 3.2 Doc comments: the handle is the same document; the parent stream
+- [x] 3.2 Doc comments: the handle is the same document; the parent stream
       does not carry subdocument content; each subdocument needs its own
       provider; two replicas that both create a subdocument for one
       logical entity race on the map key.
 
 ## 4. Behaviour tests
 
-- [ ] 4.1 Update independence: edit the subdocument, the parent stream is
+- [x] 4.1 Update independence: edit the subdocument, the parent stream is
       silent; edit the parent, the subdocument stream is silent.
-- [ ] 4.2 Replication: A's parent update plus A's subdocument update give B
+- [x] 4.2 Replication: A's parent update plus A's subdocument update give B
       the same GUID and the same text.
-- [ ] 4.3 Lifecycle: hold a handle, `clearSubdoc`, write through the held
+- [x] 4.3 Lifecycle: hold a handle, `clearSubdoc`, write through the held
       handle — no crash, no effect on the parent, destroy event fires,
       the parent entry keeps the GUID unloaded; release in both orders.
       Run under address sanitizer.
-- [ ] 4.4 Nested transactions: a subdocument write inside a parent read and
+- [x] 4.4 Nested transactions: a subdocument write inside a parent read and
       the reverse; pin the conflict rules.
 
 ## 5. Interop fixture

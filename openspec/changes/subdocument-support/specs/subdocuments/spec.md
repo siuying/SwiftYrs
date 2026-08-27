@@ -32,8 +32,8 @@ error.
 
 An edit inside a subdocument SHALL NOT appear in the parent document's
 update stream. An edit in the parent SHALL NOT appear in the subdocument's
-update stream. The subdocument SHALL have its own state vector and its own
-client ID.
+update stream. The subdocument SHALL have its own state vector. It inherits
+the parent's client ID, as in yrs and Yjs.
 
 #### Scenario: Edit the subdocument
 
