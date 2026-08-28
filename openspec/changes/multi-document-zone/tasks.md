@@ -35,14 +35,14 @@ sweep at the end.
 
 ## 4. Inbound spool
 
-- [ ] 4.1 Red: fetch for an unregistered document, register later, the
+- [x] 4.1 Red: fetch for an unregistered document, register later, the
       update applies; order preserved across several records; deletion
       tombstones replay.
-- [ ] 4.2 Green: spool persisted through `CloudKitMetadataStore` under a
+- [x] 4.2 Green: spool persisted through `CloudKitMetadataStore` under a
       reserved namespace; drain on registration before live dispatch.
-- [ ] 4.3 Relaunch test: spool entries survive store teardown and
+- [x] 4.3 Relaunch test: spool entries survive store teardown and
       recreation on the same metadata store.
-- [ ] 4.4 Coalescing: a fetched snapshot drops covered spooled
+- [x] 4.4 Coalescing: a fetched snapshot drops covered spooled
       incrementals; a spooled snapshot replaces older spooled state.
 
 ## 5. Removal
@@ -58,11 +58,11 @@ sweep at the end.
 
 ## 6. Example and docs
 
-- [ ] 6.1 `Examples/TodoCloudKit`: pass a zone name; verify it builds and
+- [x] 6.1 `Examples/TodoCloudKit`: pass a zone name; verify it builds and
       runs.
-- [ ] 6.2 README: setup example (one store per vault, zone named by the
+- [x] 6.2 README: setup example (one store per vault, zone named by the
       caller, lazy per-document providers, `removeZone` as the dataset
       delete) and a BREAKING note for the old mapping.
-- [ ] 6.3 `docs/feature-coverage.md`: update the CloudKit provider row.
-- [ ] 6.4 Doc comments: per-document removal is best-effort, zone removal
+- [x] 6.3 `docs/feature-coverage.md`: update the CloudKit provider row.
+- [x] 6.4 Doc comments: per-document removal is best-effort, zone removal
       is exact; the spool and its coalescing rule.

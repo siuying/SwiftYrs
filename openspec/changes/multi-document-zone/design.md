@@ -83,6 +83,14 @@ New store-level component, persisted, keyed by document:
 - On provider registration, the store drains that document's spool through
   the provider's normal `handleFetched` path, in arrival order, before
   live dispatch resumes; then clears the drained entries.
+- Implementation note: this became *every* fetched change, not only the
+  un-owned ones. Two paths needed a flag to say which one a document was
+  on, and the live path kept the same hole in miniature — a change applied
+  straight from the callback is lost if the process dies mid-apply,
+  because the token has already moved. One queue makes arrival order a
+  property of the data instead of the code. A batch is dropped only after
+  the provider has applied it, by sequence number, so a snapshot
+  coalescing the queue during a replay cannot shift what gets dropped.
 - The spool persists through the `CloudKitMetadataStore` protocol (SQLite
   and file backings exist), under a reserved key namespace, so a relaunch
   keeps spooled updates. Yrs updates are idempotent and commutative, so
@@ -143,11 +151,13 @@ page open; remote edits to closed pages wait in the spool. Vault delete is
 - **CloudKit name lengths.** Found during implementation: CloudKit raises
   an Objective-C exception (an uncatchable crash from Swift) for a record
   or zone name over 255 characters, and the encoded document component
-  inflates a name by 4/3. So the codec validates: its initializer throws
-  on an over-long zone name, the record-ID builders throw on an over-long
-  document name, and `CloudKitProvider.start()` checks the document name
-  up front so the failure surfaces at setup rather than at the first
-  flush. `maximumDocumentNameBytes` and `maximumZoneNameBytes` are public.
+  inflates a name by 4/3. So the codec's initializer throws on an
+  over-long zone name, and `codec.documentKey(_:)` throws on an over-long
+  document name. That key is the only throwing step: holding a
+  `CloudKitDocumentKey` is the proof that lets every record-ID builder be
+  non-throwing, so no inbound or GC path has to treat "name too long" as
+  a possible outcome. `CloudKitProvider.init` takes the key, so an
+  unusable name fails at setup rather than at the first flush.
 - **Zone record count.** All documents of a store now share one zone's
   limits. Snapshot compaction keeps per-document record counts small; the
   ADR notes the practical guidance and no hard limit.

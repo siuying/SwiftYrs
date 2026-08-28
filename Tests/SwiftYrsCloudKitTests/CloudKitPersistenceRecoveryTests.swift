@@ -65,7 +65,7 @@ func restartDrainsAnUnconfirmedSessionAndRetiresIt() async throws {
     // Session 1 crashes after writing but before its edits upload.
     let (_, store1) = await device.boot()
     let doc1 = try makeDoc(clientID: 11)
-    let provider1 = CloudKitProvider(
+    let provider1 = try CloudKitProvider(
         documentName: "doc", doc: doc1, store: store1,
         options: CloudKitProviderOptions(debounce: .seconds(600))
     )
@@ -79,7 +79,7 @@ func restartDrainsAnUnconfirmedSessionAndRetiresIt() async throws {
     // and recovery re-ships session 1's outstanding diff.
     let (engine2, store2) = await device.boot()
     let doc2 = try makeDoc(clientID: 22, seededFrom: doc1)
-    let provider2 = CloudKitProvider(
+    let provider2 = try CloudKitProvider(
         documentName: "doc", doc: doc2, store: store2,
         options: CloudKitProviderOptions(debounce: .seconds(600))
     )
@@ -87,8 +87,8 @@ func restartDrainsAnUnconfirmedSessionAndRetiresIt() async throws {
     defer { Task { await provider2.destroy() } }
 
     // Session 1's incremental was recovered and uploaded.
-    let recordID = try device.codec.incrementalRecordID(
-        documentName: "doc", clientID: 11, fromClock: 0,
+    let recordID = device.codec.incrementalRecordID(
+        try device.codec.documentKey("doc"), clientID: 11, fromClock: 0,
         toClock: try doc2.clientClock(clientID: 11)
     )
     #expect(await engine2.serverRecord(for: recordID) != nil)
@@ -114,7 +114,7 @@ func chainedCrashReSyncsAllOpenSessions() async throws {
     // Relaunch as a third session over the reconstructed doc.
     let (engine, store) = await device.boot()
     let doc = try makeDoc(clientID: 44, seededFrom: seed)
-    let provider = CloudKitProvider(
+    let provider = try CloudKitProvider(
         documentName: "doc", doc: doc, store: store,
         options: CloudKitProviderOptions(debounce: .seconds(600))
     )
@@ -122,11 +122,11 @@ func chainedCrashReSyncsAllOpenSessions() async throws {
     defer { Task { await provider.destroy() } }
 
     // Both prior sessions' incrementals were re-shipped.
-    let id11 = try device.codec.incrementalRecordID(
-        documentName: "doc", clientID: 11, fromClock: 0, toClock: try doc.clientClock(clientID: 11)
+    let id11 = device.codec.incrementalRecordID(
+        try device.codec.documentKey("doc"), clientID: 11, fromClock: 0, toClock: try doc.clientClock(clientID: 11)
     )
-    let id33 = try device.codec.incrementalRecordID(
-        documentName: "doc", clientID: 33, fromClock: 0, toClock: try doc.clientClock(clientID: 33)
+    let id33 = device.codec.incrementalRecordID(
+        try device.codec.documentKey("doc"), clientID: 33, fromClock: 0, toClock: try doc.clientClock(clientID: 33)
     )
     #expect(await engine.serverRecord(for: id11) != nil)
     #expect(await engine.serverRecord(for: id33) != nil)
@@ -144,7 +144,7 @@ func engineStatePersistsAcrossRestartsAndAvoidsColdRefetch() async throws {
     let (engine1, store1) = await device.boot()
     #expect(await engine1.restoredState == nil) // first launch is cold
     let doc1 = try makeDoc(clientID: 11)
-    let provider1 = CloudKitProvider(
+    let provider1 = try CloudKitProvider(
         documentName: "doc", doc: doc1, store: store1,
         options: CloudKitProviderOptions(debounce: .seconds(600))
     )
@@ -174,7 +174,7 @@ func cleanSessionWithoutOutstandingEditsRecoversNothing() async throws {
 
     let (engine, store) = await device.boot()
     let doc = try makeDoc(clientID: 22, seededFrom: seed)
-    let provider = CloudKitProvider(
+    let provider = try CloudKitProvider(
         documentName: "doc", doc: doc, store: store,
         options: CloudKitProviderOptions(debounce: .seconds(600))
     )

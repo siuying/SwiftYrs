@@ -4,7 +4,7 @@ import Foundation
 import SwiftYrs
 
 final class SnapshotWriter: @unchecked Sendable {
-    private let documentName: String
+    private let document: CloudKitDocumentKey
     private let doc: YDoc
     private let store: CloudKitSyncStore
     private let options: CloudKitProviderOptions
@@ -17,13 +17,13 @@ final class SnapshotWriter: @unchecked Sendable {
     private(set) var latestSnapshotStateVector: ClientClockMap?
 
     init(
-        documentName: String,
+        document: CloudKitDocumentKey,
         doc: YDoc,
         store: CloudKitSyncStore,
         options: CloudKitProviderOptions,
         recordQueue: RecordQueue
     ) {
-        self.documentName = documentName
+        self.document = document
         self.doc = doc
         self.store = store
         self.options = options
@@ -47,7 +47,7 @@ final class SnapshotWriter: @unchecked Sendable {
                 let full = try await captureFullState()
                 let record = try store.codec.encodeSnapshot(
                     CloudKitSnapshotRecordPayload(
-                        documentName: documentName,
+                        documentName: document.name,
                         update: full.update,
                         stateVector: full.stateVector
                     )
@@ -86,8 +86,7 @@ final class SnapshotWriter: @unchecked Sendable {
     }
 
     func handleSnapshotFailure(_ failure: CloudKitSendFailure) -> Bool {
-        guard let snapshotID = try? store.codec.snapshotRecordID(documentName: documentName),
-              failure.recordID == snapshotID,
+        guard failure.recordID == store.codec.snapshotRecordID(document),
               failure.error == .serverRecordChanged
         else {
             return false
@@ -96,27 +95,22 @@ final class SnapshotWriter: @unchecked Sendable {
         return true
     }
 
-    func noteFetchedRecord(_ record: CKRecord) {
-        switch record.recordType {
-        case CloudKitRecordType.incremental:
-            if let payload = try? store.codec.decodeIncremental(record) {
-                trackIncremental(payload, recordID: record.recordID)
-            }
-        case CloudKitRecordType.snapshot:
-            if let payload = try? store.codec.decodeSnapshot(record) {
-                latestSnapshotStateVector = try? ClientClockMap(decoding: payload.stateVector)
-            }
-        default:
-            break
-        }
+    func noteSnapshot(stateVector: YStateVector) {
+        latestSnapshotStateVector = try? ClientClockMap(decoding: stateVector)
     }
 
-    func trackIncremental(_ payload: CloudKitIncrementalRecordPayload, recordID: CKRecord.ID) {
+    func trackIncremental(clientID: UInt64, fromClock: UInt32, toClock: UInt32, byteCount: Int) {
+        let recordID = store.codec.incrementalRecordID(
+            document,
+            clientID: clientID,
+            fromClock: fromClock,
+            toClock: toClock
+        )
         knownIncrementals[recordID] = IncrementalSummary(
-            clientID: payload.clientID,
-            fromClock: payload.fromClock,
-            toClock: payload.toClock,
-            byteCount: payload.update.data.count
+            clientID: clientID,
+            fromClock: fromClock,
+            toClock: toClock,
+            byteCount: byteCount
         )
     }
 
@@ -154,12 +148,12 @@ final class SnapshotWriter: @unchecked Sendable {
         )
         guard !subsumed.isEmpty else { return }
         for summary in subsumed {
-            guard let recordID = try? store.codec.incrementalRecordID(
-                documentName: documentName,
+            let recordID = store.codec.incrementalRecordID(
+                document,
                 clientID: summary.clientID,
                 fromClock: summary.fromClock,
                 toClock: summary.toClock
-            ) else { continue }
+            )
             knownIncrementals[recordID] = nil
             await store.enqueueDelete(recordID)
         }

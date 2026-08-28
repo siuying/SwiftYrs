@@ -21,7 +21,7 @@ private struct Device {
         let store = CloudKitSyncStore(adapter: engine, codec: codec, metadataStore: metadata)
         await store.start()
         let doc = YDoc(clientID: clientID)
-        let provider = CloudKitProvider(
+        let provider = try CloudKitProvider(
             documentName: documentName,
             doc: doc,
             store: store,

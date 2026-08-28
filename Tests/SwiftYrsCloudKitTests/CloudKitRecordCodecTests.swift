@@ -69,13 +69,13 @@ func snapshotRecordRoundTripsAssetUpdateAndStateVector() throws {
 func everyDocumentOfAStoreLivesInTheOneZoneNamedAtConstruction() throws {
     let codec = try CloudKitRecordCodec(zoneName: "vault-1", assetDirectory: FileManager.default.temporaryDirectory)
 
-    let incrementalID = try codec.incrementalRecordID(
-        documentName: "folder/doc #1",
+    let incrementalID = codec.incrementalRecordID(
+        try codec.documentKey("folder/doc #1"),
         clientID: 42,
         fromClock: 3,
         toClock: 9
     )
-    let otherDocumentID = try codec.snapshotRecordID(documentName: "folder/doc #2")
+    let otherDocumentID = codec.snapshotRecordID(try codec.documentKey("folder/doc #2"))
 
     #expect(codec.zoneID.zoneName.hasPrefix("swiftyrs."))
     #expect(incrementalID.zoneID == codec.zoneID)
@@ -98,15 +98,11 @@ func recordNamesCarryTheDocumentComponent() throws {
     let codec = try CloudKitRecordCodec(zoneName: "vault", assetDirectory: FileManager.default.temporaryDirectory)
     let encoded = "Zm9sZGVyL2RvYyAjMQ" // URL-safe base64 of "folder/doc #1", unpadded
 
-    let incrementalID = try codec.incrementalRecordID(
-        documentName: "folder/doc #1",
-        clientID: 42,
-        fromClock: 3,
-        toClock: 9
-    )
+    let document = try codec.documentKey("folder/doc #1")
+    let incrementalID = codec.incrementalRecordID(document, clientID: 42, fromClock: 3, toClock: 9)
     #expect(incrementalID.recordName == "doc.\(encoded).incremental.42.3.9")
 
-    let snapshotID = try codec.snapshotRecordID(documentName: "folder/doc #1")
+    let snapshotID = codec.snapshotRecordID(document)
     #expect(snapshotID.recordName == "doc.\(encoded).snapshot")
 }
 
@@ -120,13 +116,9 @@ func recordNamesCarryTheDocumentComponent() throws {
 func documentNameRoundTripsThroughRecordNames(documentName: String) throws {
     let codec = try CloudKitRecordCodec(zoneName: "vault", assetDirectory: FileManager.default.temporaryDirectory)
 
-    let incrementalID = try codec.incrementalRecordID(
-        documentName: documentName,
-        clientID: .max,
-        fromClock: 0,
-        toClock: .max
-    )
-    let snapshotID = try codec.snapshotRecordID(documentName: documentName)
+    let document = try codec.documentKey(documentName)
+    let incrementalID = codec.incrementalRecordID(document, clientID: .max, fromClock: 0, toClock: .max)
+    let snapshotID = codec.snapshotRecordID(document)
 
     // Every record name a document can produce fits CloudKit's 255-char cap.
     #expect(incrementalID.recordName.count <= 255)
@@ -172,10 +164,38 @@ func namesTooLongForCloudKitAreRejectedBeforeTheyReachIt() throws {
 
     let codec = try CloudKitRecordCodec(zoneName: "vault", assetDirectory: assets)
     #expect(throws: CloudKitRecordCodecError.documentNameTooLong(tooLongDocument)) {
-        try codec.snapshotRecordID(documentName: tooLongDocument)
+        try codec.documentKey(tooLongDocument)
     }
-    #expect(throws: CloudKitRecordCodecError.documentNameTooLong(tooLongDocument)) {
-        try codec.incrementalRecordID(documentName: tooLongDocument, clientID: 1, fromClock: 0, toClock: 1)
+}
+
+@Test
+func decodingFailsWhenTheRecordNameAndRecordTypeDisagree() throws {
+    let codec = try CloudKitRecordCodec(
+        zoneName: "vault",
+        assetDirectory: try temporaryDirectory(),
+        inlineBytesLimit: 16
+    )
+    // Incremental fields and record type under a snapshot's record name.
+    let snapshotName = codec.snapshotRecordID(try codec.documentKey("a")).recordName
+    let record = try codec.encodeIncremental(
+        CloudKitIncrementalRecordPayload(
+            documentName: "a",
+            clientID: 42,
+            fromClock: 0,
+            toClock: 3,
+            update: .v1(Data([1, 2, 3]))
+        )
+    )
+    let forged = CKRecord(
+        recordType: CloudKitRecordType.incremental,
+        recordID: CKRecord.ID(recordName: snapshotName, zoneID: codec.zoneID)
+    )
+    for key in record.allKeys() {
+        forged[key] = record[key]
+    }
+
+    #expect(throws: CloudKitRecordCodecError.malformedRecordName(snapshotName)) {
+        try codec.decodeIncremental(forged)
     }
 }
 
