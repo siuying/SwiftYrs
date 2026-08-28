@@ -86,8 +86,10 @@ final class SnapshotWriter: @unchecked Sendable {
     }
 
     func handleSnapshotFailure(_ failure: CloudKitSendFailure) -> Bool {
-        let snapshotID = store.codec.snapshotRecordID(documentName: documentName)
-        guard failure.recordID == snapshotID, failure.error == .serverRecordChanged else {
+        guard let snapshotID = try? store.codec.snapshotRecordID(documentName: documentName),
+              failure.recordID == snapshotID,
+              failure.error == .serverRecordChanged
+        else {
             return false
         }
         snapshotConflictServerRecord = failure.serverRecord
@@ -152,12 +154,12 @@ final class SnapshotWriter: @unchecked Sendable {
         )
         guard !subsumed.isEmpty else { return }
         for summary in subsumed {
-            let recordID = store.codec.incrementalRecordID(
+            guard let recordID = try? store.codec.incrementalRecordID(
                 documentName: documentName,
                 clientID: summary.clientID,
                 fromClock: summary.fromClock,
                 toClock: summary.toClock
-            )
+            ) else { continue }
             knownIncrementals[recordID] = nil
             await store.enqueueDelete(recordID)
         }

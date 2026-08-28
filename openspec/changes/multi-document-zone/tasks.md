@@ -5,7 +5,7 @@ sweep at the end.
 
 ## 1. Decision record
 
-- [ ] 1.1 Write the ADR: one caller-named zone per store replaces
+- [x] 1.1 Write the ADR: one caller-named zone per store replaces
       zone-per-document; document-scoped record names; the inbound spool;
       best-effort per-document removal versus exact zone removal; the
       compatibility break and why it is acceptable now. Commit it with
@@ -13,24 +13,24 @@ sweep at the end.
 
 ## 2. Codec: zone name and record names
 
-- [ ] 2.1 Red: codec tests — the codec requires a zone name; record IDs
+- [x] 2.1 Red: codec tests — the codec requires a zone name; record IDs
       for two documents land in that one zone; record names carry the
       document component; round trip `documentName(fromRecordName:)`;
       malformed names throw.
-- [ ] 2.2 Green: required `zoneName` in the initializer, name building,
+- [x] 2.2 Green: required `zoneName` in the initializer, name building,
       name parsing; delete `zoneID(forDocumentName:)`.
-- [ ] 2.3 Decode verifies the record-name document equals the
+- [x] 2.3 Decode verifies the record-name document equals the
       `documentName` field; mismatch throws a typed error.
 
 ## 3. Store: registry and routing
 
-- [ ] 3.1 Red: two providers on one store; interleaved fetched and sent
+- [x] 3.1 Red: two providers on one store; interleaved fetched and sent
       batches route each record to its own provider; `recordToSave`
       answers through the owning provider; deleted IDs route by name
       alone.
-- [ ] 3.2 Green: registry keyed by document; dispatch groups by parsed
+- [x] 3.2 Green: registry keyed by document; dispatch groups by parsed
       document; zone-keyed lookups removed.
-- [ ] 3.3 Update the existing store and provider tests to the new codec
+- [x] 3.3 Update the existing store and provider tests to the new codec
       API; the full CloudKit suite passes.
 
 ## 4. Inbound spool
@@ -47,13 +47,13 @@ sweep at the end.
 
 ## 5. Removal
 
-- [ ] 5.1 Red: remove one document — its known records are enqueued for
+- [x] 5.1 Red: remove one document — its known records are enqueued for
       delete, its drain set, spool, and registry clear, the other
       document is untouched; removal throws while its provider is
       attached.
-- [ ] 5.2 Green: persisted known-record registry, updated on sent and
+- [x] 5.2 Green: persisted known-record registry, updated on sent and
       fetched events; `removeDocument` uses it.
-- [ ] 5.3 `removeZone`: deletes the zone, clears all zone-scoped state;
+- [x] 5.3 `removeZone`: deletes the zone, clears all zone-scoped state;
       test that a fresh store start syncs nothing.
 
 ## 6. Example and docs

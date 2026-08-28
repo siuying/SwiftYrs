@@ -8,6 +8,18 @@ public enum CloudKitRecordCodecError: Error, Equatable {
     case invalidField(String)
     case unsupportedUpdateEncoding(String)
     case missingAssetFile(String)
+    /// A record name that does not match either document-scoped shape. Routing
+    /// fails into the error stream rather than guessing an owner (ADR-0025).
+    case malformedRecordName(String)
+    /// A document name whose encoded form would overrun CloudKit's record-name
+    /// length limit. See ``CloudKitRecordCodec/maximumDocumentNameBytes``.
+    case documentNameTooLong(String)
+    /// A zone name whose encoded form would overrun CloudKit's zone-name length
+    /// limit. See ``CloudKitRecordCodec/maximumZoneNameBytes``.
+    case zoneNameTooLong(String)
+    /// The document encoded in the record name disagrees with the record's
+    /// `documentName` field, so the update is not applied to either document.
+    case documentNameMismatch(recordName: String, field: String)
 }
 
 public enum CloudKitRecordType {
@@ -61,19 +73,54 @@ public struct CloudKitSnapshotRecordPayload: Equatable, Sendable {
     }
 }
 
+/// Translates between `YUpdate` payloads and the `CKRecord`s of one store's
+/// zone.
+///
+/// Every document of the store lives in the single zone named at construction
+/// (ADR-0025), so record *names* — not zones — carry document identity:
+/// `doc.<enc(documentName)>.incremental.<clientID>.<from>.<to>` and
+/// `doc.<enc(documentName)>.snapshot`. A deleted-record callback delivers only
+/// a `CKRecord.ID`, so ``documentName(fromRecordName:)`` is the store's routing
+/// key; the `documentName` field is kept only to cross-check it on decode.
 public struct CloudKitRecordCodec: Sendable {
     public static let defaultInlineBytesLimit = 900_000
 
+    /// The caller's name for this store's zone (e.g. a vault UUID), before
+    /// encoding into ``zoneID``.
+    public let zoneName: String
     public let assetDirectory: URL
     public let inlineBytesLimit: Int
 
-    public init(assetDirectory: URL, inlineBytesLimit: Int = Self.defaultInlineBytesLimit) {
+    /// The one zone holding every document of this store.
+    public let zoneID: CKRecordZone.ID
+
+    /// - Throws: ``CloudKitRecordCodecError/zoneNameTooLong(_:)`` if `zoneName`
+    ///   exceeds ``maximumZoneNameBytes`` in UTF-8. CloudKit raises an
+    ///   Objective-C exception for an over-long zone name, so this is checked
+    ///   before the `CKRecordZone.ID` is built.
+    public init(
+        zoneName: String,
+        assetDirectory: URL,
+        inlineBytesLimit: Int = Self.defaultInlineBytesLimit
+    ) throws {
+        guard zoneName.utf8.count <= Self.maximumZoneNameBytes else {
+            throw CloudKitRecordCodecError.zoneNameTooLong(zoneName)
+        }
+        self.zoneName = zoneName
         self.assetDirectory = assetDirectory
         self.inlineBytesLimit = inlineBytesLimit
+        self.zoneID = CKRecordZone.ID(zoneName: "swiftyrs.\(Self.encodedComponent(zoneName))")
     }
 
-    public func zoneID(forDocumentName documentName: String) -> CKRecordZone.ID {
-        CKRecordZone.ID(zoneName: "swiftyrs.\(Self.encodedComponent(documentName))")
+    /// Rejects a document name that cannot fit in a record name. Callers check
+    /// this once, when a provider starts, so the failure surfaces at setup
+    /// rather than at the first flush.
+    ///
+    /// - Throws: ``CloudKitRecordCodecError/documentNameTooLong(_:)``.
+    public func validate(documentName: String) throws {
+        guard documentName.utf8.count <= Self.maximumDocumentNameBytes else {
+            throw CloudKitRecordCodecError.documentNameTooLong(documentName)
+        }
     }
 
     public func incrementalRecordID(
@@ -81,21 +128,73 @@ public struct CloudKitRecordCodec: Sendable {
         clientID: UInt64,
         fromClock: UInt32,
         toClock: UInt32
-    ) -> CKRecord.ID {
-        CKRecord.ID(
-            recordName: "incremental.\(clientID).\(fromClock).\(toClock)",
-            zoneID: zoneID(forDocumentName: documentName)
+    ) throws -> CKRecord.ID {
+        try validate(documentName: documentName)
+        return recordID(
+            "\(Self.documentPrefix(documentName)).\(Self.incrementalKind).\(clientID).\(fromClock).\(toClock)"
         )
     }
 
-    public func snapshotRecordID(documentName: String) -> CKRecord.ID {
-        CKRecord.ID(recordName: "snapshot", zoneID: zoneID(forDocumentName: documentName))
+    public func snapshotRecordID(documentName: String) throws -> CKRecord.ID {
+        try validate(documentName: documentName)
+        return recordID("\(Self.documentPrefix(documentName)).\(Self.snapshotKind)")
+    }
+
+    /// The document a record belongs to, recovered from its name alone — the
+    /// only identity a deleted-record callback carries.
+    ///
+    /// - Throws: ``CloudKitRecordCodecError/malformedRecordName(_:)`` for a name
+    ///   that is not one of the two document-scoped shapes. Callers surface the
+    ///   error; they never fall back to another document.
+    public func documentName(fromRecordName recordName: String) throws -> String {
+        let components = recordName.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count >= 3, components[0] == Self.documentTag else {
+            throw CloudKitRecordCodecError.malformedRecordName(recordName)
+        }
+        switch components[2] {
+        case Self.snapshotKind:
+            guard components.count == 3 else {
+                throw CloudKitRecordCodecError.malformedRecordName(recordName)
+            }
+        case Self.incrementalKind:
+            guard components.count == 6,
+                  UInt64(components[3]) != nil,
+                  UInt32(components[4]) != nil,
+                  UInt32(components[5]) != nil
+            else {
+                throw CloudKitRecordCodecError.malformedRecordName(recordName)
+            }
+        default:
+            throw CloudKitRecordCodecError.malformedRecordName(recordName)
+        }
+        guard let documentName = Self.decodedComponent(String(components[1])) else {
+            throw CloudKitRecordCodecError.malformedRecordName(recordName)
+        }
+        return documentName
+    }
+
+    private func recordID(_ recordName: String) -> CKRecord.ID {
+        CKRecord.ID(recordName: recordName, zoneID: zoneID)
+    }
+
+    /// Rejects a record whose name and `documentName` field disagree, so a
+    /// forged or corrupted name cannot land an update on another document.
+    private func verifiedDocumentName(of record: CKRecord) throws -> String {
+        let fromName = try documentName(fromRecordName: record.recordID.recordName)
+        let fromField = try stringField(CloudKitRecordField.documentName, from: record)
+        guard fromName == fromField else {
+            throw CloudKitRecordCodecError.documentNameMismatch(
+                recordName: fromName,
+                field: fromField
+            )
+        }
+        return fromName
     }
 
     public func encodeIncremental(_ payload: CloudKitIncrementalRecordPayload) throws -> CKRecord {
         let record = CKRecord(
             recordType: CloudKitRecordType.incremental,
-            recordID: incrementalRecordID(
+            recordID: try incrementalRecordID(
                 documentName: payload.documentName,
                 clientID: payload.clientID,
                 fromClock: payload.fromClock,
@@ -118,7 +217,7 @@ public struct CloudKitRecordCodec: Sendable {
     }
 
     public func decodeIncremental(_ record: CKRecord) throws -> CloudKitIncrementalRecordPayload {
-        let documentName = try stringField(CloudKitRecordField.documentName, from: record)
+        let documentName = try verifiedDocumentName(of: record)
         let clientIDValue = try stringField(CloudKitRecordField.clientID, from: record)
         guard let clientID = UInt64(clientIDValue) else {
             throw CloudKitRecordCodecError.invalidField(CloudKitRecordField.clientID)
@@ -143,7 +242,7 @@ public struct CloudKitRecordCodec: Sendable {
     public func encodeSnapshot(_ payload: CloudKitSnapshotRecordPayload) throws -> CKRecord {
         let record = CKRecord(
             recordType: CloudKitRecordType.snapshot,
-            recordID: snapshotRecordID(documentName: payload.documentName)
+            recordID: try snapshotRecordID(documentName: payload.documentName)
         )
         record[CloudKitRecordField.documentName] = payload.documentName as NSString
         record[CloudKitRecordField.updateEncoding] = encodingName(payload.update.encoding) as NSString
@@ -153,7 +252,7 @@ public struct CloudKitRecordCodec: Sendable {
     }
 
     public func decodeSnapshot(_ record: CKRecord) throws -> CloudKitSnapshotRecordPayload {
-        let documentName = try stringField(CloudKitRecordField.documentName, from: record)
+        let documentName = try verifiedDocumentName(of: record)
         let encoding = try updateEncoding(from: record)
         let updateData = try updateData(
             inlineField: nil,
@@ -243,13 +342,63 @@ public struct CloudKitRecordCodec: Sendable {
         throw CloudKitRecordCodecError.invalidField(key)
     }
 
+    private static let documentTag = "doc"
+    private static let incrementalKind = "incremental"
+    private static let snapshotKind = "snapshot"
+
+    /// CloudKit's cap on a record name and a zone name.
+    private static let maximumCloudKitNameLength = 255
+
+    /// Fixed characters around the encoded document component of the longest
+    /// record name: `doc.` + `.incremental.` + a max `UInt64` client ID + two
+    /// max `UInt32` clocks with their separators.
+    private static let longestRecordNameOverhead =
+        "\(documentTag).".count + ".\(incrementalKind).".count
+            + String(UInt64.max).count + 1 + String(UInt32.max).count + 1 + String(UInt32.max).count
+
+    /// The longest document name, in UTF-8 bytes, whose encoding still fits a
+    /// record name. The bound is the same for snapshot and incremental records
+    /// so a name never works for one and fails for the other.
+    public static let maximumDocumentNameBytes =
+        encodableBytes(within: maximumCloudKitNameLength - longestRecordNameOverhead)
+
+    /// The longest zone name, in UTF-8 bytes, whose encoding still fits a zone
+    /// ID.
+    public static let maximumZoneNameBytes =
+        encodableBytes(within: maximumCloudKitNameLength - "swiftyrs.".count)
+
+    /// How many raw bytes survive unpadded base64 within `characters`.
+    private static func encodableBytes(within characters: Int) -> Int {
+        characters * 3 / 4
+    }
+
+    private static func documentPrefix(_ documentName: String) -> String {
+        "\(documentTag).\(encodedComponent(documentName))"
+    }
+
+    /// URL-safe, unpadded base64. It never contains `.`, which is what lets a
+    /// record name be split on `.` unambiguously.
     private static func encodedComponent(_ value: String) -> String {
         let encoded = Data(value.utf8)
             .base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        return encoded.isEmpty ? "_" : encoded
+        return encoded.isEmpty ? emptyComponent : encoded
+    }
+
+    /// The sentinel for an empty value. Base64 never produces a single
+    /// character, so it cannot collide with a real encoding.
+    private static let emptyComponent = "_"
+
+    private static func decodedComponent(_ component: String) -> String? {
+        if component == emptyComponent { return "" }
+        var base64 = component
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        base64.append(String(repeating: "=", count: (4 - base64.count % 4) % 4))
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
 #endif

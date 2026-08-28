@@ -11,11 +11,11 @@ private struct Harness {
     let codec: CloudKitRecordCodec
     let metadata: FileCloudKitMetadataStore
 
-    static func make() async -> Harness {
+    static func make() async throws -> Harness {
         let engine = MockCloudKitSyncEngine()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftyrs-ck-account-\(UUID().uuidString)")
-        let codec = CloudKitRecordCodec(assetDirectory: dir.appendingPathComponent("assets"))
+        let codec = try CloudKitRecordCodec(zoneName: "test-zone", assetDirectory: dir.appendingPathComponent("assets"))
         let metadata = FileCloudKitMetadataStore(directory: dir.appendingPathComponent("meta"))
         let store = CloudKitSyncStore(adapter: engine, codec: codec, metadataStore: metadata)
         await store.start()
@@ -39,7 +39,7 @@ private func insert(_ string: String, into doc: YDoc) throws {
 
 @Test
 func accountChangeStreamReflectsMockEvents() async throws {
-    let h = await Harness.make()
+    let h = try await Harness.make()
     let (provider, _) = h.provider()
     try await provider.start()
     defer { Task { await provider.destroy() } }
@@ -51,7 +51,7 @@ func accountChangeStreamReflectsMockEvents() async throws {
 
 @Test
 func accountSwitchStopsSyncAndDoesNotLeakTheExistingDoc() async throws {
-    let h = await Harness.make()
+    let h = try await Harness.make()
     let (provider, doc) = h.provider()
     try await provider.start()
     defer { Task { await provider.destroy() } }
@@ -67,7 +67,7 @@ func accountSwitchStopsSyncAndDoesNotLeakTheExistingDoc() async throws {
 
 @Test
 func accountSwitchClearsLocalSyncState() async throws {
-    let h = await Harness.make()
+    let h = try await Harness.make()
     let (provider, doc) = h.provider()
     try await provider.start()
 
@@ -94,8 +94,8 @@ func accountSwitchClearsLocalSyncState() async throws {
 }
 
 @Test
-func removeDocumentDeletesTheZoneAndRecords() async throws {
-    let h = await Harness.make()
+func removeDocumentDeletesTheDocumentsRecords() async throws {
+    let h = try await Harness.make()
     let (provider, doc) = h.provider()
     try await provider.start()
 
@@ -107,14 +107,13 @@ func removeDocumentDeletesTheZoneAndRecords() async throws {
 
     try await h.store.removeDocument(named: "doc")
 
-    let zoneID = h.codec.zoneID(forDocumentName: "doc")
-    #expect(await h.engine.serverRecordIDs.allSatisfy { $0.zoneID != zoneID })
+    #expect(await h.engine.serverRecordIDs.isEmpty)
     #expect(try h.metadata.data(forKey: CloudKitSyncStateKeys.drainSet, documentName: "doc") == nil)
 }
 
 @Test
 func removeDocumentRejectsAnActiveProvider() async throws {
-    let h = await Harness.make()
+    let h = try await Harness.make()
     let (provider, _) = h.provider(documentName: "live")
     try await provider.start()
     defer { Task { await provider.destroy() } }

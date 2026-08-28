@@ -113,6 +113,9 @@ public actor CloudKitProvider {
         guard !destroyed else { throw CloudKitProviderError.destroyed }
         guard !started else { return }
 
+        // Fail at setup, not at the first flush, if the name cannot be encoded
+        // into a record name (ADR-0025).
+        try store.codec.validate(documentName: documentName)
         try store.register(self, documentName: documentName)
         clientID = doc.clientID
 
@@ -237,25 +240,22 @@ public actor CloudKitProvider {
         toClock: UInt32,
         update: YUpdate
     ) -> CKRecord.ID? {
-        let recordID = store.codec.incrementalRecordID(
-            documentName: documentName,
-            clientID: clientID,
-            fromClock: fromClock,
-            toClock: toClock
-        )
-        guard let record = try? store.codec.encodeIncremental(
-            CloudKitIncrementalRecordPayload(
-                documentName: documentName,
-                clientID: clientID,
-                fromClock: fromClock,
-                toClock: toClock,
-                update: update
+        do {
+            let record = try store.codec.encodeIncremental(
+                CloudKitIncrementalRecordPayload(
+                    documentName: documentName,
+                    clientID: clientID,
+                    fromClock: fromClock,
+                    toClock: toClock,
+                    update: update
+                )
             )
-        ) else {
+            recordQueue.enqueue(record)
+            return record.recordID
+        } catch {
+            errorsContinuation.yield(error)
             return nil
         }
-        recordQueue.enqueue(record)
-        return recordID
     }
 
     // MARK: Compaction / GC (ADR-0023)

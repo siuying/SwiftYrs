@@ -140,6 +140,14 @@ page open; remote edits to closed pages wait in the spool. Vault delete is
 - **Record-name parsing is now load-bearing.** A malformed name must fail
   into an error stream, never route to the wrong provider. Fuzz-style
   tests on the parser.
+- **CloudKit name lengths.** Found during implementation: CloudKit raises
+  an Objective-C exception (an uncatchable crash from Swift) for a record
+  or zone name over 255 characters, and the encoded document component
+  inflates a name by 4/3. So the codec validates: its initializer throws
+  on an over-long zone name, the record-ID builders throw on an over-long
+  document name, and `CloudKitProvider.start()` checks the document name
+  up front so the failure surfaces at setup rather than at the first
+  flush. `maximumDocumentNameBytes` and `maximumZoneNameBytes` are public.
 - **Zone record count.** All documents of a store now share one zone's
   limits. Snapshot compaction keeps per-document record counts small; the
   ADR notes the practical guidance and no hard limit.

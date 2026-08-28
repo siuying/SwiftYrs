@@ -12,13 +12,13 @@ private struct Device {
     let metadata: FileCloudKitMetadataStore
     let codec: CloudKitRecordCodec
 
-    static func make() -> Device {
+    static func make() throws -> Device {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftyrs-ck-recovery-\(UUID().uuidString)")
         return Device(
             dir: dir,
             metadata: FileCloudKitMetadataStore(directory: dir.appendingPathComponent("meta")),
-            codec: CloudKitRecordCodec(assetDirectory: dir.appendingPathComponent("assets"))
+            codec: try CloudKitRecordCodec(zoneName: "test-zone", assetDirectory: dir.appendingPathComponent("assets"))
         )
     }
 
@@ -60,7 +60,7 @@ private func insert(_ string: String, into doc: YDoc) throws {
 
 @Test
 func restartDrainsAnUnconfirmedSessionAndRetiresIt() async throws {
-    let device = Device.make()
+    let device = try Device.make()
 
     // Session 1 crashes after writing but before its edits upload.
     let (_, store1) = await device.boot()
@@ -87,7 +87,7 @@ func restartDrainsAnUnconfirmedSessionAndRetiresIt() async throws {
     defer { Task { await provider2.destroy() } }
 
     // Session 1's incremental was recovered and uploaded.
-    let recordID = device.codec.incrementalRecordID(
+    let recordID = try device.codec.incrementalRecordID(
         documentName: "doc", clientID: 11, fromClock: 0,
         toClock: try doc2.clientClock(clientID: 11)
     )
@@ -101,7 +101,7 @@ func restartDrainsAnUnconfirmedSessionAndRetiresIt() async throws {
 
 @Test
 func chainedCrashReSyncsAllOpenSessions() async throws {
-    let device = Device.make()
+    let device = try Device.make()
 
     // Two prior sessions both left edits in the doc but never confirmed upload.
     let seed = try makeDoc(clientID: 11)
@@ -122,10 +122,10 @@ func chainedCrashReSyncsAllOpenSessions() async throws {
     defer { Task { await provider.destroy() } }
 
     // Both prior sessions' incrementals were re-shipped.
-    let id11 = device.codec.incrementalRecordID(
+    let id11 = try device.codec.incrementalRecordID(
         documentName: "doc", clientID: 11, fromClock: 0, toClock: try doc.clientClock(clientID: 11)
     )
-    let id33 = device.codec.incrementalRecordID(
+    let id33 = try device.codec.incrementalRecordID(
         documentName: "doc", clientID: 33, fromClock: 0, toClock: try doc.clientClock(clientID: 33)
     )
     #expect(await engine.serverRecord(for: id11) != nil)
@@ -138,7 +138,7 @@ func chainedCrashReSyncsAllOpenSessions() async throws {
 
 @Test
 func engineStatePersistsAcrossRestartsAndAvoidsColdRefetch() async throws {
-    let device = Device.make()
+    let device = try Device.make()
 
     // Session 1 flushes, so the engine emits a state serialization the store persists.
     let (engine1, store1) = await device.boot()
@@ -165,7 +165,7 @@ func engineStatePersistsAcrossRestartsAndAvoidsColdRefetch() async throws {
 
 @Test
 func cleanSessionWithoutOutstandingEditsRecoversNothing() async throws {
-    let device = Device.make()
+    let device = try Device.make()
 
     // Prior session that already uploaded everything: drain marker == doc clock.
     let seed = try makeDoc(clientID: 11)
