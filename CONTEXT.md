@@ -140,6 +140,18 @@ _Avoid_: Channel, topic, session
 The WebRTC connection shape where every Peer holds a direct data-channel connection to every other Peer in a Room, bounded by a maximum connection count. It contrasts with the single client-to-server link of the WebSocket transport.
 _Avoid_: Star, hub-and-spoke, client-server
 
+**Sync Zone**:
+The one CloudKit record zone a `CloudKitSyncStore` owns, named by the caller and holding the records of every document that store syncs. It is the atomic-commit, change-token, bulk-delete, and sharing boundary for the whole dataset — a vault, not a page.
+_Avoid_: Document zone, per-document zone, container
+
+**Inbound Spool**:
+The persisted, per-document queue of fetched CloudKit changes for a document with no Provider attached, replayed in arrival order when that Provider starts. It exists because the engine's change token advances whether or not anyone is listening.
+_Avoid_: Cache, buffer, outbox
+
+**Known-Record Registry**:
+The persisted set of record names a store believes each of its documents owns, fed from the engine's sent and fetched events and used to remove one document's records. It is best-effort — zone removal, which needs no registry, is the exact operation.
+_Avoid_: Index, query, source of truth
+
 **Peer Signal**:
 A simple-peer-shaped connection-establishment payload (offer, answer, ICE candidate, or renegotiate) relayed through the Signaling Server to bring up a direct WebRTC connection. It is distinct from sync and awareness payloads, which travel over the established data channel.
 _Avoid_: SDP blob, ICE message, sync message

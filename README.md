@@ -370,6 +370,59 @@ Two further rules, both inherited from yrs and Yjs:
 - Two replicas that each call `setNewSubdoc` for one logical page create two
   GUIDs and race on the map key. Create a subdocument once, on one replica.
 
+### CloudKit sync
+
+`SwiftYrsCloudKit` syncs documents across one iCloud user's devices through a
+single `CKSyncEngine`. A `CloudKitSyncStore` owns that engine and one CloudKit
+zone; every document you sync through the store lives in that zone, so a vault
+of a hundred pages costs one zone, one change token, and one fetch — not a
+hundred. You name the zone (ADR-0025):
+
+```swift
+let store = CloudKitSyncStore(
+    adapter: CKSyncEngineAdapter(containerIdentifier: "iCloud.com.example.Wiki"),
+    // One store per vault; the zone carries the vault's identity.
+    codec: try CloudKitRecordCodec(zoneName: vaultID.uuidString, assetDirectory: assets),
+    metadataStore: FileCloudKitMetadataStore(directory: metadata)
+)
+await store.start()
+
+// The vault's root document opens with the vault.
+let rootProvider = try CloudKitProvider(documentName: "root", doc: vault, store: store)
+try await rootProvider.start()
+```
+
+Page providers start lazily, when the user opens a page, and are destroyed when
+it closes. Remote edits that arrive while a page is closed are not lost: the
+store spools them, persistently, and replays them in arrival order when that
+page's provider starts.
+
+```swift
+let pageProvider = try CloudKitProvider(documentName: page.guid, doc: pageDoc, store: store)
+try await pageProvider.start()   // applies anything spooled for this page first
+defer { Task { await pageProvider.destroy() } }
+```
+
+Removal comes at two grains:
+
+```swift
+// One document. Best-effort: it deletes the records the store recorded, and
+// anything it missed is collected by the next snapshot cycle's GC.
+try await store.removeDocument(named: page.guid)
+
+// The whole dataset — every document in the zone. Exact.
+try await store.removeZone()
+```
+
+Both throw while a provider is still attached, so destroy providers first.
+
+> **Breaking change.** Earlier versions put each document in its own zone and
+> `CloudKitRecordCodec` took no zone name. `CloudKitRecordCodec(zoneName:...)`
+> is now required, `zoneID(forDocumentName:)` is gone, and record names carry
+> their document. Records written under the old mapping are not readable — the
+> first sync after upgrading re-seeds the zone from the local document, which is
+> untouched.
+
 ### Terminal chat
 
 `ChatExample` is a runnable command-line chat that demonstrates `SwiftYrsWebRTC`
