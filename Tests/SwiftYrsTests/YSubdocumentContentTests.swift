@@ -83,47 +83,12 @@ func subdocumentMadeByYjsMaterialisesWithTheSameGuid() throws {
     try #expect(byGuid.read { try $0.string(from: byGuidBody) } == "Yjs page body")
 }
 
-struct YjsSubdocumentFixture: Decodable {
+private struct YjsSubdocumentFixture: Decodable {
     let guid: String
     let updateV1: Data
     let subdocUpdateV1: Data
 
-    private enum CodingKeys: String, CodingKey {
-        case guid
-        case updateV1
-        case subdocUpdateV1
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        guid = try container.decode(String.self, forKey: .guid)
-        updateV1 = try Self.decodeBase64(.updateV1, from: container)
-        subdocUpdateV1 = try Self.decodeBase64(.subdocUpdateV1, from: container)
-    }
-
     static func load(_ name: String) throws -> YjsSubdocumentFixture {
-        let url = try #require(
-            Bundle.module.url(
-                forResource: name,
-                withExtension: "json",
-                subdirectory: "Fixtures"
-            ) ?? Bundle.module.url(forResource: name, withExtension: "json")
-        )
-        return try JSONDecoder().decode(YjsSubdocumentFixture.self, from: Data(contentsOf: url))
-    }
-
-    private static func decodeBase64(
-        _ key: CodingKeys,
-        from container: KeyedDecodingContainer<CodingKeys>
-    ) throws -> Data {
-        let value = try container.decode(String.self, forKey: key)
-        guard let data = Data(base64Encoded: value) else {
-            throw DecodingError.dataCorruptedError(
-                forKey: key,
-                in: container,
-                debugDescription: "Expected base64-encoded bytes"
-            )
-        }
-        return data
+        try loadFixture(name)
     }
 }

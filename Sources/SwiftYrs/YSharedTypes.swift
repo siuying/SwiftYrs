@@ -262,19 +262,18 @@ extension YReadTransaction {
     /// the handle stays valid after the parent transaction ends.
     ///
     /// The parent's update stream never carries subdocument content: a
-    /// subdocument has its own updates, state vector, and client ID, so it
-    /// needs its own provider — its GUID is the natural `documentName`.
+    /// subdocument has its own updates and its own state vector, so it needs
+    /// its own provider — its GUID is the natural `documentName`. (It does
+    /// share the parent's client ID, which yrs assigns when the transaction
+    /// that added it commits.)
     ///
     /// - Throws: `YError.typeMismatch` when the key is absent or holds a value
     ///   that is not a subdocument.
     public func subdocDoc(forKey key: String, in map: YMap) throws -> YDoc {
         try key.withCString { keyPointer in
-            var doc: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_map_get_subdoc_doc(map.handle, handle, keyPointer, &doc))
-            guard let doc else {
-                throw YError.nullPointer
+            try makeOwnedHandle(YDoc.init) {
+                yrs_bridge_map_get_subdoc_doc(map.handle, handle, keyPointer, &$0)
             }
-            return YDoc(handle: doc)
         }
     }
 
@@ -282,20 +281,18 @@ extension YReadTransaction {
     /// `YDoc` — the path for an app that stores GUIDs in its own records and
     /// opens a subdocument without walking the map.
     ///
-    /// GUID uniqueness is the application's contract; if two subdocuments share
-    /// a GUID, the first match wins. Two replicas that each call
+    /// GUID uniqueness is the application's contract, not something the CRDT
+    /// enforces; if two subdocuments share a GUID, one of them is returned and
+    /// which one is unspecified. Two replicas that each call
     /// `setNewSubdoc(forKey:in:)` for one logical entity create two GUIDs and
     /// race on the map key, so create a subdocument once, on one replica.
     ///
     /// - Throws: `YError.typeMismatch` when no subdocument carries that GUID.
     public func subdocDoc(guid: String) throws -> YDoc {
         try guid.withCString { guidPointer in
-            var doc: OpaquePointer?
-            try throwIfNeeded(yrs_bridge_transaction_get_subdoc_doc_by_guid(handle, guidPointer, &doc))
-            guard let doc else {
-                throw YError.nullPointer
+            try makeOwnedHandle(YDoc.init) {
+                yrs_bridge_transaction_get_subdoc_doc_by_guid(handle, guidPointer, &$0)
             }
-            return YDoc(handle: doc)
         }
     }
 }
@@ -372,32 +369,32 @@ extension YWriteTransaction {
     }
 
     public func insertMap(into array: YArray, at index: UInt32) throws -> YMap {
-        try makeBranch(YMap.init) { yrs_bridge_array_insert_map(array.handle, handle, index, &$0) }
+        try makeOwnedHandle(YMap.init) { yrs_bridge_array_insert_map(array.handle, handle, index, &$0) }
     }
 
     public func insertArray(into array: YArray, at index: UInt32) throws -> YArray {
-        try makeBranch(YArray.init) { yrs_bridge_array_insert_array(array.handle, handle, index, &$0) }
+        try makeOwnedHandle(YArray.init) { yrs_bridge_array_insert_array(array.handle, handle, index, &$0) }
     }
 
     public func setMap(forKey key: String, in map: YMap) throws -> YMap {
         try key.withCString { keyPointer in
-            try makeBranch(YMap.init) { yrs_bridge_map_set_map(map.handle, handle, keyPointer, &$0) }
+            try makeOwnedHandle(YMap.init) { yrs_bridge_map_set_map(map.handle, handle, keyPointer, &$0) }
         }
     }
 
     public func setArray(forKey key: String, in map: YMap) throws -> YArray {
         try key.withCString { keyPointer in
-            try makeBranch(YArray.init) { yrs_bridge_map_set_array(map.handle, handle, keyPointer, &$0) }
+            try makeOwnedHandle(YArray.init) { yrs_bridge_map_set_array(map.handle, handle, keyPointer, &$0) }
         }
     }
 
     public func insertText(into array: YArray, at index: UInt32) throws -> YText {
-        try makeBranch(YText.init) { yrs_bridge_array_insert_text(array.handle, handle, index, &$0) }
+        try makeOwnedHandle(YText.init) { yrs_bridge_array_insert_text(array.handle, handle, index, &$0) }
     }
 
     public func setText(forKey key: String, in map: YMap) throws -> YText {
         try key.withCString { keyPointer in
-            try makeBranch(YText.init) { yrs_bridge_map_set_text(map.handle, handle, keyPointer, &$0) }
+            try makeOwnedHandle(YText.init) { yrs_bridge_map_set_text(map.handle, handle, keyPointer, &$0) }
         }
     }
 
@@ -407,12 +404,12 @@ extension YWriteTransaction {
 
     public func insertElement(named name: String, into xml: YXmlContainer, at index: UInt32) throws -> YXmlElement {
         try name.withCString { pointer in
-            try makeBranch(YXmlElement.init) { yrs_bridge_xml_insert_element(xml.handle, handle, index, pointer, &$0) }
+            try makeOwnedHandle(YXmlElement.init) { yrs_bridge_xml_insert_element(xml.handle, handle, index, pointer, &$0) }
         }
     }
 
     public func insertText(into xml: YXmlContainer, at index: UInt32) throws -> YXmlText {
-        try makeBranch(YXmlText.init) { yrs_bridge_xml_insert_text(xml.handle, handle, index, &$0) }
+        try makeOwnedHandle(YXmlText.init) { yrs_bridge_xml_insert_text(xml.handle, handle, index, &$0) }
     }
 
     public func remove(from xml: YXmlContainer, at index: UInt32, length: UInt32) throws {
@@ -509,6 +506,16 @@ extension YWriteTransaction {
         }
     }
 
+    /// Destroys the subdocument stored at `key`, following yrs: its destroy
+    /// observers fire, the instance detaches from the parent, and the parent
+    /// entry stays as a fresh, unloaded subdocument reference with the same
+    /// GUID. Removing the entry itself is a separate map remove.
+    ///
+    /// A `YDoc` handle held across the clear stays safe to use and to release
+    /// in any order, but it now points at the detached instance: writes
+    /// through it succeed silently and reach neither the parent nor any
+    /// replica. yrs has no destroyed flag, so there is no error to raise;
+    /// observe the destroy event, or the parent's `observeSubdocs`, instead.
     public func clearSubdoc(forKey key: String, in map: YMap) throws {
         try key.withCString { keyPointer in
             try throwIfNeeded(yrs_bridge_map_clear_subdoc(map.handle, handle, keyPointer))

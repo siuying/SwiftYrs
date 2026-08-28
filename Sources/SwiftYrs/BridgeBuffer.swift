@@ -25,9 +25,10 @@ func readingBuffer(_ fill: (inout YrsBridgeBuffer) -> Int32) throws -> Data {
 ///
 /// This owns the "out-parameter → status check → null guard → construct" dance
 /// once, including the null-handle → `YError.nullPointer` mapping (ADR-0008), so
-/// branch-returning accessors stop re-typing it. `fill` does nothing but invoke
-/// the shim call with the supplied out-parameter.
-func makeBranch<T>(
+/// handle-returning accessors stop re-typing it — branches borrowed from a
+/// document, and documents themselves (a subdocument handle, ADR-0024). `fill`
+/// does nothing but invoke the shim call with the supplied out-parameter.
+func makeOwnedHandle<T>(
     _ make: (OpaquePointer) -> T,
     _ fill: (inout OpaquePointer?) -> Int32
 ) throws -> T {

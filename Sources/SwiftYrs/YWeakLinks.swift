@@ -39,7 +39,7 @@ public struct YRelativePosition: Equatable, Sendable {
 extension YReadTransaction {
     public func weakLink(forKey key: String, in map: YMap) throws -> YWeakLink {
         try key.withCString { keyPointer in
-            try makeBranch(YWeakLink.init) { yrs_bridge_map_get_weak_link(map.handle, handle, keyPointer, &$0) }
+            try makeOwnedHandle(YWeakLink.init) { yrs_bridge_map_get_weak_link(map.handle, handle, keyPointer, &$0) }
         }
     }
 
@@ -103,7 +103,7 @@ extension YWriteTransaction {
     ) throws -> YWeakLink {
         try sourceKey.withCString { sourcePointer in
             try targetKey.withCString { targetPointer in
-                try makeBranch(YWeakLink.init) {
+                try makeOwnedHandle(YWeakLink.init) {
                     yrs_bridge_map_set_weak_link(
                         sourceMap.handle,
                         handle,
@@ -127,7 +127,7 @@ extension YWriteTransaction {
         in map: YMap
     ) throws -> YWeakLink {
         try key.withCString { keyPointer in
-            try makeBranch(YWeakLink.init) {
+            try makeOwnedHandle(YWeakLink.init) {
                 yrs_bridge_text_set_quote(
                     text.handle,
                     handle,
@@ -153,7 +153,7 @@ extension YWriteTransaction {
         in map: YMap
     ) throws -> YWeakLink {
         try key.withCString { keyPointer in
-            try makeBranch(YWeakLink.init) {
+            try makeOwnedHandle(YWeakLink.init) {
                 yrs_bridge_array_set_quote(
                     array.handle,
                     handle,

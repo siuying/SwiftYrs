@@ -159,6 +159,8 @@ func heldHandleStaysSafeAfterClearingTheSubdocument() throws {
     // The entry survives the destroy as a fresh, unloaded reference with the
     // same GUID (yrs doc.rs:413), so it is re-announced as added.
     #expect(subdocEvents.added.contains(created.guid))
+    // The replacement arrives unloaded, so it is never announced as loaded.
+    #expect(!subdocEvents.loaded.contains(created.guid))
     try doc.read { transaction in
         try #expect(transaction.subdoc(forKey: "home", in: map).guid == created.guid)
         try #expect(transaction.subdocGuids().contains(created.guid))
@@ -181,23 +183,78 @@ func heldHandleStaysSafeAfterClearingTheSubdocument() throws {
 
 @Test
 func subdocumentHandleOutlivesItsParentDocument() throws {
-    func makeHandle() throws -> YDoc {
+    func makeHandle(clearFirst: Bool) throws -> YDoc {
         let parent = YDoc()
         let map = try parent.map(named: "pages")
         try parent.write { transaction in
             _ = try transaction.setNewSubdoc(forKey: "home", in: map)
         }
-        return try parent.read { transaction in
+        let handle = try parent.read { transaction in
             try transaction.subdocDoc(forKey: "home", in: map)
         }
+        if clearFirst {
+            try parent.write { transaction in
+                try transaction.clearSubdoc(forKey: "home", in: map)
+            }
+        }
+        return handle
     }
 
-    let subdoc = try makeHandle()
+    // The parent is released first in both cases: intact, and cleared before
+    // the release. The handle owns its own reference to the shared store.
+    let clearedSubdoc = try makeHandle(clearFirst: true)
+    let clearedBody = try clearedSubdoc.text(named: "body")
+    try clearedSubdoc.write { transaction in
+        try transaction.insert("detached", into: clearedBody, at: 0)
+    }
+    try #expect(clearedSubdoc.read { try $0.string(from: clearedBody) } == "detached")
+
+    // And the reverse order: the handle goes away first, the parent's entry
+    // stays usable.
+    let parent = YDoc()
+    let parentMap = try parent.map(named: "pages")
+    let created = try parent.write { transaction in
+        try transaction.setNewSubdoc(forKey: "home", in: parentMap)
+    }
+    var released: YDoc? = try parent.read { try $0.subdocDoc(forKey: "home", in: parentMap) }
+    let releasedBody = try #require(released).text(named: "body")
+    try #require(released).write { transaction in
+        try transaction.insert("kept", into: releasedBody, at: 0)
+    }
+    released = nil
+    let reopened = try parent.read { try $0.subdocDoc(forKey: "home", in: parentMap) }
+    try #expect(reopened.guid == created.guid)
+    let reopenedBody = try reopened.text(named: "body")
+    try #expect(reopened.read { try $0.string(from: reopenedBody) } == "kept")
+
+    let subdoc = try makeHandle(clearFirst: false)
     let body = try subdoc.text(named: "body")
     try subdoc.write { transaction in
         try transaction.insert("orphan", into: body, at: 0)
     }
     try #expect(subdoc.read { try $0.string(from: body) } == "orphan")
+}
+
+@Test
+func undoManagerWorksOnASubdocument() throws {
+    let doc = YDoc()
+    let map = try doc.map(named: "pages")
+    try doc.write { transaction in
+        _ = try transaction.setNewSubdoc(forKey: "home", in: map)
+    }
+    let subdoc = try doc.read { try $0.subdocDoc(forKey: "home", in: map) }
+    let body = try subdoc.text(named: "body")
+
+    let undoManager = YUndoManager(document: subdoc)
+    try undoManager.addScope(body)
+    try subdoc.write { transaction in
+        try transaction.insert("undo me", into: body, at: 0)
+    }
+
+    #expect(try undoManager.undo())
+    try #expect(subdoc.read { try $0.string(from: body) } == "")
+    #expect(try undoManager.redo())
+    try #expect(subdoc.read { try $0.string(from: body) } == "undo me")
 }
 
 @Test

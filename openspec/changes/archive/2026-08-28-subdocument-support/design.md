@@ -46,8 +46,9 @@ It doubles the API for no safety gain; the handle IS a document.
 
 Both return `YRS_BRIDGE_ERR_TYPE_MISMATCH` when the key or GUID does not
 name a subdocument. When two subdocuments share one GUID (a remote update
-can craft this), the GUID path returns the first match; GUID uniqueness is
-the application's contract.
+can craft this), the GUID path returns one of them and which one is
+unspecified — `subdocs()` walks a `HashMap`, so there is no stable "first".
+GUID uniqueness is the application's contract.
 
 Swift surface (on the transaction, mirroring the existing subdoc methods):
 
@@ -65,7 +66,9 @@ This is yrs behaviour, not a choice, but the API docs must say it loudly:
 
 - A parent update contains the subdocument **entry** (GUID, flags), never
   the subdocument's content.
-- A subdocument has its own update stream, state vector, and client ID.
+- A subdocument has its own update stream and state vector. It shares the
+  parent's client ID: yrs assigns it when the transaction that added the
+  subdocument commits (`transaction.rs:1102`), as Yjs does.
 - A provider that persists the parent does not persist the subdocuments.
   Each subdocument needs its own provider; its GUID is a natural
   `documentName`.
@@ -121,7 +124,7 @@ does not expose `DocOptions`. Open question below.
 
 - **FFI ownership.** A wrong ownership model here corrupts memory. The
   mitigation is the clone rule (one box per handle, destroy drops the box)
-  and address-sanitizer runs in CI for the new tests.
+  and an address-sanitizer CI job over the subdocument tests.
 - **Transaction re-entrancy.** Opening a subdocument transaction while the
   parent transaction is open is legal in yrs (different documents), but the
   Swift layer's conflict rules must be tested for the nested case.

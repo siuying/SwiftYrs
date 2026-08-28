@@ -188,9 +188,7 @@ subdocPage.getText('body').insert(0, 'Yjs page body')
 
 const subdocFixture = {
   guid: subdocPage.guid,
-  stateVector: Buffer.from(Y.encodeStateVector(subdocParent)).toString('base64'),
   updateV1: Buffer.from(Y.encodeStateAsUpdate(subdocParent)).toString('base64'),
-  updateV2: Buffer.from(Y.encodeStateAsUpdateV2(subdocParent)).toString('base64'),
   subdocUpdateV1: Buffer.from(Y.encodeStateAsUpdate(subdocPage)).toString('base64')
 }
 

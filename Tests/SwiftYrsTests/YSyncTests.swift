@@ -5,33 +5,8 @@ import SwiftYrs
 private struct YjsSyncFixture: Decodable {
     let multiMessage: Data
 
-    private enum CodingKeys: String, CodingKey {
-        case multiMessage
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let value = try container.decode(String.self, forKey: .multiMessage)
-        guard let data = Data(base64Encoded: value) else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .multiMessage,
-                in: container,
-                debugDescription: "Expected base64-encoded bytes"
-            )
-        }
-        multiMessage = data
-    }
-
     static func load(_ name: String) throws -> YjsSyncFixture {
-        let url = try #require(
-            Bundle.module.url(
-                forResource: name,
-                withExtension: "json",
-                subdirectory: "Fixtures"
-            ) ?? Bundle.module.url(forResource: name, withExtension: "json")
-        )
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(YjsSyncFixture.self, from: data)
+        try loadFixture(name)
     }
 }
 

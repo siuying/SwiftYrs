@@ -135,43 +135,7 @@ struct YjsFixture: Decodable {
     let updateV1: Data
     let updateV2: Data
 
-    private enum CodingKeys: String, CodingKey {
-        case stateVector
-        case updateV1
-        case updateV2
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        stateVector = try Self.decodeBase64(.stateVector, from: container)
-        updateV1 = try Self.decodeBase64(.updateV1, from: container)
-        updateV2 = try Self.decodeBase64(.updateV2, from: container)
-    }
-
     static func load(_ name: String) throws -> YjsFixture {
-        let url = try #require(
-            Bundle.module.url(
-                forResource: name,
-                withExtension: "json",
-                subdirectory: "Fixtures"
-            ) ?? Bundle.module.url(forResource: name, withExtension: "json")
-        )
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(YjsFixture.self, from: data)
-    }
-
-    private static func decodeBase64(
-        _ key: CodingKeys,
-        from container: KeyedDecodingContainer<CodingKeys>
-    ) throws -> Data {
-        let value = try container.decode(String.self, forKey: key)
-        guard let data = Data(base64Encoded: value) else {
-            throw DecodingError.dataCorruptedError(
-                forKey: key,
-                in: container,
-                debugDescription: "Expected base64-encoded bytes"
-            )
-        }
-        return data
+        try loadFixture(name)
     }
 }

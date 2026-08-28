@@ -100,9 +100,10 @@ public final class YDoc: Equatable {
     }
 
     /// Wraps an owned document handle produced by the bridge, such as the boxed
-    /// clone returned for a subdocument (ADR-0024). The handle is released in
-    /// `deinit`; for a subdocument that drops one reference to a shared store,
-    /// never the subdocument's content.
+    /// clone returned for a subdocument (ADR-0024). Every handle owns one
+    /// reference to the document's store and `deinit` drops that reference; the
+    /// store lives while any reference remains, so a handle's lifetime is
+    /// independent of the parent document's.
     init(handle: OpaquePointer) {
         self.handle = handle
     }
@@ -111,9 +112,9 @@ public final class YDoc: Equatable {
         yrs_bridge_doc_client_id(handle)
     }
 
-    /// The document's globally unique identifier. A subdocument keeps its GUID
-    /// across replicas, which makes it the natural key for a provider's
-    /// `documentName`.
+    /// The document's GUID. A subdocument keeps its GUID across replicas, which
+    /// makes it the natural key for a provider's `documentName`. Uniqueness is
+    /// the application's contract, not something the CRDT enforces.
     public var guid: String {
         get throws {
             let data = try readingBuffer { yrs_bridge_doc_guid(handle, &$0) }
