@@ -394,3 +394,49 @@ private func waitUntil(
     }
     #expect(try condition())
 }
+
+@Test
+func providersPersistAParentAndItsSubdocumentInOneStore() throws {
+    let databaseURL = try temporaryDatabaseURL()
+    let store = try SQLiteStore(Connection(databaseURL.path))
+
+    let vault = YDoc()
+    let vaultProvider = SQLiteProvider(documentName: "vault", doc: vault, store: store)
+    try vaultProvider.start()
+
+    let pages = try vault.map(named: "pages")
+    let page = try vault.write { transaction in
+        try transaction.setNewSubdoc(forKey: "home", in: pages)
+    }
+    let pageDoc = try vault.read { transaction in
+        try transaction.subdocDoc(forKey: "home", in: pages)
+    }
+
+    // A subdocument needs its own provider: the parent's updates never carry
+    // its content. Its GUID is the natural document name.
+    let pageProvider = SQLiteProvider(documentName: page.guid, doc: pageDoc, store: store)
+    try pageProvider.start()
+    try insert("page body", into: pageDoc, named: "body")
+
+    pageProvider.destroy()
+    vaultProvider.destroy()
+
+    // Restart: the parent reconstructs the entry, and the subdocument's own
+    // provider reconstructs the content behind it.
+    let reloadedVault = YDoc()
+    let reloadedVaultProvider = SQLiteProvider(documentName: "vault", doc: reloadedVault, store: store)
+    try reloadedVaultProvider.start()
+    defer { reloadedVaultProvider.destroy() }
+
+    let reloadedPages = try reloadedVault.map(named: "pages")
+    let reloadedPage = try reloadedVault.read { transaction in
+        try transaction.subdocDoc(forKey: "home", in: reloadedPages)
+    }
+    #expect(try reloadedPage.guid == page.guid)
+    #expect(try string(in: reloadedPage, named: "body") == "")
+
+    let reloadedPageProvider = SQLiteProvider(documentName: page.guid, doc: reloadedPage, store: store)
+    try reloadedPageProvider.start()
+    defer { reloadedPageProvider.destroy() }
+    #expect(try string(in: reloadedPage, named: "body") == "page body")
+}

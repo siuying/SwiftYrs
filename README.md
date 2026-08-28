@@ -319,6 +319,57 @@ let resolved = try doc.read { txn in
 // resolved.index == 7  (shifted by the 2 inserted chars)
 ```
 
+### Subdocuments
+
+A subdocument is a document nested in a parent's map — the shape behind a
+lazily-loaded wiki page or a folder of notes. `subdocDoc(forKey:in:)` returns
+it as a plain `YDoc`, so every document API applies to it.
+
+```swift
+let vault = YDoc()
+let pages = try vault.map(named: "pages")
+
+// Create the entry; the parent stores a reference (a GUID), not the content.
+let page = try vault.write { txn in
+    try txn.setNewSubdoc(forKey: "home", in: pages)
+}
+
+// Open the subdocument itself, by key or by the GUID you stored.
+let pageDoc = try vault.read { try $0.subdocDoc(forKey: "home", in: pages) }
+let sameDoc = try vault.read { try $0.subdocDoc(guid: page.guid) }
+
+let body = try pageDoc.text(named: "body")
+try pageDoc.write { txn in
+    try txn.insert("Welcome", into: body, at: 0)
+}
+```
+
+A parent's update stream never carries subdocument content. The parent update
+replicates the entry (same GUID on every replica); the body travels in the
+subdocument's own updates, with its own state vector. So each subdocument needs
+its own provider, and its GUID is the natural document name:
+
+```swift
+let store = try SQLiteStore(Connection(path))
+let vaultProvider = SQLiteProvider(documentName: "vault", doc: vault, store: store)
+try vaultProvider.start()
+
+// Lazy open: start the page's provider when the user opens the page,
+// and destroy it when the page closes.
+let pageProvider = SQLiteProvider(documentName: page.guid, doc: pageDoc, store: store)
+try pageProvider.start()
+defer { pageProvider.destroy() }
+```
+
+Two further rules, both inherited from yrs and Yjs:
+
+- `clearSubdoc(forKey:in:)` destroys the instance and fires its destroy
+  observers, but keeps the parent entry as an unloaded reference with the same
+  GUID. A handle held across the clear stays safe to use and to release; writes
+  through it reach nobody.
+- Two replicas that each call `setNewSubdoc` for one logical page create two
+  GUIDs and race on the map key. Create a subdocument once, on one replica.
+
 ### Terminal chat
 
 `ChatExample` is a runnable command-line chat that demonstrates `SwiftYrsWebRTC`
@@ -392,7 +443,7 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | `Y.XmlFragment` | ✅ | ✅ | ✅ | `YXmlFragment` child insert/remove/read |
 | `Y.XmlElement` | ✅ | ✅ | ✅ | `YXmlElement` tag, attributes, children |
 | `Y.XmlText` | ✅ | ✅ | ✅ | `YXmlText` insert/remove/attributes |
-| Subdocuments | ✅ | ✅ | ✅ | Nested `YDoc` via `setNewSubdoc`, `loadSubdoc`, `clearSubdoc` |
+| Subdocuments | ✅ | ✅ | ✅ | `setNewSubdoc`, `subdocDoc(forKey:in:)` / `subdocDoc(guid:)` for the content `YDoc`, `loadSubdoc`, `clearSubdoc`, `subdocGuids` |
 | Observers (callback) | ✅ | ✅ | ✅ | `Observation` token, per-type `.observe(_:)` |
 | Observers (async stream) | ✅ | ✅ | ✅ | `.events()` returns `AsyncStream<YEvent>` |
 | Document update observers | ✅ | ✅ | ✅ | `observeUpdates`, `observeTransactionCleanup`, `observeSubdocs`, `observeDestroy` |

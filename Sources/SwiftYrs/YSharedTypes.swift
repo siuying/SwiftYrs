@@ -43,6 +43,9 @@ public enum YXmlNode: Equatable {
     case text(YXmlText)
 }
 
+/// A reference to a subdocument: the GUID stored in the parent, not a handle to
+/// its content. Use `subdocDoc(forKey:in:)` or `subdocDoc(guid:)` to open the
+/// subdocument itself as a `YDoc` (ADR-0024).
 public struct YSubdoc: Equatable {
     public let guid: String
 }
@@ -251,6 +254,48 @@ extension YReadTransaction {
         try key.withCString { keyPointer in
             let data = try readingBuffer { yrs_bridge_map_get_subdoc_guid(map.handle, handle, keyPointer, &$0) }
             return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
+    /// The subdocument stored at `key` as a full `YDoc`: the same document, not
+    /// a copy, so two handles to one subdocument read each other's writes and
+    /// the handle stays valid after the parent transaction ends.
+    ///
+    /// The parent's update stream never carries subdocument content: a
+    /// subdocument has its own updates, state vector, and client ID, so it
+    /// needs its own provider — its GUID is the natural `documentName`.
+    ///
+    /// - Throws: `YError.typeMismatch` when the key is absent or holds a value
+    ///   that is not a subdocument.
+    public func subdocDoc(forKey key: String, in map: YMap) throws -> YDoc {
+        try key.withCString { keyPointer in
+            var doc: OpaquePointer?
+            try throwIfNeeded(yrs_bridge_map_get_subdoc_doc(map.handle, handle, keyPointer, &doc))
+            guard let doc else {
+                throw YError.nullPointer
+            }
+            return YDoc(handle: doc)
+        }
+    }
+
+    /// The subdocument registered in this document under `guid`, as a full
+    /// `YDoc` — the path for an app that stores GUIDs in its own records and
+    /// opens a subdocument without walking the map.
+    ///
+    /// GUID uniqueness is the application's contract; if two subdocuments share
+    /// a GUID, the first match wins. Two replicas that each call
+    /// `setNewSubdoc(forKey:in:)` for one logical entity create two GUIDs and
+    /// race on the map key, so create a subdocument once, on one replica.
+    ///
+    /// - Throws: `YError.typeMismatch` when no subdocument carries that GUID.
+    public func subdocDoc(guid: String) throws -> YDoc {
+        try guid.withCString { guidPointer in
+            var doc: OpaquePointer?
+            try throwIfNeeded(yrs_bridge_transaction_get_subdoc_doc_by_guid(handle, guidPointer, &doc))
+            guard let doc else {
+                throw YError.nullPointer
+            }
+            return YDoc(handle: doc)
         }
     }
 }
