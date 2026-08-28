@@ -64,7 +64,10 @@ public actor CloudKitProvider {
     private var clientID: UInt64 = 0
     /// The clock through which this session's writes are confirmed sent.
     private var marker: UInt32 = 0
-    private var drainSetManager: DrainSetManager
+    /// The document name, proved at construction to fit a CloudKit record name,
+    /// so no record ID this provider builds can fail (ADR-0025).
+    private let document: CloudKitDocumentKey
+    private let drainSetManager: DrainSetManager
     private let recordQueue: RecordQueue
     private let snapshotWriter: SnapshotWriter
     private var observation: Observation?
@@ -75,21 +78,28 @@ public actor CloudKitProvider {
     /// enqueued, so the existing doc never leaks into a new account (ADR-0023).
     private var suspended = false
 
+    /// - Throws: ``CloudKitRecordCodecError/documentNameTooLong(_:)`` if the
+    ///   name cannot be encoded into a CloudKit record name. Failing here means
+    ///   no later record ID can fail.
     public init(
         documentName: String,
         doc: YDoc,
         store: CloudKitSyncStore,
         options: CloudKitProviderOptions = .default
-    ) {
+    ) throws {
         self.documentName = documentName
+        self.document = try store.codec.documentKey(documentName)
         self.doc = doc
         self.store = store
         self.options = options
         let recordQueue = RecordQueue()
         self.recordQueue = recordQueue
-        self.drainSetManager = DrainSetManager(metadataStore: store.metadataStore, documentName: documentName)
+        self.drainSetManager = DrainSetManager(
+            metadataStore: store.metadataStore,
+            documentName: documentName
+        )
         self.snapshotWriter = SnapshotWriter(
-            documentName: documentName,
+            document: document,
             doc: doc,
             store: store,
             options: options,
@@ -113,7 +123,10 @@ public actor CloudKitProvider {
         guard !destroyed else { throw CloudKitProviderError.destroyed }
         guard !started else { return }
 
-        try store.register(self, documentName: documentName)
+        // Attaching replays everything fetched while this document had no
+        // provider (ADR-0025), before any local capture, so the doc is current
+        // first.
+        try await store.attach(self, documentName: documentName)
         clientID = doc.clientID
 
         // The commit callback fires synchronously on the committing thread, so
@@ -237,25 +250,22 @@ public actor CloudKitProvider {
         toClock: UInt32,
         update: YUpdate
     ) -> CKRecord.ID? {
-        let recordID = store.codec.incrementalRecordID(
-            documentName: documentName,
-            clientID: clientID,
-            fromClock: fromClock,
-            toClock: toClock
-        )
-        guard let record = try? store.codec.encodeIncremental(
-            CloudKitIncrementalRecordPayload(
-                documentName: documentName,
-                clientID: clientID,
-                fromClock: fromClock,
-                toClock: toClock,
-                update: update
+        do {
+            let record = try store.codec.encodeIncremental(
+                CloudKitIncrementalRecordPayload(
+                    documentName: document.name,
+                    clientID: clientID,
+                    fromClock: fromClock,
+                    toClock: toClock,
+                    update: update
+                )
             )
-        ) else {
+            recordQueue.enqueue(record)
+            return record.recordID
+        } catch {
+            errorsContinuation.yield(error)
             return nil
         }
-        recordQueue.enqueue(record)
-        return recordID
     }
 
     // MARK: Compaction / GC (ADR-0023)
@@ -342,7 +352,12 @@ public actor CloudKitProvider {
                 continue
             }
             guard let payload = try? store.codec.decodeIncremental(record) else { continue }
-            snapshotWriter.trackIncremental(payload, recordID: record.recordID)
+            snapshotWriter.trackIncremental(
+                clientID: payload.clientID,
+                fromClock: payload.fromClock,
+                toClock: payload.toClock,
+                byteCount: payload.update.data.count
+            )
             if payload.clientID == clientID {
                 marker = max(marker, payload.toClock)
                 drainSetManager.update(clientID: clientID, marker: marker)
@@ -360,48 +375,52 @@ public actor CloudKitProvider {
         }
     }
 
-    /// Apply remote records to the doc (ADR-0023). Yjs updates are commutative
-    /// and idempotent, so applies are order-independent and safe to retry on
-    /// `transactionConflict`. Deletions are GC of subsumed incrementals — their
-    /// content already lives in the doc/snapshot — so they need no apply.
+    /// Apply remote changes to the doc (ADR-0023), oldest first. The store has
+    /// already decoded and durably spooled them, so this only applies.
+    ///
+    /// Yjs updates are commutative and idempotent, so applies are
+    /// order-independent, safe to retry on `transactionConflict`, and safe to
+    /// replay if a crash loses the store's record of having applied them.
+    /// Deletions are GC of subsumed incrementals — their content already lives
+    /// in the doc or a snapshot — so they need no apply.
     ///
     /// This is echo-safe by construction: capture is client-scoped to *this*
     /// session's clientID, and applying another writer's update never advances
     /// our clientID's clock, so the flush that the apply schedules produces an
     /// empty diff and re-uploads nothing.
-    func handleFetched(modified: [CKRecord], deleted: [CKRecord.ID]) async {
+    func handleFetched(_ changes: [InboundChange]) async {
         var applied = false
-        for record in modified {
-            snapshotWriter.noteFetchedRecord(record)
-            guard let update = decodeUpdate(from: record) else { continue }
-            do {
-                try await applyWithRetry(update)
-                applied = true
-            } catch {
-                errorsContinuation.yield(error)
+        for change in changes {
+            switch change {
+            case let .incremental(clientID, fromClock, toClock, encoding, update):
+                snapshotWriter.trackIncremental(
+                    clientID: clientID,
+                    fromClock: fromClock,
+                    toClock: toClock,
+                    byteCount: update.count
+                )
+                applied = await apply(YUpdate(update, encoding: encoding.encoding)) || applied
+            case let .snapshot(encoding, update, stateVector):
+                snapshotWriter.noteSnapshot(stateVector: YStateVector(stateVector))
+                applied = await apply(YUpdate(update, encoding: encoding.encoding)) || applied
+            case let .deletion(recordName):
+                snapshotWriter.removeKnownIncremental(
+                    CKRecord.ID(recordName: recordName, zoneID: store.codec.zoneID)
+                )
             }
-        }
-        for recordID in deleted {
-            snapshotWriter.removeKnownIncremental(recordID)
         }
         if applied {
             syncedContinuation.yield(true)
         }
     }
 
-    private func decodeUpdate(from record: CKRecord) -> YUpdate? {
+    private func apply(_ update: YUpdate) async -> Bool {
         do {
-            switch record.recordType {
-            case CloudKitRecordType.incremental:
-                return try store.codec.decodeIncremental(record).update
-            case CloudKitRecordType.snapshot:
-                return try store.codec.decodeSnapshot(record).update
-            default:
-                return nil
-            }
+            try await applyWithRetry(update)
+            return true
         } catch {
             errorsContinuation.yield(error)
-            return nil
+            return false
         }
     }
 
@@ -453,7 +472,7 @@ public actor CloudKitProvider {
         self.observation = nil
 
         if wasStarted {
-            store.unregister(documentName: documentName)
+            store.detach(documentName: documentName)
         }
 
         // Foreign-threaded-library rule (CLAUDE.md): release the native handle

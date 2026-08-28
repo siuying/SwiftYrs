@@ -68,7 +68,15 @@ public actor MockCloudKitSyncEngine: CloudKitSyncEngineAdapter {
         var failed: [CloudKitSendFailure] = []
         var stillPending: [CKRecord.ID] = []
 
-        for recordID in pendingSaves {
+        // Take the queues up front: `recordToSave` suspends, so another
+        // provider can enqueue mid-send, and anything it adds must survive to
+        // its own send rather than be overwritten here.
+        let sendingSaves = pendingSaves
+        let sendingDeletes = pendingDeletes
+        pendingSaves = []
+        pendingDeletes = []
+
+        for recordID in sendingSaves {
             if let serverRecord = seededConflicts[recordID] {
                 // Conflict once: hand back the server record and keep the change
                 // pending so a post-merge retry can succeed.
@@ -87,14 +95,13 @@ public actor MockCloudKitSyncEngine: CloudKitSyncEngineAdapter {
             server[recordID] = record
             saved.append(record)
         }
-        pendingSaves = stillPending
+        pendingSaves = stillPending + pendingSaves
 
         var deleted: [CKRecord.ID] = []
-        for recordID in pendingDeletes {
+        for recordID in sendingDeletes {
             server[recordID] = nil
             deleted.append(recordID)
         }
-        pendingDeletes = []
 
         if !saved.isEmpty || !deleted.isEmpty || !failed.isEmpty {
             await handler.handleEvent(.sentChanges(saved: saved, deleted: deleted, failed: failed))

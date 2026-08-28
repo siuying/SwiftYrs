@@ -54,13 +54,10 @@ public final class FileCloudKitMetadataStore: CloudKitMetadataStore, @unchecked 
             .appendingPathComponent(Self.pathComponent(for: key), isDirectory: false)
     }
 
+    /// Document names and keys are arbitrary caller strings, so they are
+    /// encoded rather than used as path components directly.
     private static func pathComponent(for value: String) -> String {
-        let encoded = Data(value.utf8)
-            .base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        return encoded.isEmpty ? "_" : encoded
+        URLSafeBase64.encode(value)
     }
 }
 

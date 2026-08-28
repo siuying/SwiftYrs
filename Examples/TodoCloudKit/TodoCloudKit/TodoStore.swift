@@ -63,11 +63,17 @@ final class TodoStore: ObservableObject {
             let metadataURL = support.appendingPathComponent("cloudkit-metadata", isDirectory: true)
             let ckStore = CloudKitSyncStore(
                 adapter: CKSyncEngineAdapter(containerIdentifier: containerIdentifier),
-                codec: CloudKitRecordCodec(assetDirectory: support.appendingPathComponent("cloudkit-assets")),
+                // One zone holds every document of this store. The app has one
+                // dataset, so it names the zone with a constant; an app with
+                // several would name each zone after its dataset.
+                codec: try CloudKitRecordCodec(
+                    zoneName: "todos",
+                    assetDirectory: support.appendingPathComponent("cloudkit-assets")
+                ),
                 metadataStore: FileCloudKitMetadataStore(directory: metadataURL)
             )
             await ckStore.start()
-            let ckProvider = CloudKitProvider(documentName: documentName, doc: doc, store: ckStore)
+            let ckProvider = try CloudKitProvider(documentName: documentName, doc: doc, store: ckStore)
             try await ckProvider.start()
             self.cloudKitStore = ckStore
             self.cloudKitProvider = ckProvider

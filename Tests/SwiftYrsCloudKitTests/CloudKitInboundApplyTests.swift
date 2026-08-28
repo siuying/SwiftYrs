@@ -12,16 +12,16 @@ private struct Device {
     let provider: CloudKitProvider
     let doc: YDoc
 
-    static func make(documentName: String, clientID: UInt64, maxTransactionRetries: Int = 8) async -> Device {
+    static func make(documentName: String, clientID: UInt64, maxTransactionRetries: Int = 8) async throws -> Device {
         let engine = MockCloudKitSyncEngine()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftyrs-ck-inbound-\(UUID().uuidString)")
-        let codec = CloudKitRecordCodec(assetDirectory: dir)
+        let codec = try CloudKitRecordCodec(zoneName: "test-zone", assetDirectory: dir)
         let metadata = FileCloudKitMetadataStore(directory: dir.appendingPathComponent("meta"))
         let store = CloudKitSyncStore(adapter: engine, codec: codec, metadataStore: metadata)
         await store.start()
         let doc = YDoc(clientID: clientID)
-        let provider = CloudKitProvider(
+        let provider = try CloudKitProvider(
             documentName: documentName,
             doc: doc,
             store: store,
@@ -52,7 +52,7 @@ private func deliver(from source: Device, to destination: Device) async {
 
 @Test
 func remoteRecordsAreAppliedToTheDoc() async throws {
-    let device = await Device.make(documentName: "doc", clientID: 1)
+    let device = try await Device.make(documentName: "doc", clientID: 1)
     try await device.provider.start()
     defer { Task { await device.provider.destroy() } }
 
@@ -76,8 +76,8 @@ func remoteRecordsAreAppliedToTheDoc() async throws {
 
 @Test
 func twoDevicesConvergeThroughPairedMocks() async throws {
-    let a = await Device.make(documentName: "doc", clientID: 1)
-    let b = await Device.make(documentName: "doc", clientID: 2)
+    let a = try await Device.make(documentName: "doc", clientID: 1)
+    let b = try await Device.make(documentName: "doc", clientID: 2)
     try await a.provider.start()
     try await b.provider.start()
     defer { Task { await a.provider.destroy(); await b.provider.destroy() } }
@@ -101,7 +101,7 @@ func twoDevicesConvergeThroughPairedMocks() async throws {
 
 @Test
 func applyingRemoteUpdateDoesNotReUploadIt() async throws {
-    let device = await Device.make(documentName: "doc", clientID: 1)
+    let device = try await Device.make(documentName: "doc", clientID: 1)
     try await device.provider.start()
     defer { Task { await device.provider.destroy() } }
 
@@ -138,7 +138,7 @@ private final class Flag: @unchecked Sendable {
 
 @Test
 func applyRetriesPastAConcurrentWriteTransaction() async throws {
-    let device = await Device.make(documentName: "doc", clientID: 1, maxTransactionRetries: 200)
+    let device = try await Device.make(documentName: "doc", clientID: 1, maxTransactionRetries: 200)
     try await device.provider.start()
     defer { Task { await device.provider.destroy() } }
 
@@ -176,7 +176,7 @@ func applyRetriesPastAConcurrentWriteTransaction() async throws {
 
 @Test
 func applyIsIdempotentWhenSameRecordArrivesTwice() async throws {
-    let device = await Device.make(documentName: "doc", clientID: 1)
+    let device = try await Device.make(documentName: "doc", clientID: 1)
     try await device.provider.start()
     defer { Task { await device.provider.destroy() } }
 

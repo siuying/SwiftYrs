@@ -36,6 +36,17 @@ Every completed row needs Swift API tests. Rows involving encoded updates, state
 | Awareness | Awareness | yes: `yrs::sync::Awareness` and `AwarenessUpdate` | no: no awareness C exports; yffi README table also marks yffi Awareness unsupported | `YAwareness`, `YAwarenessUpdate` | no: the Rust shim exports awareness state/update/event APIs | local/remote states, encode/apply update, events, Yjs awareness fixture | shim-covered |
 | Sync protocol messages | Network provider protocol payloads | yes: `yrs::sync::Protocol`, `Message`, `SyncMessage`, `MessageReader` | no: no y-sync protocol C exports | `YSyncMessage`, `YUpdate`, `YStateVector`, `YAwarenessUpdate` | no: the Rust shim exports typed message encode/decode support | protocol roundtrip, multi-message payloads, Yjs/y-protocols interop fixtures | shim-covered |
 
+## Providers
+
+Providers sit above the binding rather than opposite a y-crdt row, so they are tracked here separately.
+
+| Provider | Transport | Document scope | Removal | Notes |
+| --- | --- | --- | --- | --- |
+| `SQLiteProvider` | Local SQLite append log | One provider per document; many providers share one `SQLiteStore` | `SQLiteStore.removeDocument` | ADR-0022; threshold and manual compaction into a full-state snapshot |
+| `WebRTCProvider` | WebRTC mesh via a signaling server | One document per Room | n/a | ADR-0020/0021 |
+| `HocuspocusProvider` | Hocuspocus WebSocket (y-protocols) | One document per connection | n/a | Authenticated document sync |
+| `CloudKitProvider` | One `CKSyncEngine` per `CloudKitSyncStore` | Many documents in one caller-named zone; providers may start lazily, and fetches for documents without one are spooled and replayed | `removeDocument` (best-effort, registry-driven) and `removeZone` (exact) | ADR-0023/0024/0025; snapshot compaction plus per-writer incrementals |
+
 ## Follow-up Work
 
 - Do not expose YArray move in the initial Swift API. The local README claims support, but the current checkout explicitly removed the feature in commit `2d52291` after earlier `move_to`/`yarray_move` implementations existed. Revisit only if upstream restores it or this project intentionally takes on move semantics as new Rust work.

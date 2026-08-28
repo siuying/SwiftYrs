@@ -1,59 +1,68 @@
 #if canImport(CloudKit)
 import Foundation
 
-struct DrainSetManager {
-    private let metadataStore: CloudKitMetadataStore
-    private let documentName: String
-    private(set) var drainSet: [UInt64: UInt32] = [:]
+/// The per-document open-clientID drain set `{clientID: fromClock}` (ADR-0024),
+/// persisted as JSON with string keys because a `UInt64`-keyed dictionary would
+/// otherwise encode as a flat array.
+struct DrainSet: Codable, Equatable, Sendable {
+    var clocks: [UInt64: UInt32]
 
-    init(metadataStore: CloudKitMetadataStore, documentName: String) {
-        self.metadataStore = metadataStore
-        self.documentName = documentName
+    init(clocks: [UInt64: UInt32] = [:]) {
+        self.clocks = clocks
     }
 
-    @discardableResult
-    mutating func load() -> [UInt64: UInt32] {
-        guard let data = try? metadataStore.data(
-            forKey: CloudKitSyncStateKeys.drainSet,
-            documentName: documentName
-        ), let decoded = try? DrainSetCodec.decode(data) else {
-            drainSet = [:]
-            return drainSet
+    init(from decoder: any Decoder) throws {
+        let stringKeyed = try decoder.singleValueContainer().decode([String: UInt32].self)
+        clocks = [:]
+        for (key, value) in stringKeyed {
+            guard let clientID = UInt64(key) else { continue }
+            clocks[clientID] = value
         }
-        drainSet = decoded
-        return drainSet
     }
 
-    mutating func replace(with drainSet: [UInt64: UInt32]) {
-        self.drainSet = drainSet
-        persist()
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(Dictionary(uniqueKeysWithValues: clocks.map { (String($0.key), $0.value) }))
     }
+}
 
-    mutating func update(clientID: UInt64, marker: UInt32) {
-        drainSet[clientID] = marker
-        persist()
-    }
+/// Reads and writes one document's drain set (ADR-0024). Which sessions still
+/// have unconfirmed edits is durable state, so every mutation writes through.
+struct DrainSetManager: Sendable {
+    private let persisted: PersistedValue<DrainSet>
 
-    mutating func retire(clientID: UInt64) {
-        drainSet[clientID] = nil
-        persist()
-    }
-
-    mutating func clear() {
-        drainSet.removeAll()
-        try? metadataStore.removeData(
-            forKey: CloudKitSyncStateKeys.drainSet,
-            documentName: documentName
+    init(
+        metadataStore: CloudKitMetadataStore,
+        documentName: String,
+        reportError: @escaping @Sendable (Error) -> Void = { _ in }
+    ) {
+        self.persisted = PersistedValue(
+            metadataStore: metadataStore,
+            key: CloudKitSyncStateKeys.drainSet,
+            documentName: documentName,
+            empty: DrainSet(),
+            reportError: reportError
         )
     }
 
-    func persist() {
-        guard let data = try? DrainSetCodec.encode(drainSet) else { return }
-        try? metadataStore.set(
-            data,
-            forKey: CloudKitSyncStateKeys.drainSet,
-            documentName: documentName
-        )
+    func load() -> [UInt64: UInt32] {
+        persisted.load().clocks
+    }
+
+    func replace(with clocks: [UInt64: UInt32]) {
+        persisted.store(DrainSet(clocks: clocks))
+    }
+
+    func update(clientID: UInt64, marker: UInt32) {
+        persisted.mutate { $0.clocks[clientID] = marker }
+    }
+
+    func retire(clientID: UInt64) {
+        persisted.mutate { $0.clocks[clientID] = nil }
+    }
+
+    func clear() {
+        persisted.clear()
     }
 }
 #endif

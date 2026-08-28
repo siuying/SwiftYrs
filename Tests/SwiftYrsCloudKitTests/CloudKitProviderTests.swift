@@ -17,11 +17,11 @@ private struct Harness {
     let store: CloudKitSyncStore
     let codec: CloudKitRecordCodec
 
-    static func make() async -> Harness {
+    static func make() async throws -> Harness {
         let engine = MockCloudKitSyncEngine()
         let assetDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftyrs-cloudkit-tests-\(UUID().uuidString)")
-        let codec = CloudKitRecordCodec(assetDirectory: assetDir)
+        let codec = try CloudKitRecordCodec(zoneName: "test-zone", assetDirectory: assetDir)
         let metadata = FileCloudKitMetadataStore(directory: assetDir.appendingPathComponent("meta"))
         let store = CloudKitSyncStore(adapter: engine, codec: codec, metadataStore: metadata)
         await store.start()
@@ -34,9 +34,9 @@ private func makeProvider(
     documentName: String = "doc",
     clientID: UInt64 = 7,
     debounce: Duration = .milliseconds(20)
-) -> (CloudKitProvider, YDoc) {
+) throws -> (CloudKitProvider, YDoc) {
     let doc = YDoc(clientID: clientID)
-    let provider = CloudKitProvider(
+    let provider = try CloudKitProvider(
         documentName: documentName,
         doc: doc,
         store: harness.store,
@@ -65,8 +65,8 @@ private func waitUntil(
 
 @Test
 func docEditEnqueuesIncrementalRecordAfterDebounce() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness)
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness)
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -76,7 +76,7 @@ func docEditEnqueuesIncrementalRecordAfterDebounce() async throws {
     #expect(saved)
 
     let recordID = harness.codec.incrementalRecordID(
-        documentName: "doc",
+        try harness.codec.documentKey("doc"),
         clientID: 7,
         fromClock: 0,
         toClock: try doc.clientClock(clientID: 7)
@@ -95,8 +95,8 @@ func docEditEnqueuesIncrementalRecordAfterDebounce() async throws {
 
 @Test
 func manualFlushCapturesWithoutWaitingForDebounce() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness, debounce: .seconds(600))
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness, debounce: .seconds(600))
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -108,8 +108,8 @@ func manualFlushCapturesWithoutWaitingForDebounce() async throws {
 
 @Test
 func backgroundFlushCapturesPendingEdits() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness, debounce: .seconds(600))
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness, debounce: .seconds(600))
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -121,8 +121,8 @@ func backgroundFlushCapturesPendingEdits() async throws {
 
 @Test
 func markerAdvancesSoSecondFlushShipsOnlyNewEdits() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness, debounce: .seconds(600))
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness, debounce: .seconds(600))
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -136,7 +136,7 @@ func markerAdvancesSoSecondFlushShipsOnlyNewEdits() async throws {
 
     // The second incremental starts where the first left off (no re-ship).
     let secondID = harness.codec.incrementalRecordID(
-        documentName: "doc",
+        try harness.codec.documentKey("doc"),
         clientID: 7,
         fromClock: afterFirst,
         toClock: try doc.clientClock(clientID: 7)
@@ -146,8 +146,8 @@ func markerAdvancesSoSecondFlushShipsOnlyNewEdits() async throws {
 
 @Test
 func syncedStreamEmitsOnStartAndAfterFlush() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness, debounce: .seconds(600))
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness, debounce: .seconds(600))
 
     var iterator = provider.synced.makeAsyncIterator()
     try await provider.start()
@@ -162,14 +162,14 @@ func syncedStreamEmitsOnStartAndAfterFlush() async throws {
 
 @Test
 func errorsStreamEmitsOnSendFailure() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness, debounce: .seconds(600))
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness, debounce: .seconds(600))
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
     try insert("z", into: doc)
     let recordID = harness.codec.incrementalRecordID(
-        documentName: "doc",
+        try harness.codec.documentKey("doc"),
         clientID: 7,
         fromClock: 0,
         toClock: try doc.clientClock(clientID: 7)
@@ -186,10 +186,10 @@ func errorsStreamEmitsOnSendFailure() async throws {
 
 @Test
 func concurrentAppWriteResolvesViaRetry() async throws {
-    let harness = await Harness.make()
+    let harness = try await Harness.make()
     let doc = YDoc(clientID: 7)
     // Generous retry budget so the capture reliably outlasts the held write.
-    let provider = CloudKitProvider(
+    let provider = try CloudKitProvider(
         documentName: "doc",
         doc: doc,
         store: harness.store,
@@ -220,8 +220,8 @@ func concurrentAppWriteResolvesViaRetry() async throws {
 
 @Test
 func destroyStopsIngressSoLaterEditsDoNotEnqueue() async throws {
-    let harness = await Harness.make()
-    let (provider, doc) = makeProvider(harness, debounce: .milliseconds(20))
+    let harness = try await Harness.make()
+    let (provider, doc) = try makeProvider(harness, debounce: .milliseconds(20))
     try await provider.start()
 
     await provider.destroy()
@@ -234,9 +234,9 @@ func destroyStopsIngressSoLaterEditsDoNotEnqueue() async throws {
 
 @Test
 func duplicateProviderForSameDocumentIsRejected() async throws {
-    let harness = await Harness.make()
-    let (first, _) = makeProvider(harness, documentName: "dup")
-    let (second, _) = makeProvider(harness, documentName: "dup")
+    let harness = try await Harness.make()
+    let (first, _) = try makeProvider(harness, documentName: "dup")
+    let (second, _) = try makeProvider(harness, documentName: "dup")
     try await first.start()
     defer { Task { await first.destroy() } }
 

@@ -10,11 +10,11 @@ private struct CompactionHarness {
     let store: CloudKitSyncStore
     let codec: CloudKitRecordCodec
 
-    static func make() async -> CompactionHarness {
+    static func make() async throws -> CompactionHarness {
         let engine = MockCloudKitSyncEngine()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftyrs-ck-compaction-\(UUID().uuidString)")
-        let codec = CloudKitRecordCodec(assetDirectory: dir.appendingPathComponent("assets"))
+        let codec = try CloudKitRecordCodec(zoneName: "test-zone", assetDirectory: dir.appendingPathComponent("assets"))
         let metadata = FileCloudKitMetadataStore(directory: dir.appendingPathComponent("meta"))
         let store = CloudKitSyncStore(adapter: engine, codec: codec, metadataStore: metadata)
         await store.start()
@@ -24,9 +24,9 @@ private struct CompactionHarness {
     func provider(
         clientID: UInt64,
         options: CloudKitProviderOptions
-    ) -> (CloudKitProvider, YDoc) {
+    ) throws -> (CloudKitProvider, YDoc) {
         let doc = YDoc(clientID: clientID)
-        let provider = CloudKitProvider(documentName: "doc", doc: doc, store: store, options: options)
+        let provider = try CloudKitProvider(documentName: "doc", doc: doc, store: store, options: options)
         return (provider, doc)
     }
 }
@@ -59,19 +59,19 @@ private func bodyText(_ doc: YDoc) throws -> String {
 
 @Test
 func thresholdTripsCompactionWritingSnapshotAndGCingSubsumedIncremental() async throws {
-    let h = await CompactionHarness.make()
-    let (provider, doc) = h.provider(clientID: 7, options: compactAfterFirstIncremental())
+    let h = try await CompactionHarness.make()
+    let (provider, doc) = try h.provider(clientID: 7, options: compactAfterFirstIncremental())
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
     try insert("hello", into: doc)
     let incrementalID = h.codec.incrementalRecordID(
-        documentName: "doc", clientID: 7, fromClock: 0, toClock: try doc.clientClock(clientID: 7)
+        try h.codec.documentKey("doc"), clientID: 7, fromClock: 0, toClock: try doc.clientClock(clientID: 7)
     )
     try await provider.flush()
 
     // The full-state snapshot was written with a stored state vector...
-    let snapshotID = h.codec.snapshotRecordID(documentName: "doc")
+    let snapshotID = h.codec.snapshotRecordID(try h.codec.documentKey("doc"))
     let snapshotRecord = try #require(await h.engine.serverRecord(for: snapshotID))
     let snapshot = try h.codec.decodeSnapshot(snapshotRecord)
     #expect(!snapshot.stateVector.data.isEmpty)
@@ -85,8 +85,8 @@ func thresholdTripsCompactionWritingSnapshotAndGCingSubsumedIncremental() async 
 
 @Test
 func incrementalAuthoredAfterSnapshotIsRetained() async throws {
-    let h = await CompactionHarness.make()
-    let (provider, doc) = h.provider(clientID: 7, options: neverAutoCompact())
+    let h = try await CompactionHarness.make()
+    let (provider, doc) = try h.provider(clientID: 7, options: neverAutoCompact())
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -97,19 +97,19 @@ func incrementalAuthoredAfterSnapshotIsRetained() async throws {
     // A new edit after the snapshot.
     try insert("b", into: doc)
     let secondID = h.codec.incrementalRecordID(
-        documentName: "doc", clientID: 7, fromClock: try doc.clientClock(clientID: 7) - 1,
+        try h.codec.documentKey("doc"), clientID: 7, fromClock: try doc.clientClock(clientID: 7) - 1,
         toClock: try doc.clientClock(clientID: 7)
     )
     try await provider.flush()
 
     // The post-snapshot incremental is retained (no compaction ran for it).
     #expect(await h.engine.serverRecord(for: secondID) != nil)
-    #expect(await h.engine.serverRecord(for: h.codec.snapshotRecordID(documentName: "doc")) != nil)
+    #expect(await h.engine.serverRecord(for: h.codec.snapshotRecordID(try h.codec.documentKey("doc"))) != nil)
 }
 
 @Test
 func subsumedIncrementalIsNotDeletedUntilSnapshotIsConfirmed() async throws {
-    let h = await CompactionHarness.make()
+    let h = try await CompactionHarness.make()
     // Only one snapshot attempt: a seeded conflict means it never confirms.
     let options = CloudKitProviderOptions(
         debounce: .seconds(600),
@@ -117,7 +117,7 @@ func subsumedIncrementalIsNotDeletedUntilSnapshotIsConfirmed() async throws {
         jitter: { 0 },
         maxSnapshotRetries: 1
     )
-    let (provider, doc) = h.provider(clientID: 7, options: options)
+    let (provider, doc) = try h.provider(clientID: 7, options: options)
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -128,11 +128,11 @@ func subsumedIncrementalIsNotDeletedUntilSnapshotIsConfirmed() async throws {
             stateVector: try YDoc().stateVector()
         )
     )
-    await h.engine.seedConflict(for: h.codec.snapshotRecordID(documentName: "doc"), serverRecord: serverSnapshot)
+    await h.engine.seedConflict(for: h.codec.snapshotRecordID(try h.codec.documentKey("doc")), serverRecord: serverSnapshot)
 
     try insert("hello", into: doc)
     let incrementalID = h.codec.incrementalRecordID(
-        documentName: "doc", clientID: 7, fromClock: 0, toClock: try doc.clientClock(clientID: 7)
+        try h.codec.documentKey("doc"), clientID: 7, fromClock: 0, toClock: try doc.clientClock(clientID: 7)
     )
     try await provider.flush() // compaction attempt conflicts and gives up
 
@@ -142,8 +142,8 @@ func subsumedIncrementalIsNotDeletedUntilSnapshotIsConfirmed() async throws {
 
 @Test
 func serverRecordChangedMergesAndConverges() async throws {
-    let h = await CompactionHarness.make()
-    let (provider, doc) = h.provider(clientID: 7, options: neverAutoCompact())
+    let h = try await CompactionHarness.make()
+    let (provider, doc) = try h.provider(clientID: 7, options: neverAutoCompact())
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
@@ -160,7 +160,7 @@ func serverRecordChangedMergesAndConverges() async throws {
             stateVector: try serverDoc.stateVector()
         )
     )
-    await h.engine.seedConflict(for: h.codec.snapshotRecordID(documentName: "doc"), serverRecord: serverSnapshot)
+    await h.engine.seedConflict(for: h.codec.snapshotRecordID(try h.codec.documentKey("doc")), serverRecord: serverSnapshot)
 
     await provider.compact()
 
@@ -168,7 +168,7 @@ func serverRecordChangedMergesAndConverges() async throws {
     // holds both writers' content and the merged snapshot is saved.
     #expect(try bodyText(doc).contains("local"))
     #expect(try bodyText(doc).contains("server"))
-    let savedSnapshot = try #require(await h.engine.serverRecord(for: h.codec.snapshotRecordID(documentName: "doc")))
+    let savedSnapshot = try #require(await h.engine.serverRecord(for: h.codec.snapshotRecordID(try h.codec.documentKey("doc"))))
     let merged = try h.codec.decodeSnapshot(savedSnapshot)
     let check = YDoc()
     try check.apply(merged.update)
@@ -178,18 +178,18 @@ func serverRecordChangedMergesAndConverges() async throws {
 
 @Test
 func jitterDelaysCompactionToStaggerTheHerd() async throws {
-    let h = await CompactionHarness.make()
+    let h = try await CompactionHarness.make()
     // Threshold 1, but fully-jittered effective threshold is 2.
     let options = CloudKitProviderOptions(
         debounce: .seconds(600),
         compaction: CompactionPolicy(incrementalCountThreshold: 1, incrementalByteThreshold: .max, jitterFraction: 1.0),
         jitter: { 1.0 }
     )
-    let (provider, doc) = h.provider(clientID: 7, options: options)
+    let (provider, doc) = try h.provider(clientID: 7, options: options)
     try await provider.start()
     defer { Task { await provider.destroy() } }
 
-    let snapshotID = h.codec.snapshotRecordID(documentName: "doc")
+    let snapshotID = h.codec.snapshotRecordID(try h.codec.documentKey("doc"))
 
     try insert("a", into: doc)
     try await provider.flush()
