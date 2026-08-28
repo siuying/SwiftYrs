@@ -29,11 +29,7 @@ private struct Lib0AnyFixture: Decodable {
     let cases: [Case]
 
     static func load() throws -> Lib0AnyFixture {
-        let url = try #require(
-            Bundle.module.url(forResource: "lib0-any", withExtension: "json", subdirectory: "Fixtures")
-                ?? Bundle.module.url(forResource: "lib0-any", withExtension: "json")
-        )
-        return try JSONDecoder().decode(Lib0AnyFixture.self, from: Data(contentsOf: url))
+        try loadFixture("lib0-any")
     }
 }
 

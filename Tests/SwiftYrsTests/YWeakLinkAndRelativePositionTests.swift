@@ -343,38 +343,16 @@ private struct YjsRelativePositionFixture: Decodable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        updateV1 = try Self.decodeBase64(.updateV1, from: container)
-        relativePositionV1 = try Self.decodeBase64(.relativePositionV1, from: container)
+        updateV1 = try container.decode(Data.self, forKey: .updateV1)
+        relativePositionV1 = try container.decode(Data.self, forKey: .relativePositionV1)
         let jsonObject = try container.decode([String: RelativePositionJSONValue].self, forKey: .relativePositionJSON)
         relativePositionJSON = try JSONEncoder().encode(jsonObject)
     }
 
     static func load(_ name: String) throws -> YjsRelativePositionFixture {
-        let url = try #require(
-            Bundle.module.url(
-                forResource: name,
-                withExtension: "json",
-                subdirectory: "Fixtures"
-            ) ?? Bundle.module.url(forResource: name, withExtension: "json")
-        )
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(YjsRelativePositionFixture.self, from: data)
+        try loadFixture(name)
     }
 
-    private static func decodeBase64(
-        _ key: CodingKeys,
-        from container: KeyedDecodingContainer<CodingKeys>
-    ) throws -> Data {
-        let value = try container.decode(String.self, forKey: key)
-        guard let data = Data(base64Encoded: value) else {
-            throw DecodingError.dataCorruptedError(
-                forKey: key,
-                in: container,
-                debugDescription: "Expected base64-encoded bytes"
-            )
-        }
-        return data
-    }
 }
 
 private enum RelativePositionJSONValue: Codable {

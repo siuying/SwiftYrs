@@ -5,33 +5,8 @@ import SwiftYrs
 private struct YjsAwarenessFixture: Decodable {
     let update: Data
 
-    private enum CodingKeys: String, CodingKey {
-        case update
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let value = try container.decode(String.self, forKey: .update)
-        guard let data = Data(base64Encoded: value) else {
-            throw DecodingError.dataCorruptedError(
-                forKey: .update,
-                in: container,
-                debugDescription: "Expected base64-encoded bytes"
-            )
-        }
-        update = data
-    }
-
     static func load(_ name: String) throws -> YjsAwarenessFixture {
-        let url = try #require(
-            Bundle.module.url(
-                forResource: name,
-                withExtension: "json",
-                subdirectory: "Fixtures"
-            ) ?? Bundle.module.url(forResource: name, withExtension: "json")
-        )
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(YjsAwarenessFixture.self, from: data)
+        try loadFixture(name)
     }
 }
 

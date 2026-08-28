@@ -46,8 +46,9 @@ It doubles the API for no safety gain; the handle IS a document.
 
 Both return `YRS_BRIDGE_ERR_TYPE_MISMATCH` when the key or GUID does not
 name a subdocument. When two subdocuments share one GUID (a remote update
-can craft this), the GUID path returns the first match; GUID uniqueness is
-the application's contract.
+can craft this), the GUID path returns one of them and which one is
+unspecified — `subdocs()` walks a `HashMap`, so there is no stable "first".
+GUID uniqueness is the application's contract.
 
 Swift surface (on the transaction, mirroring the existing subdoc methods):
 

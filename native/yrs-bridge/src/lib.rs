@@ -34,7 +34,7 @@ fn yjs_compatible_options() -> Options {
     options
 }
 
-fn new_doc() -> Doc {
+pub(crate) fn new_doc() -> Doc {
     Doc::with_options(yjs_compatible_options())
 }
 
@@ -44,13 +44,15 @@ fn new_doc_with_client_id(client_id: u64) -> Doc {
     Doc::with_options(options)
 }
 
-const YRS_BRIDGE_OK: i32 = 0;
-const YRS_BRIDGE_ERR_NULL_POINTER: i32 = 1;
-const YRS_BRIDGE_ERR_TRANSACTION_CONFLICT: i32 = 2;
-const YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION: i32 = 3;
-const YRS_BRIDGE_ERR_DECODE: i32 = 4;
-const YRS_BRIDGE_ERR_NATIVE_PANIC: i32 = 5;
-const YRS_BRIDGE_ERR_TYPE_MISMATCH: i32 = 6;
+mod subdocuments;
+
+pub(crate) const YRS_BRIDGE_OK: i32 = 0;
+pub(crate) const YRS_BRIDGE_ERR_NULL_POINTER: i32 = 1;
+pub(crate) const YRS_BRIDGE_ERR_TRANSACTION_CONFLICT: i32 = 2;
+pub(crate) const YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION: i32 = 3;
+pub(crate) const YRS_BRIDGE_ERR_DECODE: i32 = 4;
+pub(crate) const YRS_BRIDGE_ERR_NATIVE_PANIC: i32 = 5;
+pub(crate) const YRS_BRIDGE_ERR_TYPE_MISMATCH: i32 = 6;
 
 const YRS_BRIDGE_VALUE_UNDEFINED: i32 = 0;
 const YRS_BRIDGE_VALUE_NULL: i32 = 1;
@@ -138,11 +140,11 @@ impl ReadTxn for YrsBridgeTransaction {
     }
 }
 
-fn ffi_boundary(work: impl FnOnce() -> i32) -> i32 {
+pub(crate) fn ffi_boundary(work: impl FnOnce() -> i32) -> i32 {
     catch_unwind(AssertUnwindSafe(work)).unwrap_or(YRS_BRIDGE_ERR_NATIVE_PANIC)
 }
 
-fn write_buffer(bytes: Vec<u8>, out: *mut YrsBridgeBuffer) -> i32 {
+pub(crate) fn write_buffer(bytes: Vec<u8>, out: *mut YrsBridgeBuffer) -> i32 {
     if out.is_null() {
         return YRS_BRIDGE_ERR_NULL_POINTER;
     }
@@ -468,7 +470,7 @@ fn input_from_json(value: serde_json::Value) -> Result<In, i32> {
     }
 }
 
-unsafe fn read_name(name: *const c_char) -> Result<String, i32> {
+pub(crate) unsafe fn read_name(name: *const c_char) -> Result<String, i32> {
     if name.is_null() {
         Err(YRS_BRIDGE_ERR_NULL_POINTER)
     } else {
@@ -584,7 +586,7 @@ fn output_value(value: Out) -> YrsBridgeValue {
     }
 }
 
-trait BranchPointable {
+pub(crate) trait BranchPointable {
     fn into_raw_branch(self) -> *mut Branch;
     fn from_raw_branch(branch: *const Branch) -> Self;
 }
@@ -2146,188 +2148,6 @@ pub unsafe extern "C" fn yrs_bridge_xml_text_delta_json(
             .map(plain_json_from_diff)
             .collect();
         match serde_json::to_vec(&ops) {
-            Ok(bytes) => write_buffer(bytes, out),
-            Err(_) => YRS_BRIDGE_ERR_DECODE,
-        }
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc(
-    map: *mut Branch,
-    transaction: *mut YrsBridgeTransaction,
-    key: *const c_char,
-    guid_out: *mut YrsBridgeBuffer,
-) -> i32 {
-    ffi_boundary(|| {
-        if map.is_null() || transaction.is_null() || key.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let key = match read_name(key) {
-            Ok(key) => key,
-            Err(code) => return code,
-        };
-        let Some(transaction) = (*transaction).as_write_mut() else {
-            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
-        };
-        let subdoc = MapRef::from_raw_branch(map).insert(transaction, key, new_doc());
-        write_buffer(subdoc.guid().to_string().into_bytes(), guid_out)
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_map_get_subdoc_guid(
-    map: *mut Branch,
-    transaction: *mut YrsBridgeTransaction,
-    key: *const c_char,
-    out: *mut YrsBridgeBuffer,
-) -> i32 {
-    ffi_boundary(|| {
-        if map.is_null() || transaction.is_null() || key.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let key = match read_name(key) {
-            Ok(key) => key,
-            Err(code) => return code,
-        };
-        let Some(value) = MapRef::from_raw_branch(map).get(&*transaction, &key) else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        let Ok(subdoc) = value.cast::<Doc>() else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        write_buffer(subdoc.guid().to_string().into_bytes(), out)
-    })
-}
-
-/// Returns the subdocument stored at `key` as an owned document handle: a
-/// boxed clone of the subdocument's `Doc`, sharing one store with the parent's
-/// entry (see ADR-0024). The caller releases it with `yrs_bridge_doc_destroy`,
-/// in any order relative to the parent.
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_map_get_subdoc_doc(
-    map: *mut Branch,
-    transaction: *mut YrsBridgeTransaction,
-    key: *const c_char,
-    doc_out: *mut *mut Doc,
-) -> i32 {
-    ffi_boundary(|| {
-        if map.is_null() || transaction.is_null() || key.is_null() || doc_out.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let key = match read_name(key) {
-            Ok(key) => key,
-            Err(code) => return code,
-        };
-        let Some(value) = MapRef::from_raw_branch(map).get(&*transaction, &key) else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        let Ok(subdoc) = value.cast::<Doc>() else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        *doc_out = Box::into_raw(Box::new(subdoc));
-        YRS_BRIDGE_OK
-    })
-}
-
-/// Returns the subdocument registered in this document tree under `guid` as an
-/// owned document handle. GUID uniqueness is the application's contract: when
-/// two subdocuments share a GUID, the first match wins.
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_transaction_get_subdoc_doc_by_guid(
-    transaction: *mut YrsBridgeTransaction,
-    guid: *const c_char,
-    doc_out: *mut *mut Doc,
-) -> i32 {
-    ffi_boundary(|| {
-        if transaction.is_null() || guid.is_null() || doc_out.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let guid = match read_name(guid) {
-            Ok(guid) => guid,
-            Err(code) => return code,
-        };
-        let Some(subdoc) = (*transaction)
-            .subdocs()
-            .find(|subdoc| subdoc.guid().as_ref() == guid.as_str())
-        else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        *doc_out = Box::into_raw(Box::new(subdoc.clone()));
-        YRS_BRIDGE_OK
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_map_load_subdoc(
-    map: *mut Branch,
-    transaction: *mut YrsBridgeTransaction,
-    key: *const c_char,
-) -> i32 {
-    ffi_boundary(|| {
-        if map.is_null() || transaction.is_null() || key.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let key = match read_name(key) {
-            Ok(key) => key,
-            Err(code) => return code,
-        };
-        let Some(value) = MapRef::from_raw_branch(map).get(&*transaction, &key) else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        let Ok(subdoc) = value.cast::<Doc>() else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        let Some(transaction) = (*transaction).as_write_mut() else {
-            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
-        };
-        subdoc.load(transaction);
-        YRS_BRIDGE_OK
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_map_clear_subdoc(
-    map: *mut Branch,
-    transaction: *mut YrsBridgeTransaction,
-    key: *const c_char,
-) -> i32 {
-    ffi_boundary(|| {
-        if map.is_null() || transaction.is_null() || key.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let key = match read_name(key) {
-            Ok(key) => key,
-            Err(code) => return code,
-        };
-        let Some(value) = MapRef::from_raw_branch(map).get(&*transaction, &key) else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        let Ok(subdoc) = value.cast::<Doc>() else {
-            return YRS_BRIDGE_ERR_TYPE_MISMATCH;
-        };
-        let Some(transaction) = (*transaction).as_write_mut() else {
-            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
-        };
-        subdoc.destroy(Some(transaction));
-        YRS_BRIDGE_OK
-    })
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_transaction_subdoc_guids(
-    transaction: *mut YrsBridgeTransaction,
-    out: *mut YrsBridgeBuffer,
-) -> i32 {
-    ffi_boundary(|| {
-        if transaction.is_null() {
-            return YRS_BRIDGE_ERR_NULL_POINTER;
-        }
-        let guids: Vec<_> = (*transaction)
-            .subdoc_guids()
-            .map(|guid| guid.to_string())
-            .collect();
-        match serde_json::to_vec(&guids) {
             Ok(bytes) => write_buffer(bytes, out),
             Err(_) => YRS_BRIDGE_ERR_DECODE,
         }

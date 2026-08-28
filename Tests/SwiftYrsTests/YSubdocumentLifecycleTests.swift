@@ -209,6 +209,24 @@ func subdocumentHandleOutlivesItsParentDocument() throws {
     }
     try #expect(clearedSubdoc.read { try $0.string(from: clearedBody) } == "detached")
 
+    // And the reverse order: the handle goes away first, the parent's entry
+    // stays usable.
+    let parent = YDoc()
+    let parentMap = try parent.map(named: "pages")
+    let created = try parent.write { transaction in
+        try transaction.setNewSubdoc(forKey: "home", in: parentMap)
+    }
+    var released: YDoc? = try parent.read { try $0.subdocDoc(forKey: "home", in: parentMap) }
+    let releasedBody = try #require(released).text(named: "body")
+    try #require(released).write { transaction in
+        try transaction.insert("kept", into: releasedBody, at: 0)
+    }
+    released = nil
+    let reopened = try parent.read { try $0.subdocDoc(forKey: "home", in: parentMap) }
+    try #expect(reopened.guid == created.guid)
+    let reopenedBody = try reopened.text(named: "body")
+    try #expect(reopened.read { try $0.string(from: reopenedBody) } == "kept")
+
     let subdoc = try makeHandle(clearFirst: false)
     let body = try subdoc.text(named: "body")
     try subdoc.write { transaction in
