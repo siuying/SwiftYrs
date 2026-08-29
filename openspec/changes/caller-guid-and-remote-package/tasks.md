@@ -21,5 +21,5 @@
 ## 4. Verification and release
 
 - [ ] 4.1 Run Swift, Rust, fixture, and clean-consumer tests; resolve failures
-- [ ] 4.2 Request and address code review findings
+- [x] 4.2 Request and address code review findings
 - [ ] 4.3 Build the final XCFramework, set the `v0.6.0` URL/checksum, create and publish the release tag and assets
