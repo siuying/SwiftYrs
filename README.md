@@ -87,6 +87,10 @@ let package = Package(
 )
 ```
 
+Apple consumers download the tagged XCFramework from GitHub. Contributors can
+build locally and set `SWIFTYRS_USE_LOCAL_ARTIFACT=1` to use
+`Artifacts/YrsBridge.xcframework` instead.
+
 Or in Xcode: **File → Add Package Dependencies** and enter the repository URL.
 
 ### Build from source (contributors)
@@ -328,10 +332,11 @@ it as a plain `YDoc`, so every document API applies to it.
 ```swift
 let vault = YDoc()
 let pages = try vault.map(named: "pages")
+let pageID = UUID().uuidString
 
 // Create the entry; the parent stores a reference (a GUID), not the content.
 let page = try vault.write { txn in
-    try txn.setNewSubdoc(forKey: "home", in: pages)
+    try txn.setNewSubdoc(guid: pageID.uuidString, forKey: "home", in: pages)
 }
 
 // Open the subdocument itself, by key or by the GUID you stored.
@@ -496,7 +501,7 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | `Y.XmlFragment` | ✅ | ✅ | ✅ | `YXmlFragment` child insert/remove/read |
 | `Y.XmlElement` | ✅ | ✅ | ✅ | `YXmlElement` tag, attributes, children |
 | `Y.XmlText` | ✅ | ✅ | ✅ | `YXmlText` insert/remove/attributes |
-| Subdocuments | ✅ | ✅ | ✅ | `setNewSubdoc`, `subdocDoc(forKey:in:)` / `subdocDoc(guid:)` for the content `YDoc`, `loadSubdoc`, `clearSubdoc`, `subdocGuids` |
+| Subdocuments | ✅ | ✅ | ✅ | `setNewSubdoc(guid:forKey:in:)` or auto-GUID `setNewSubdoc`, `subdocDoc(forKey:in:)` / `subdocDoc(guid:)`, `loadSubdoc`, `clearSubdoc`, `subdocGuids` |
 | Observers (callback) | ✅ | ✅ | ✅ | `Observation` token, per-type `.observe(_:)` |
 | Observers (async stream) | ✅ | ✅ | ✅ | `.events()` returns `AsyncStream<YEvent>` |
 | Document update observers | ✅ | ✅ | ✅ | `observeUpdates`, `observeTransactionCleanup`, `observeSubdocs`, `observeDestroy` |
@@ -549,7 +554,11 @@ node scripts/generate-yjs-fixtures.mjs
 scripts/package-binary-artifact.sh
 ```
 
-This writes `Artifacts/YrsBridge.xcframework.zip` and its SwiftPM checksum. Upload both to the GitHub release and update the `binaryTarget` URL in the release `Package.swift`.
+This writes `Artifacts/YrsBridge.xcframework.zip` and its SwiftPM checksum.
+Run `scripts/release-binary-artifact.sh 0.6.0` before creating the tag; it
+updates the URL and checksum in `Package.swift`. The tag workflow rebuilds the
+artifact, verifies the clean binary consumer, and uploads the ZIP and checksum
+to the GitHub release. Do not commit `Artifacts/`.
 
 ---
 

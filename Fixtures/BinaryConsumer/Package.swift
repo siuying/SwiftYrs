@@ -8,17 +8,16 @@ let package = Package(
         .macOS(.v14),
         .iOS(.v17),
     ],
+    dependencies: [
+        .package(url: "https://github.com/siuying/SwiftYrs", from: "0.6.0"),
+    ],
     products: [
         .executable(name: "BinaryConsumer", targets: ["BinaryConsumer"]),
     ],
     targets: [
-        .binaryTarget(
-            name: "YrsBridgeFFI",
-            path: "../../Artifacts/YrsBridge.xcframework"
-        ),
         .executableTarget(
             name: "BinaryConsumer",
-            dependencies: ["YrsBridgeFFI"]
+            dependencies: [.product(name: "SwiftYrs", package: "SwiftYrs")]
         ),
     ]
 )

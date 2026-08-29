@@ -6,6 +6,7 @@ use std::ptr::null_mut;
 use std::sync::Arc;
 
 use yrs::branch::{Branch, BranchPtr};
+use yrs::encoding::read::Cursor;
 use yrs::sync::awareness::AwarenessUpdate;
 use yrs::sync::{Awareness, DefaultProtocol, Message, Protocol, SyncMessage};
 use yrs::types::text::YChange;
@@ -15,14 +16,13 @@ use yrs::types::xml::{
 use yrs::types::{
     AsPrelim, Attrs, Change, Delta, EntryChange, Observable, PathSegment, ToJson, TypeRef,
 };
-use yrs::encoding::read::Cursor;
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1, EncoderV2};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexScope,
     IndexedSequence, Map, MapPrelim, MapRef, Offset, OffsetKind, Options, Out, Quotable, ReadTxn,
-    StateVector, StickyIndex, Store, Text, TextPrelim, Subscription, TextRef, Transact, Update,
-    UndoManager, WeakRef, Xml,
+    StateVector, StickyIndex, Store, Subscription, Text, TextPrelim, TextRef, Transact,
+    UndoManager, Update, WeakRef, Xml,
 };
 
 /// All docs use UTF-16 text offsets so index-based APIs (text insert/remove,
@@ -53,6 +53,8 @@ pub(crate) const YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION: i32 = 3;
 pub(crate) const YRS_BRIDGE_ERR_DECODE: i32 = 4;
 pub(crate) const YRS_BRIDGE_ERR_NATIVE_PANIC: i32 = 5;
 pub(crate) const YRS_BRIDGE_ERR_TYPE_MISMATCH: i32 = 6;
+pub(crate) const YRS_BRIDGE_ERR_INVALID_GUID: i32 = 7;
+pub(crate) const YRS_BRIDGE_ERR_DUPLICATE_SUBDOC_GUID: i32 = 8;
 
 const YRS_BRIDGE_VALUE_UNDEFINED: i32 = 0;
 const YRS_BRIDGE_VALUE_NULL: i32 = 1;
@@ -87,7 +89,8 @@ pub struct YrsBridgeValue {
     branch: *mut Branch,
 }
 
-type YrsBridgeEventCallback = unsafe extern "C" fn(context: *mut c_void, data: *const c_uchar, len: usize);
+type YrsBridgeEventCallback =
+    unsafe extern "C" fn(context: *mut c_void, data: *const c_uchar, len: usize);
 
 #[repr(transparent)]
 pub struct YrsBridgeObservation(Option<Subscription>);
@@ -242,7 +245,10 @@ fn plain_any_from_json(value: serde_json::Value) -> Any {
         serde_json::Value::Number(value) => Any::Number(value.as_f64().unwrap_or(f64::NAN)),
         serde_json::Value::String(value) => Any::String(Arc::from(value)),
         serde_json::Value::Array(values) => Any::Array(Arc::from(
-            values.into_iter().map(plain_any_from_json).collect::<Vec<_>>(),
+            values
+                .into_iter()
+                .map(plain_any_from_json)
+                .collect::<Vec<_>>(),
         )),
         serde_json::Value::Object(values) => {
             let values = values
@@ -478,7 +484,10 @@ pub(crate) unsafe fn read_name(name: *const c_char) -> Result<String, i32> {
     }
 }
 
-unsafe fn input_value(value: &YrsBridgeValue, transaction: &YrsBridgeTransaction) -> Result<In, i32> {
+unsafe fn input_value(
+    value: &YrsBridgeValue,
+    transaction: &YrsBridgeTransaction,
+) -> Result<In, i32> {
     match value.tag {
         YRS_BRIDGE_VALUE_UNDEFINED => Ok(In::Any(Any::Undefined)),
         YRS_BRIDGE_VALUE_NULL => Ok(In::Any(Any::Null)),
@@ -567,7 +576,9 @@ fn output_value(value: Out) -> YrsBridgeValue {
         },
         Out::YText(value) => YrsBridgeValue::branch(YRS_BRIDGE_VALUE_TEXT, value.into_raw_branch()),
         Out::YMap(value) => YrsBridgeValue::branch(YRS_BRIDGE_VALUE_MAP, value.into_raw_branch()),
-        Out::YArray(value) => YrsBridgeValue::branch(YRS_BRIDGE_VALUE_ARRAY, value.into_raw_branch()),
+        Out::YArray(value) => {
+            YrsBridgeValue::branch(YRS_BRIDGE_VALUE_ARRAY, value.into_raw_branch())
+        }
         Out::YDoc(_) => YrsBridgeValue {
             tag: YRS_BRIDGE_VALUE_DOC,
             ..YrsBridgeValue::undefined()
@@ -578,8 +589,12 @@ fn output_value(value: Out) -> YrsBridgeValue {
         Out::YXmlFragment(value) => {
             YrsBridgeValue::branch(YRS_BRIDGE_VALUE_XML_FRAGMENT, value.into_raw_branch())
         }
-        Out::YXmlText(value) => YrsBridgeValue::branch(YRS_BRIDGE_VALUE_XML_TEXT, value.into_raw_branch()),
-        Out::YWeakLink(value) => YrsBridgeValue::branch(YRS_BRIDGE_VALUE_WEAK, value.into_raw_branch()),
+        Out::YXmlText(value) => {
+            YrsBridgeValue::branch(YRS_BRIDGE_VALUE_XML_TEXT, value.into_raw_branch())
+        }
+        Out::YWeakLink(value) => {
+            YrsBridgeValue::branch(YRS_BRIDGE_VALUE_WEAK, value.into_raw_branch())
+        }
         Out::UndefinedRef(value) => {
             YrsBridgeValue::branch(YRS_BRIDGE_VALUE_UNDEFINED, value.into_raw_branch())
         }
@@ -644,7 +659,10 @@ unsafe fn decode_state_vector(data: *const c_uchar, len: usize) -> Result<StateV
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_doc_get_text(doc: *mut Doc, name: *const c_char) -> *mut Branch {
+pub unsafe extern "C" fn yrs_bridge_doc_get_text(
+    doc: *mut Doc,
+    name: *const c_char,
+) -> *mut Branch {
     catch_unwind(AssertUnwindSafe(|| {
         if doc.is_null() {
             return null_mut();
@@ -672,7 +690,10 @@ pub unsafe extern "C" fn yrs_bridge_doc_get_map(doc: *mut Doc, name: *const c_ch
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_doc_get_array(doc: *mut Doc, name: *const c_char) -> *mut Branch {
+pub unsafe extern "C" fn yrs_bridge_doc_get_array(
+    doc: *mut Doc,
+    name: *const c_char,
+) -> *mut Branch {
     catch_unwind(AssertUnwindSafe(|| {
         if doc.is_null() {
             return null_mut();
@@ -1758,7 +1779,10 @@ pub unsafe extern "C" fn yrs_bridge_xml_remove(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_xml_element_tag(xml: *mut Branch, out: *mut YrsBridgeBuffer) -> i32 {
+pub unsafe extern "C" fn yrs_bridge_xml_element_tag(
+    xml: *mut Branch,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
     ffi_boundary(|| {
         if xml.is_null() {
             return YRS_BRIDGE_ERR_NULL_POINTER;
@@ -1870,7 +1894,9 @@ pub unsafe extern "C" fn yrs_bridge_xml_get_attribute(
             TypeRef::XmlText => XmlTextRef::from_raw_branch(xml).get_attribute(&*transaction, &key),
             _ => return YRS_BRIDGE_ERR_TYPE_MISMATCH,
         };
-        *out = value.map(output_value).unwrap_or_else(YrsBridgeValue::undefined);
+        *out = value
+            .map(output_value)
+            .unwrap_or_else(YrsBridgeValue::undefined);
         YRS_BRIDGE_OK
     })
 }
@@ -2370,7 +2396,10 @@ pub unsafe extern "C" fn yrs_bridge_weak_values_json(
             return YRS_BRIDGE_ERR_NULL_POINTER;
         }
         let weak = WeakRef::<ArrayRef>::from_raw_branch(weak);
-        let values: Vec<_> = weak.unquote(&*transaction).map(|value| json_from_out(&value)).collect();
+        let values: Vec<_> = weak
+            .unquote(&*transaction)
+            .map(|value| json_from_out(&value))
+            .collect();
         match serde_json::to_vec(&values) {
             Ok(bytes) => write_buffer(bytes, out),
             Err(_) => YRS_BRIDGE_ERR_DECODE,
@@ -2636,7 +2665,11 @@ pub unsafe extern "C" fn yrs_bridge_doc_observe_update_v1(
         }
         let context = context as usize;
         observation_result((*doc).observe_update_v1(move |_transaction, event| {
-            let update: Vec<_> = event.update.iter().map(|byte| serde_json::json!(byte)).collect();
+            let update: Vec<_> = event
+                .update
+                .iter()
+                .map(|byte| serde_json::json!(byte))
+                .collect();
             emit_json(
                 callback,
                 context,
@@ -2691,18 +2724,20 @@ pub unsafe extern "C" fn yrs_bridge_doc_observe_transaction_cleanup(
             return null_mut();
         }
         let context = context as usize;
-        observation_result((*doc).observe_transaction_cleanup(move |_transaction, event| {
-            emit_json(
-                callback,
-                context,
-                serde_json::json!({
-                    "kind": "transactionCleanup",
-                    "beforeStateClients": event.before_state.len(),
-                    "afterStateClients": event.after_state.len(),
-                    "deleteSetClients": event.delete_set.len(),
-                }),
-            );
-        }))
+        observation_result(
+            (*doc).observe_transaction_cleanup(move |_transaction, event| {
+                emit_json(
+                    callback,
+                    context,
+                    serde_json::json!({
+                        "kind": "transactionCleanup",
+                        "beforeStateClients": event.before_state.len(),
+                        "afterStateClients": event.after_state.len(),
+                        "deleteSetClients": event.delete_set.len(),
+                    }),
+                );
+            }),
+        )
     }))
     .unwrap_or(null_mut())
 }
@@ -2745,7 +2780,11 @@ pub unsafe extern "C" fn yrs_bridge_text_observe(
         let context = context as usize;
         let text = TextRef::from_raw_branch(text);
         observation(text.observe(move |transaction, event| {
-            let delta: Vec<_> = event.delta(transaction).iter().map(json_from_delta).collect();
+            let delta: Vec<_> = event
+                .delta(transaction)
+                .iter()
+                .map(json_from_delta)
+                .collect();
             emit_json(
                 callback,
                 context,
@@ -2773,7 +2812,11 @@ pub unsafe extern "C" fn yrs_bridge_array_observe(
         let context = context as usize;
         let array = ArrayRef::from_raw_branch(array);
         observation(array.observe(move |transaction, event| {
-            let delta: Vec<_> = event.delta(transaction).iter().map(json_from_change).collect();
+            let delta: Vec<_> = event
+                .delta(transaction)
+                .iter()
+                .map(json_from_change)
+                .collect();
             emit_json(
                 callback,
                 context,
@@ -2831,8 +2874,11 @@ pub unsafe extern "C" fn yrs_bridge_xml_observe(
             TypeRef::XmlElement(_) => {
                 let xml = XmlElementRef::from_raw_branch(xml);
                 observation(xml.observe(move |transaction, event| {
-                    let delta: Vec<_> =
-                        event.delta(transaction).iter().map(json_from_change).collect();
+                    let delta: Vec<_> = event
+                        .delta(transaction)
+                        .iter()
+                        .map(json_from_change)
+                        .collect();
                     emit_json(
                         callback,
                         context,
@@ -2849,8 +2895,11 @@ pub unsafe extern "C" fn yrs_bridge_xml_observe(
             TypeRef::XmlFragment => {
                 let xml = XmlFragmentRef::from_raw_branch(xml);
                 observation(xml.observe(move |transaction, event| {
-                    let delta: Vec<_> =
-                        event.delta(transaction).iter().map(json_from_change).collect();
+                    let delta: Vec<_> = event
+                        .delta(transaction)
+                        .iter()
+                        .map(json_from_change)
+                        .collect();
                     emit_json(
                         callback,
                         context,
@@ -2883,7 +2932,11 @@ pub unsafe extern "C" fn yrs_bridge_xml_text_observe(
         let context = context as usize;
         let text = XmlTextRef::from_raw_branch(text);
         observation(text.observe(move |transaction, event| {
-            let delta: Vec<_> = event.delta(transaction).iter().map(json_from_delta).collect();
+            let delta: Vec<_> = event
+                .delta(transaction)
+                .iter()
+                .map(json_from_delta)
+                .collect();
             emit_json(
                 callback,
                 context,
@@ -3144,9 +3197,7 @@ pub unsafe extern "C" fn yrs_bridge_awareness_destroy(awareness: *mut YrsBridgeA
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_awareness_client_id(
-    awareness: *mut YrsBridgeAwareness,
-) -> u64 {
+pub unsafe extern "C" fn yrs_bridge_awareness_client_id(awareness: *mut YrsBridgeAwareness) -> u64 {
     if awareness.is_null() {
         return 0;
     }
@@ -3219,7 +3270,9 @@ pub unsafe extern "C" fn yrs_bridge_awareness_state_json(
         if awareness.is_null() || out.is_null() {
             return YRS_BRIDGE_ERR_NULL_POINTER;
         }
-        let Some(state) = (*awareness).0.state::<serde_json::Value>(ClientID::new(client_id))
+        let Some(state) = (*awareness)
+            .0
+            .state::<serde_json::Value>(ClientID::new(client_id))
         else {
             return write_buffer(Vec::new(), out);
         };
@@ -3334,7 +3387,11 @@ pub unsafe extern "C" fn yrs_bridge_awareness_observe_update(
         }
         let context = context as usize;
         observation((*awareness).0.on_update(move |_awareness, event, _origin| {
-            emit_json(callback, context, awareness_event_json("awarenessUpdate", event));
+            emit_json(
+                callback,
+                context,
+                awareness_event_json("awarenessUpdate", event),
+            );
         }))
     }))
     .unwrap_or(null_mut())
@@ -3352,7 +3409,11 @@ pub unsafe extern "C" fn yrs_bridge_awareness_observe_change(
         }
         let context = context as usize;
         observation((*awareness).0.on_change(move |_awareness, event, _origin| {
-            emit_json(callback, context, awareness_event_json("awarenessChange", event));
+            emit_json(
+                callback,
+                context,
+                awareness_event_json("awarenessChange", event),
+            );
         }))
     }))
     .unwrap_or(null_mut())
@@ -3481,9 +3542,7 @@ pub unsafe extern "C" fn yrs_bridge_sync_message_awareness(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn yrs_bridge_sync_message_awareness_query(
-    out: *mut YrsBridgeBuffer,
-) -> i32 {
+pub unsafe extern "C" fn yrs_bridge_sync_message_awareness_query(out: *mut YrsBridgeBuffer) -> i32 {
     ffi_boundary(|| {
         if out.is_null() {
             return YRS_BRIDGE_ERR_NULL_POINTER;
@@ -3534,7 +3593,10 @@ pub unsafe extern "C" fn yrs_bridge_sync_start(
             return YRS_BRIDGE_ERR_NULL_POINTER;
         }
         let mut encoder = EncoderV1::new();
-        if DefaultProtocol.start(&(*awareness).0, &mut encoder).is_err() {
+        if DefaultProtocol
+            .start(&(*awareness).0, &mut encoder)
+            .is_err()
+        {
             return YRS_BRIDGE_ERR_DECODE;
         }
         write_buffer(encoder.to_vec(), out)

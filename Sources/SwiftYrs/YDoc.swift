@@ -8,6 +8,8 @@ public enum YError: Error, Equatable {
     case decodeFailure
     case nativePanic
     case typeMismatch
+    case invalidGUID
+    case duplicateSubdocGUID
     case unknown(code: Int32)
 }
 
@@ -58,6 +60,10 @@ func throwIfNeeded(_ code: Int32) throws {
         throw YError.nativePanic
     case 6:
         throw YError.typeMismatch
+    case 7:
+        throw YError.invalidGUID
+    case 8:
+        throw YError.duplicateSubdocGUID
     default:
         throw YError.unknown(code: code)
     }
