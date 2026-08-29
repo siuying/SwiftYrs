@@ -8,11 +8,11 @@ let package = Package(
         .macOS(.v14),
         .iOS(.v17),
     ],
-    dependencies: [
-        .package(url: "https://github.com/siuying/SwiftYrs", from: "0.6.0"),
-    ],
     products: [
         .executable(name: "BinaryConsumer", targets: ["BinaryConsumer"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/siuying/SwiftYrs", from: "0.6.0"),
     ],
     targets: [
         .executableTarget(
