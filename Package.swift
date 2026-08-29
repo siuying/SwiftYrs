@@ -2,6 +2,10 @@
 
 import PackageDescription
 
+import Foundation
+
+let useLocalArtifact = ProcessInfo.processInfo.environment["SWIFTYRS_USE_LOCAL_ARTIFACT"] == "1"
+
 #if os(Linux)
 let ffiTarget: Target = .systemLibrary(
     name: "YrsBridgeFFI",
@@ -24,10 +28,13 @@ let packageDependencies: [Package.Dependency] = [
     ),
 ]
 #else
-let ffiTarget: Target = .binaryTarget(
-    name: "YrsBridgeFFI",
-    path: "Artifacts/YrsBridge.xcframework"
-)
+let ffiTarget: Target = useLocalArtifact
+    ? .binaryTarget(name: "YrsBridgeFFI", path: "Artifacts/YrsBridge.xcframework")
+    : .binaryTarget(
+        name: "YrsBridgeFFI",
+        url: "https://github.com/siuying/SwiftYrs/releases/download/v0.6.0/YrsBridge.xcframework.zip",
+        checksum: "7e800a4a6ac43e9d70cf3b6f2c3a10972be63315d3deb1fc6c3750408c03c205"
+    )
 
 let hocuspocusProducts: [Product] = [
     .library(name: "SwiftYrsHocuspocus", targets: ["SwiftYrsHocuspocus"]),

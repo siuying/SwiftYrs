@@ -7,13 +7,15 @@
 
 use std::ffi::c_char;
 
+use uuid::Uuid;
 use yrs::branch::Branch;
 use yrs::{Doc, Map, MapRef, ReadTxn};
 
 use crate::{
     ffi_boundary, new_doc, read_name, write_buffer, BranchPointable, YrsBridgeBuffer,
-    YrsBridgeTransaction, YRS_BRIDGE_ERR_DECODE, YRS_BRIDGE_ERR_NULL_POINTER,
-    YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION, YRS_BRIDGE_ERR_TYPE_MISMATCH, YRS_BRIDGE_OK,
+    YrsBridgeTransaction, YRS_BRIDGE_ERR_DECODE, YRS_BRIDGE_ERR_DUPLICATE_SUBDOC_GUID,
+    YRS_BRIDGE_ERR_INVALID_GUID, YRS_BRIDGE_ERR_NULL_POINTER, YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION,
+    YRS_BRIDGE_ERR_TYPE_MISMATCH, YRS_BRIDGE_OK,
 };
 
 /// The subdocument stored at `key`, or the error code the caller should return:
@@ -55,6 +57,47 @@ pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc(
             return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
         };
         let subdoc = MapRef::from_raw_branch(map).insert(transaction, key, new_doc());
+        write_buffer(subdoc.guid().to_string().into_bytes(), guid_out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc_with_guid(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    guid: *const c_char,
+    guid_out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if map.is_null() || transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        let key = match read_name(key) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        let guid = match read_name(guid).and_then(|guid| {
+            Uuid::parse_str(&guid)
+                .map(|uuid| uuid.to_string())
+                .map_err(|_| YRS_BRIDGE_ERR_INVALID_GUID)
+        }) {
+            Ok(guid) => guid,
+            Err(code) => return code,
+        };
+        let Some(transaction) = (*transaction).as_write_mut() else {
+            return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
+        };
+        if transaction
+            .subdoc_guids()
+            .any(|existing| existing.as_ref() == guid)
+        {
+            return YRS_BRIDGE_ERR_DUPLICATE_SUBDOC_GUID;
+        }
+        let mut options = crate::yjs_compatible_options();
+        options.guid = guid.into();
+        let subdoc =
+            MapRef::from_raw_branch(map).insert(transaction, key, Doc::with_options(options));
         write_buffer(subdoc.guid().to_string().into_bytes(), guid_out)
     })
 }

@@ -108,6 +108,7 @@ int yrs_bridge_xml_text_apply_delta_json(YrsBridgeBranch *_Nonnull text, YrsBrid
 int yrs_bridge_xml_text_delta_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 
 int yrs_bridge_map_set_new_subdoc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull guid_out);
+int yrs_bridge_map_set_new_subdoc_with_guid(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, const char *_Nonnull guid, YrsBridgeBuffer *_Nonnull guid_out);
 int yrs_bridge_map_get_subdoc_guid(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_map_get_subdoc_doc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeDoc *_Nullable *_Nonnull doc_out);
 int yrs_bridge_transaction_get_subdoc_doc_by_guid(YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull guid, YrsBridgeDoc *_Nullable *_Nonnull doc_out);

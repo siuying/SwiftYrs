@@ -12,3 +12,4 @@ name = "yrs_bridge"
 [dependencies]
 yrs = { git = "https://github.com/y-crdt/y-crdt", features = ["weak"] }
 serde_json = "1.0"
+uuid = "1"

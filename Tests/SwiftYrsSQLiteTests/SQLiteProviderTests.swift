@@ -32,6 +32,39 @@ func providerPersistsUpdatesAcrossProviderInstances() throws {
 }
 
 @Test
+func providerReconstructsCallerGuidSubdocumentByDocumentName() throws {
+    let databaseURL = try temporaryDatabaseURL()
+    let store = try SQLiteStore(Connection(databaseURL.path))
+    let guid = "018f0f50-7b5b-7d6d-9f51-9a54e3dc6c2a"
+
+    let parent = YDoc()
+    let parentProvider = SQLiteProvider(documentName: "vault", doc: parent, store: store)
+    try parentProvider.start()
+    let map = try parent.map(named: "pages")
+    let page = try parent.write { try $0.setNewSubdoc(guid: guid, forKey: "home", in: map) }
+    let pageDoc = try parent.read { try $0.subdocDoc(guid: page.guid) }
+    let pageProvider = SQLiteProvider(documentName: page.guid, doc: pageDoc, store: store)
+    try pageProvider.start()
+    let text = try pageDoc.text(named: "body")
+    try pageDoc.write { try $0.insert("persisted", into: text, at: 0) }
+    pageProvider.destroy()
+    parentProvider.destroy()
+
+    let rebuiltParent = YDoc()
+    let rebuiltParentProvider = SQLiteProvider(documentName: "vault", doc: rebuiltParent, store: store)
+    try rebuiltParentProvider.start()
+    defer { rebuiltParentProvider.destroy() }
+    let rebuiltMap = try rebuiltParent.map(named: "pages")
+    let rebuiltPage = try rebuiltParent.read { try $0.subdocDoc(guid: guid) }
+    let rebuiltPageProvider = SQLiteProvider(documentName: guid, doc: rebuiltPage, store: store)
+    try rebuiltPageProvider.start()
+    defer { rebuiltPageProvider.destroy() }
+    let rebuiltText = try rebuiltPage.text(named: "body")
+    #expect(try rebuiltPage.read { try $0.string(from: rebuiltText) } == "persisted")
+    #expect(try rebuiltParent.read { try $0.subdoc(forKey: "home", in: rebuiltMap).guid } == guid)
+}
+
+@Test
 func storeServesMultipleDocumentsAndRejectsDuplicateActiveProvider() throws {
     let databaseURL = try temporaryDatabaseURL()
     let store = try SQLiteStore(Connection(databaseURL.path))

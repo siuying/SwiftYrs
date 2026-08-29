@@ -11,14 +11,13 @@ let package = Package(
     products: [
         .executable(name: "BinaryConsumer", targets: ["BinaryConsumer"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/siuying/SwiftYrs", from: "0.6.0"),
+    ],
     targets: [
-        .binaryTarget(
-            name: "YrsBridgeFFI",
-            path: "../../Artifacts/YrsBridge.xcframework"
-        ),
         .executableTarget(
             name: "BinaryConsumer",
-            dependencies: ["YrsBridgeFFI"]
+            dependencies: [.product(name: "SwiftYrs", package: "SwiftYrs")]
         ),
     ]
 )

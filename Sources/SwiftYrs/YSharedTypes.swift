@@ -500,6 +500,19 @@ extension YWriteTransaction {
         }
     }
 
+    /// Creates a subdocument with a caller-selected UUID GUID. The GUID is
+    /// canonicalized by Yrs and can be used as the subdocument's provider name.
+    public func setNewSubdoc(guid: String, forKey key: String, in map: YMap) throws -> YSubdoc {
+        try key.withCString { keyPointer in
+            try guid.withCString { guidPointer in
+                let data = try readingBuffer {
+                    yrs_bridge_map_set_new_subdoc_with_guid(map.handle, handle, keyPointer, guidPointer, &$0)
+                }
+                return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
+            }
+        }
+    }
+
     public func loadSubdoc(forKey key: String, in map: YMap) throws {
         try key.withCString { keyPointer in
             try throwIfNeeded(yrs_bridge_map_load_subdoc(map.handle, handle, keyPointer))
