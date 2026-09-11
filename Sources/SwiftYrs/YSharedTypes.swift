@@ -271,7 +271,7 @@ extension YReadTransaction {
     ///   that is not a subdocument.
     public func subdocDoc(forKey key: String, in map: YMap) throws -> YDoc {
         try key.withCString { keyPointer in
-            try makeOwnedHandle(YDoc.init) {
+            try makeOwnedHandle({ handle in try YDoc(handle: handle) }) {
                 yrs_bridge_map_get_subdoc_doc(map.handle, handle, keyPointer, &$0)
             }
         }
@@ -290,7 +290,7 @@ extension YReadTransaction {
     /// - Throws: `YError.typeMismatch` when no subdocument carries that GUID.
     public func subdocDoc(guid: String) throws -> YDoc {
         try guid.withCString { guidPointer in
-            try makeOwnedHandle(YDoc.init) {
+            try makeOwnedHandle({ handle in try YDoc(handle: handle) }) {
                 yrs_bridge_transaction_get_subdoc_doc_by_guid(handle, guidPointer, &$0)
             }
         }
@@ -500,6 +500,28 @@ extension YWriteTransaction {
         }
     }
 
+    /// Creates an auto-GUID subdocument with the supplied document options.
+    /// Use `skipGC: true` when replicas must retain deleted content for
+    /// state-from-snapshot encoding.
+    public func setNewSubdoc(
+        forKey key: String,
+        in map: YMap,
+        options: YDoc.Options
+    ) throws -> YSubdoc {
+        try key.withCString { keyPointer in
+            let data = try readingBuffer {
+                yrs_bridge_map_set_new_subdoc_with_options(
+                    map.handle,
+                    handle,
+                    keyPointer,
+                    options.skipGC,
+                    &$0
+                )
+            }
+            return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
+        }
+    }
+
     /// Creates a subdocument with a caller-selected UUID GUID. The GUID is
     /// canonicalized by Yrs and can be used as the subdocument's provider name.
     public func setNewSubdoc(guid: String, forKey key: String, in map: YMap) throws -> YSubdoc {
@@ -507,6 +529,32 @@ extension YWriteTransaction {
             try guid.withCString { guidPointer in
                 let data = try readingBuffer {
                     yrs_bridge_map_set_new_subdoc_with_guid(map.handle, handle, keyPointer, guidPointer, &$0)
+                }
+                return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
+            }
+        }
+    }
+
+    /// Creates a caller-GUID subdocument with the supplied document options.
+    /// Use `skipGC: true` when replicas must retain deleted content for
+    /// state-from-snapshot encoding.
+    public func setNewSubdoc(
+        guid: String,
+        forKey key: String,
+        in map: YMap,
+        options: YDoc.Options
+    ) throws -> YSubdoc {
+        try key.withCString { keyPointer in
+            try guid.withCString { guidPointer in
+                let data = try readingBuffer {
+                    yrs_bridge_map_set_new_subdoc_with_guid_and_options(
+                        map.handle,
+                        handle,
+                        keyPointer,
+                        guidPointer,
+                        options.skipGC,
+                        &$0
+                    )
                 }
                 return YSubdoc(guid: String(data: data, encoding: .utf8) ?? "")
             }
