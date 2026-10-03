@@ -11,6 +11,8 @@ public enum YPathSegment: Equatable, Sendable {
 /// The client IDs whose awareness state was added, updated, or removed by an
 /// awareness update/change event.
 public struct YAwarenessChange: Equatable, Sendable {
+    public static let timeoutOrigin = "timeout"
+
     public let added: [UInt64]
     public let updated: [UInt64]
     public let removed: [UInt64]

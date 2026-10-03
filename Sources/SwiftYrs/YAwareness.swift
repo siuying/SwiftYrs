@@ -14,9 +14,8 @@ public struct YAwarenessClientState {
     public let state: Any
 }
 
-/// Awareness wraps a native handle; like `YDoc` it is `@unchecked Sendable` on
-/// the contract that access is confined to one actor or serial queue. Declared
-/// in core so transports share the contract.
+/// Awareness serializes native access and lifetime checks with a recursive lock.
+/// User callbacks run serially outside the lock and may re-enter from any thread.
 extension YAwareness: @unchecked Sendable {}
 
 public final class YAwareness {
@@ -35,10 +34,13 @@ public final class YAwareness {
     private let document: YDoc
     let handle: OpaquePointer
     private let now: @Sendable () -> Duration
+    private let lock = NSRecursiveLock()
     private var lastUpdated: [UInt64: Duration] = [:]
     private var timestampObservation: Observation?
     private var eventOrigin: String?
-    private var callbackDepth = 0
+    private var accessDepth = 0
+    private var deliveringEvents = false
+    private var pendingEvents: [() -> Void] = []
 
     public convenience init(document: YDoc) {
         self.init(document: document, timing: .init())
@@ -59,7 +61,7 @@ public final class YAwareness {
         self.now = now ?? { start.duration(to: .now) }
         do {
             timestampObservation = try registerObservation(
-                handle: handle, observe: yrs_bridge_awareness_observe_update
+                handle: handle, observe: yrs_bridge_awareness_observe_update, synchronizationLock: lock
             ) { [weak self] event in
                 guard let self, case let .awarenessUpdate(change) = event else { return }
                 let timestamp = self.now()
@@ -80,16 +82,18 @@ public final class YAwareness {
     }
 
     deinit {
+        lock.lock()
+        defer { lock.unlock() }
         timestampObservation?.cancel()
         yrs_bridge_awareness_destroy(handle)
     }
 
     public var clientID: UInt64 {
-        yrs_bridge_awareness_client_id(handle)
+        withAccess { yrs_bridge_awareness_client_id(handle) }
     }
 
     public func setLocalState(_ state: Any) throws {
-        let data = try JSONSerialization.data(withJSONObject: state, options: .fragmentsAllowed)
+        let data = try JSONSerialization.data(withJSONObject: state)
         try setLocalStateJSON(data)
     }
 
@@ -97,11 +101,7 @@ public final class YAwareness {
         guard let json = String(data: data, encoding: .utf8) else {
             throw YError.decodeFailure
         }
-        if json.trimmingCharacters(in: .whitespacesAndNewlines) == "null" {
-            clearLocalState()
-            return
-        }
-        try withTrackedUpdates {
+        try withAccess {
             try json.withCString { pointer in
                 try throwIfNeeded(yrs_bridge_awareness_set_local_state_json(handle, pointer))
             }
@@ -109,23 +109,29 @@ public final class YAwareness {
     }
 
     public func clearLocalState() {
-        withTrackedUpdates { yrs_bridge_awareness_clear_local_state(handle) }
+        withAccess { yrs_bridge_awareness_clear_local_state(handle) }
     }
 
     public func removeState(for clientID: UInt64) {
-        withTrackedUpdates { yrs_bridge_awareness_remove_state(handle, clientID) }
+        withAccess { yrs_bridge_awareness_remove_state(handle, clientID) }
     }
 
     public func localState() throws -> Any? {
-        try jsonBuffer(yrs_bridge_awareness_local_state_json)
+        try withAccess { try jsonBuffer(yrs_bridge_awareness_local_state_json) }
     }
 
     public func state(for clientID: UInt64) throws -> Any? {
-        let data = try readingBuffer { yrs_bridge_awareness_state_json(handle, clientID, &$0) }
-        return try decodeOptionalJSON(from: data)
+        try withAccess {
+            let data = try readingBuffer { yrs_bridge_awareness_state_json(handle, clientID, &$0) }
+            return try decodeOptionalJSON(from: data)
+        }
     }
 
     public func states() throws -> [YAwarenessClientState] {
+        try withAccess { try readStates() }
+    }
+
+    private func readStates() throws -> [YAwarenessClientState] {
         let value = try jsonBuffer(yrs_bridge_awareness_states_json)
         guard let entries = value as? [[String: Any]] else {
             return []
@@ -140,10 +146,14 @@ public final class YAwareness {
     }
 
     public func encodeUpdate() throws -> YAwarenessUpdate {
-        try YAwarenessUpdate(readingBuffer { yrs_bridge_awareness_encode_update(handle, &$0) })
+        try withAccess { try YAwarenessUpdate(readingBuffer { yrs_bridge_awareness_encode_update(handle, &$0) }) }
     }
 
     public func encodeUpdate(for clientIDs: [UInt64]) throws -> YAwarenessUpdate {
+        try withAccess { try encodeClientUpdate(for: clientIDs) }
+    }
+
+    private func encodeClientUpdate(for clientIDs: [UInt64]) throws -> YAwarenessUpdate {
         let data = try clientIDs.withUnsafeBufferPointer { clientIDs -> Data in
             guard let baseAddress = clientIDs.baseAddress else {
                 throw YError.decodeFailure
@@ -161,7 +171,14 @@ public final class YAwareness {
     }
 
     public func applyUpdate(_ update: YAwarenessUpdate) throws {
-        try withTrackedUpdates {
+        try applyUpdate(update, origin: nil)
+    }
+
+    public func applyUpdate(_ update: YAwarenessUpdate, origin: String?) throws {
+        try withAccess {
+            let previousOrigin = eventOrigin
+            eventOrigin = origin
+            defer { eventOrigin = previousOrigin }
             try withUInt8Pointer(update.data) { pointer, length in
                 try throwIfNeeded(yrs_bridge_awareness_apply_update(
                     handle,
@@ -172,22 +189,30 @@ public final class YAwareness {
         }
     }
 
-    func withTrackedUpdates<T>(_ body: () throws -> T) rethrows -> T {
-        guard callbackDepth > 0 else { return try body() }
-        // Yrs suppresses observers of the same kind during nested callbacks.
-        let before = try? encodeUpdate().clocks()
+    func withAccess<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        accessDepth += 1
         defer {
-            if let before, let after = try? encodeUpdate().clocks() {
-                let timestamp = now()
-                for (id, clock) in after where before[id] != clock {
-                    lastUpdated[id] = timestamp
-                }
-                for id in before.keys where after[id] == nil {
-                    lastUpdated.removeValue(forKey: id)
-                }
-            }
+            accessDepth -= 1
+            let shouldDeliver = accessDepth == 0 && !deliveringEvents && !pendingEvents.isEmpty
+            if shouldDeliver { deliveringEvents = true }
+            lock.unlock()
+            if shouldDeliver { deliverEvents() }
         }
         return try body()
+    }
+
+    private func deliverEvents() {
+        while true {
+            let events = lock.withLock {
+                let events = pendingEvents
+                pendingEvents.removeAll(keepingCapacity: true)
+                if events.isEmpty { deliveringEvents = false }
+                return events
+            }
+            guard !events.isEmpty else { return }
+            for event in events { event() }
+        }
     }
 
     public func observeUpdate(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
@@ -198,14 +223,17 @@ public final class YAwareness {
         try observe(yrs_bridge_awareness_observe_change, callback)
     }
 
-    /// Call on the same actor or serial queue as other awareness operations.
-    /// Connection providers schedule this while connected and stop on teardown.
+    /// Connection providers schedule checks while connected and stop on teardown.
     public func checkTimeouts() throws {
+        try withAccess { try maintainLifetime() }
+    }
+
+    private func maintainLifetime() throws {
         let timestamp = now()
         if let updated = lastUpdated[clientID],
            timestamp - updated >= timing.outdatedTimeout / 2 {
             let data = try readingBuffer { yrs_bridge_awareness_local_state_json(handle, &$0) }
-            if !data.isEmpty {
+            if !data.isEmpty, String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) != "null" {
                 try setLocalStateJSON(data)
             }
         }
@@ -216,32 +244,26 @@ public final class YAwareness {
 
         // Yjs timeout removals retain remote clocks, so a peer's next renewal wins.
         let update = try encodeUpdate(for: expired).removingStates()
-        let previousOrigin = eventOrigin
-        eventOrigin = "timeout"
-        defer { eventOrigin = previousOrigin }
-        try applyUpdate(update)
+        try applyUpdate(update, origin: YAwarenessChange.timeoutOrigin)
     }
 
     private func observe(_ operation: BridgeObserve, _ callback: @escaping (YEvent) -> Void) throws -> Observation {
-        try registerObservation(handle: handle, observe: operation) { [weak self] event in
-            guard let self else {
-                callback(event)
-                return
-            }
-            let origin = self.eventOrigin
-            self.eventOrigin = nil
-            self.callbackDepth += 1
-            defer {
-                self.callbackDepth -= 1
-                self.eventOrigin = origin
-            }
-            switch event {
-            case let .awarenessUpdate(change):
-                callback(.awarenessUpdate(self.withOrigin(change, origin: origin)))
-            case let .awarenessChange(change):
-                callback(.awarenessChange(self.withOrigin(change, origin: origin)))
-            default:
-                callback(event)
+        let delivery = AwarenessEventDelivery(callback)
+        return try withAccess {
+            try registerObservation(
+                handle: handle, observe: operation, synchronizationLock: lock, onCancel: delivery.cancel
+            ) { [weak self] event in
+                guard let self else { return }
+                let delivered: YEvent
+                switch event {
+                case let .awarenessUpdate(change):
+                    delivered = .awarenessUpdate(self.withOrigin(change, origin: self.eventOrigin))
+                case let .awarenessChange(change):
+                    delivered = .awarenessChange(self.withOrigin(change, origin: self.eventOrigin))
+                default:
+                    delivered = event
+                }
+                self.pendingEvents.append { delivery.deliver(delivered) }
             }
         }
     }
@@ -267,8 +289,25 @@ public final class YAwareness {
         if data.isEmpty {
             return nil
         }
-        let value = try JSONSerialization.jsonObject(with: data, options: .fragmentsAllowed)
-        return value is NSNull ? nil : value
+        return try JSONSerialization.jsonObject(with: data)
+    }
+}
+
+private final class AwarenessEventDelivery {
+    private let lock = NSLock()
+    private var callback: ((YEvent) -> Void)?
+
+    init(_ callback: @escaping (YEvent) -> Void) {
+        self.callback = callback
+    }
+
+    func cancel() {
+        lock.withLock { callback = nil }
+    }
+
+    func deliver(_ event: YEvent) {
+        let callback = lock.withLock { self.callback }
+        callback?(event)
     }
 }
 
@@ -281,12 +320,6 @@ private extension YAwarenessUpdate {
             result.append(contentsOf: "null".utf8)
         }
         return YAwarenessUpdate(Data(prefix) + result)
-    }
-
-    func clocks() throws -> [UInt64: UInt64] {
-        var result: [UInt64: UInt64] = [:]
-        _ = try visitEntries { id, clock, _ in result[id] = clock }
-        return result
     }
 
     func visitEntries(_ visit: (UInt64, UInt64, ArraySlice<UInt8>) -> Void) throws -> ArraySlice<UInt8> {

@@ -249,6 +249,8 @@ try undoManager.redo()  // restores "Hello"
 
 ### Awareness (presence / cursors)
 
+Awareness starts with a null local state. Set a non-null state before connecting to Hocuspocus, even `[:]`, to keep an idle connection alive through awareness renewals. Null or disabled awareness sends no renewals, so an idle Hocuspocus server may close the connection with code 4408. The default remains null; use `clearLocalState()` to return to it.
+
 ```swift
 let doc = YDoc()
 let awareness = YAwareness(document: doc)

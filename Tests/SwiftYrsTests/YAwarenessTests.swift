@@ -181,7 +181,7 @@ func awarenessExpiresRemoteStatesWithTimeoutOriginAndPreservesClocks() throws {
     #expect(events.compactMap(tag) == [.change, .update])
     for event in events {
         #expect(awarenessChange(event)?.removed.sorted() == [2, 3])
-        #expect(awarenessChange(event)?.origin == "timeout")
+        #expect(awarenessChange(event)?.origin == YAwarenessChange.timeoutOrigin)
     }
     try local.checkTimeouts()
     #expect(events.count == 2)
@@ -225,7 +225,7 @@ func awarenessDoesNotRenewNullLocalState() throws {
     let clock = AwarenessTestClock()
     let local = YAwareness(document: YDoc(clientID: 1), now: { clock.now() })
     try local.setLocalState(["name": "Ada"])
-    try local.setLocalStateJSON(Data("null".utf8))
+    local.clearLocalState()
     var events: [YEvent] = []
     let observation = try local.observeUpdate { events.append($0) }
     defer { observation.cancel() }
@@ -233,6 +233,131 @@ func awarenessDoesNotRenewNullLocalState() throws {
     try local.checkTimeouts()
     #expect(try local.localState() == nil)
     #expect(events.isEmpty)
+}
+
+@Test
+func awarenessDoesNotRenewRawNullJSON() throws {
+    let clock = AwarenessTestClock()
+    let local = YAwareness(document: YDoc(clientID: 1), now: { clock.now() })
+    try local.setLocalState(["name": "Ada"])
+    try local.setLocalStateJSON(Data("null".utf8))
+    let before = try local.encodeUpdate()
+    clock.set(.seconds(60))
+    try local.checkTimeouts()
+    #expect(try local.encodeUpdate() == before)
+}
+
+@Test
+func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
+    let clock = AdvancingAwarenessClock()
+    let local = YAwareness(document: YDoc(clientID: 1), now: { clock.now() })
+    let remote = YAwareness(document: YDoc(clientID: 2))
+    let iterations = 2_000
+    let received = AwarenessUpdateCounter()
+    let observation = try local.observeUpdate { _ in received.increment() }
+    defer { observation.cancel() }
+    let writer = Task.detached {
+        for version in 1...iterations {
+            try local.setLocalState(["version": version])
+            #expect(try (local.localState() as? [String: Any])?["version"] as? Int == version)
+        }
+    }
+    let receiver = Task.detached {
+        for version in 1...iterations {
+            try remote.setLocalState(["version": version])
+            try local.applyUpdate(remote.encodeUpdate())
+            try local.checkTimeouts()
+        }
+    }
+    let otherProvider = Task.detached {
+        for _ in 1...iterations {
+            try local.checkTimeouts()
+            _ = try local.encodeUpdate()
+        }
+    }
+    let subscriptions = Task.detached {
+        for _ in 1...iterations {
+            let observation = try local.observeUpdate { _ in }
+            observation.cancel()
+        }
+    }
+    try await writer.value
+    try await receiver.value
+    try await otherProvider.value
+    try await subscriptions.value
+    #expect(try (local.localState() as? [String: Any])?["version"] as? Int == iterations)
+    let before = received.count()
+    try local.setLocalState(["version": iterations])
+    #expect(received.count() == before + 1)
+}
+
+@Test
+func awarenessCallbacksCanReenterFromAnotherThread() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let queue = DispatchQueue(label: "awareness-callback-reentry")
+    var reentered = false
+    let observation = try awareness.observeChange { event in
+        guard case let .awarenessChange(change) = event, !change.added.isEmpty else { return }
+        do {
+            try queue.sync {
+                try awareness.setLocalState(["name": "updated"])
+            }
+            reentered = true
+        } catch {
+            Issue.record("Failed to re-enter awareness from another thread: \(error)")
+        }
+    }
+    defer { observation.cancel() }
+    try awareness.setLocalState(["name": "initial"])
+    #expect(reentered)
+    #expect(try (awareness.localState() as? [String: Any])?["name"] as? String == "updated")
+}
+
+@Test
+func awarenessCancellationSkipsQueuedCallbacksWithoutWaitingForDelivery() async throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let entered = AsyncStream.makeStream(of: Void.self)
+    let release = DispatchSemaphore(value: 0)
+    let changes = try awareness.observeChange { _ in
+        entered.continuation.yield(())
+        release.wait()
+    }
+    let received = AwarenessUpdateCounter()
+    let updates = try awareness.observeUpdate { _ in received.increment() }
+    defer {
+        release.signal()
+        changes.cancel()
+        updates.cancel()
+    }
+    let writer = Task.detached {
+        try awareness.setLocalState(["name": "Ada"])
+    }
+    var iterator = entered.stream.makeAsyncIterator()
+    _ = await iterator.next()
+    updates.cancel()
+    release.signal()
+    try await writer.value
+    #expect(received.count() == 0)
+}
+
+private final class AwarenessUpdateCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() { lock.withLock { value += 1 } }
+    func count() -> Int { lock.withLock { value } }
+}
+
+private final class AdvancingAwarenessClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var time: Duration = .zero
+
+    func now() -> Duration {
+        lock.withLock {
+            time += .seconds(15)
+            return time
+        }
+    }
 }
 
 private final class AwarenessTestClock: @unchecked Sendable {
@@ -259,7 +384,7 @@ func awarenessTimeoutCallbacksCanRestorePeerWithoutLosingLifetimeOrLeakingOrigin
     }
     let change = try local.observeChange { event in
         guard case let .awarenessChange(change) = event,
-              change.origin == "timeout", !restored else { return }
+              change.origin == YAwarenessChange.timeoutOrigin, !restored else { return }
         restored = true
         do {
             try local.setLocalState(["name": "local"])
@@ -297,7 +422,7 @@ func awarenessTimeoutUpdateCallbackCanRestorePeerUntilNextTimeout(usingSyncProto
     var restored = false
     let observation = try local.observeUpdate { event in
         guard case let .awarenessUpdate(change) = event,
-              change.origin == "timeout", !restored else { return }
+              change.origin == YAwarenessChange.timeoutOrigin, !restored else { return }
         restored = true
         do {
             try peer.setLocalState(["name": "peer"])

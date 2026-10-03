@@ -20,13 +20,24 @@ private let observationCallback: YrsBridgeEventCallback = { context, data, lengt
 public final class Observation: @unchecked Sendable {
     private var handle: OpaquePointer?
     private var context: UnsafeMutableRawPointer?
+    private let synchronizationLock: NSRecursiveLock?
+    private let onCancel: (() -> Void)?
 
-    init(handle: OpaquePointer, context: UnsafeMutableRawPointer) {
+    init(
+        handle: OpaquePointer,
+        context: UnsafeMutableRawPointer,
+        synchronizationLock: NSRecursiveLock? = nil,
+        onCancel: (() -> Void)? = nil
+    ) {
         self.handle = handle
         self.context = context
+        self.synchronizationLock = synchronizationLock
+        self.onCancel = onCancel
     }
 
     public func cancel() {
+        synchronizationLock?.lock()
+        defer { synchronizationLock?.unlock() }
         guard let handle else {
             return
         }
@@ -36,6 +47,7 @@ public final class Observation: @unchecked Sendable {
             Unmanaged<ObservationCallbackBox>.fromOpaque(context).release()
             self.context = nil
         }
+        onCancel?()
     }
 
     deinit {
@@ -52,6 +64,8 @@ typealias BridgeObserve = (OpaquePointer, UnsafeMutableRawPointer?, YrsBridgeEve
 func registerObservation(
     handle: OpaquePointer,
     observe: BridgeObserve,
+    synchronizationLock: NSRecursiveLock? = nil,
+    onCancel: (() -> Void)? = nil,
     _ callback: @escaping (YEvent) -> Void
 ) throws -> Observation {
     let box = ObservationCallbackBox(callback: callback)
@@ -60,7 +74,7 @@ func registerObservation(
         Unmanaged<ObservationCallbackBox>.fromOpaque(context).release()
         throw YError.nullPointer
     }
-    return Observation(handle: observationHandle, context: context)
+    return Observation(handle: observationHandle, context: context, synchronizationLock: synchronizationLock, onCancel: onCancel)
 }
 
 func makeEventStream(observe: (@escaping (YEvent) -> Void) throws -> Observation) throws -> AsyncStream<YEvent> {

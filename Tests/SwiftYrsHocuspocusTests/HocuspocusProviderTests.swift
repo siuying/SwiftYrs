@@ -7,7 +7,47 @@ import SwiftYrs
 struct HocuspocusProviderTests {
 
 @Test
-func providerRenewsIdleAwarenessAndStopsAfterDisconnectAndDestroy() async throws {
+func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() async throws {
+    let document = YDoc(clientID: 89)
+    let awareness = YAwareness(document: document)
+    let sourceSocket = FakeHocuspocusWebSocket()
+    let otherSocket = FakeHocuspocusWebSocket()
+    let source = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        webSocketFactory: { _ in sourceSocket }
+    )
+    let other = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        webSocketFactory: { _ in otherSocket }
+    )
+    try await source.connect()
+    try await other.connect()
+    for _ in 0..<2 {
+        _ = try await sourceSocket.requireSentMessage()
+        _ = try await otherSocket.requireSentMessage()
+    }
+    let remote = YAwareness(document: YDoc(clientID: 90))
+    try remote.setLocalState(["name": "remote"])
+    sourceSocket.receive(HocuspocusMessage.awareness(documentName: "room-1", try remote.encodeUpdate()).encoded())
+    let message = try HocuspocusMessage.decode(
+        try await otherSocket.requireSentMessage(timeout: .milliseconds(500))
+    )
+    if case let .awareness(_, update) = message {
+        let receiver = YAwareness(document: YDoc(clientID: 88))
+        try receiver.applyUpdate(update)
+        #expect(try (receiver.state(for: 90) as? [String: Any])?["name"] as? String == "remote")
+    } else {
+        Issue.record("Expected awareness forwarded by the other provider")
+    }
+    try await sourceSocket.expectNoSentMessage(for: .milliseconds(30))
+    await source.disconnect()
+    await other.disconnect()
+}
+
+@Test
+func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
     let clock = ProviderAwarenessClock()
     let document = YDoc(clientID: 91)
     let awareness = YAwareness(
@@ -46,10 +86,6 @@ func providerRenewsIdleAwarenessAndStopsAfterDisconnectAndDestroy() async throws
     await provider.disconnect()
     clock.set(.seconds(60))
     try await socket.expectNoSentMessage(for: .milliseconds(30))
-    await provider.destroy()
-    clock.set(.seconds(120))
-    try await provider.connect()
-    try await socket.expectNoSentMessage(for: .milliseconds(30))
 }
 
 @Test
@@ -83,7 +119,7 @@ func providerExpiresSilentRemoteAwarenessWithTimeoutChange() async throws {
     clock.set(.seconds(30))
     if case let .awarenessChange(change) = await changes.next() {
         #expect(change.removed == [94])
-        #expect(change.origin == "timeout")
+        #expect(change.origin == YAwarenessChange.timeoutOrigin)
     } else {
         Issue.record("Expected timeout removal")
     }
@@ -121,7 +157,7 @@ func providerDoesNotRenewNullAwareness() async throws {
     _ = try await socket.requireSentMessage()
     clock.set(.seconds(60))
     try await socket.expectNoSentMessage(for: .milliseconds(30))
-    await provider.destroy()
+    await provider.disconnect()
 }
 
 @Test
@@ -168,7 +204,7 @@ func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() asy
     } else {
         Issue.record("Expected awareness renewal after reconnect")
     }
-    await provider.destroy()
+    await provider.disconnect()
     clock.set(.seconds(120))
     try await nextSocket.expectNoSentMessage(for: .milliseconds(30))
 }

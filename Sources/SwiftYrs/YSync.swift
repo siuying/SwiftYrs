@@ -131,11 +131,11 @@ public enum YSyncMessage: Equatable {
 
 public enum YSyncProtocol {
     public static func start(awareness: YAwareness) throws -> Data {
-        try readingBuffer { yrs_bridge_sync_start(awareness.handle, &$0) }
+        try awareness.withAccess { try readingBuffer { yrs_bridge_sync_start(awareness.handle, &$0) } }
     }
 
     public static func handle(_ payload: Data, awareness: YAwareness) throws -> Data {
-        try awareness.withTrackedUpdates {
+        try awareness.withAccess {
             try withUInt8Pointer(payload) { pointer, length in
                 return try readingBuffer {
                     yrs_bridge_sync_handle(

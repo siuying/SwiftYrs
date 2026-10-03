@@ -22,6 +22,8 @@ protocol HocuspocusWebSocket: Sendable {
     func close()
 }
 
+/// A non-null local awareness state, including `[:]`, keeps idle connections alive.
+/// With null or disabled awareness, an idle server may close the connection with 4408.
 public actor HocuspocusProvider {
     public static let productName = "SwiftYrsHocuspocus"
     // Match CloudKitProvider's transaction retry policy.
@@ -75,10 +77,9 @@ public actor HocuspocusProvider {
     private var awarenessTask: Task<Void, Never>?
     private var awarenessTaskID: UUID?
     private let documentObservationGate = RemoteApplyGate()
-    private let awarenessObservationGate = RemoteApplyGate()
+    private let awarenessOrigin = UUID().uuidString
     private var retryAttempt = 0
     private var disconnectRequested = false
-    private var destroyed = false
 
     public init(
         url: URL,
@@ -146,7 +147,6 @@ public actor HocuspocusProvider {
     }
 
     public func connect() async throws {
-        guard !destroyed else { return }
         disconnectRequested = false
         retryAttempt = 0
         try await openWebSocket()
@@ -165,16 +165,6 @@ public actor HocuspocusProvider {
         webSocket?.close()
         webSocket = nil
         connectionStatusContinuation.yield(.disconnected)
-    }
-
-    public func destroy() {
-        guard !destroyed else { return }
-        destroyed = true
-        disconnect()
-        connectionStatusContinuation.finish()
-        isSyncedContinuation.finish()
-        authStatusContinuation.finish()
-        statelessContinuation.finish()
     }
 
     deinit {
@@ -217,7 +207,7 @@ public actor HocuspocusProvider {
             ).encoded())
         }
 
-        guard !disconnectRequested, !destroyed else { return }
+        guard !disconnectRequested else { return }
         receiveTask = Task { [weak self] in
             await self?.receiveLoop()
         }
@@ -287,13 +277,11 @@ public actor HocuspocusProvider {
             }
         }
         if awarenessObservation == nil, let awareness {
-            awarenessObservation = try awareness.observeUpdate { [weak self, awarenessObservationGate, awareness] event in
-                guard !awarenessObservationGate.isApplyingRemote else {
-                    return
-                }
+            awarenessObservation = try awareness.observeUpdate { [weak self, awareness, awarenessOrigin] event in
                 guard case let .awarenessUpdate(change) = event else {
                     return
                 }
+                guard change.origin != awarenessOrigin else { return }
                 let clientIDs = change.changed
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
@@ -471,13 +459,11 @@ public actor HocuspocusProvider {
                     }
                 }
             },
-            applyAwarenessUpdate: { [awareness, awarenessObservationGate] update in
+            applyAwarenessUpdate: { [awareness, awarenessOrigin] update in
                 guard let awareness else {
                     return
                 }
-                try awarenessObservationGate.withApplyingRemote {
-                    try awareness.applyUpdate(update)
-                }
+                try awareness.applyUpdate(update, origin: awarenessOrigin)
             }
         )
     }
@@ -500,9 +486,7 @@ public actor HocuspocusProvider {
         guard let awareness else {
             return
         }
-        try awarenessObservationGate.withApplyingRemote {
-            try awareness.applyUpdate(update)
-        }
+        try awareness.applyUpdate(update, origin: awarenessOrigin)
     }
 
     private func clearRemoteAwarenessStates() {
