@@ -70,6 +70,7 @@ func providerRetriesIncomingSyncAfterTransactionConflictWithoutReconnecting() as
     let socketFactory = FakeSocketFactory([socket, replacementSocket])
     let conflicts = AsyncStream.makeStream(of: Void.self)
     let statuses = ConnectionStatusRecorder()
+    let heldWrite = HeldWriteTransaction(document: clientDocument)
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1",
@@ -77,7 +78,10 @@ func providerRetriesIncomingSyncAfterTransactionConflictWithoutReconnecting() as
         maxRetries: 1,
         initialDelay: .milliseconds(5),
         maxDelay: .milliseconds(5),
-        onTransactionConflict: { conflicts.continuation.yield(()) },
+        testHooks: .init(onTransactionConflict: {
+            heldWrite.releaseAndWait()
+            conflicts.continuation.yield(())
+        }),
         webSocketFactory: { _ in socketFactory.next() }
     )
     let statusTask = Task {
@@ -90,10 +94,10 @@ func providerRetriesIncomingSyncAfterTransactionConflictWithoutReconnecting() as
     try await provider.connect()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
-    try await expectEventually { statuses.values() == [.connecting, .connected] }
+    await statuses.waitForCount(2)
+    #expect(statuses.values() == [.connecting, .connected])
 
-    let heldWrite = HeldWriteTransaction(document: clientDocument)
-    await heldWrite.waitUntilStarted()
+    await heldWrite.start()
 
     socket.receive(HocuspocusMessage.sync(
         documentName: "room-1",
@@ -102,12 +106,10 @@ func providerRetriesIncomingSyncAfterTransactionConflictWithoutReconnecting() as
     var conflictIterator = conflicts.stream.makeAsyncIterator()
     _ = await conflictIterator.next()
 
-    await heldWrite.release()
-
-    try await expectEventually {
-        try clientDocument.read { transaction in
-            try transaction.string(from: clientText) == "remote"
-        }
+    var syncIterator = provider.isSynced.makeAsyncIterator()
+    #expect(await syncIterator.next() == true)
+    try clientDocument.read { transaction in
+        try #expect(transaction.string(from: clientText) == "remote")
     }
     #expect(!statuses.values().contains(.disconnected))
     #expect(socket.closeCount() == 0)
@@ -129,6 +131,7 @@ func providerRetriesSyncStepOneReplyWithoutDuplicatingIt() async throws {
     let socketFactory = FakeSocketFactory([socket, FakeHocuspocusWebSocket()])
     let conflicts = AsyncStream.makeStream(of: Void.self)
     let statuses = ConnectionStatusRecorder()
+    let heldWrite = HeldWriteTransaction(document: clientDocument)
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1",
@@ -136,7 +139,10 @@ func providerRetriesSyncStepOneReplyWithoutDuplicatingIt() async throws {
         maxRetries: 1,
         initialDelay: .milliseconds(5),
         maxDelay: .milliseconds(5),
-        onTransactionConflict: { conflicts.continuation.yield(()) },
+        testHooks: .init(onTransactionConflict: {
+            heldWrite.releaseAndWait()
+            conflicts.continuation.yield(())
+        }),
         webSocketFactory: { _ in socketFactory.next() }
     )
     let statusTask = Task {
@@ -150,17 +156,16 @@ func providerRetriesSyncStepOneReplyWithoutDuplicatingIt() async throws {
     try await provider.connect()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
-    try await expectEventually { statuses.values() == [.connecting, .connected] }
+    await statuses.waitForCount(2)
+    #expect(statuses.values() == [.connecting, .connected])
 
-    let heldWrite = HeldWriteTransaction(document: clientDocument)
-    await heldWrite.waitUntilStarted()
+    await heldWrite.start()
     socket.receive(HocuspocusMessage.sync(
         documentName: "room-1",
         try YSyncMessage.syncStep1(serverDocument.stateVector())
     ).encoded())
     var conflictIterator = conflicts.stream.makeAsyncIterator()
     _ = await conflictIterator.next()
-    await heldWrite.release()
 
     let reply = try HocuspocusMessage.decode(try await socket.requireSentMessage())
     if case let .sync(documentName, .syncStep2(update, _)) = reply {
@@ -184,6 +189,151 @@ func providerRetriesSyncStepOneReplyWithoutDuplicatingIt() async throws {
 }
 
 @Test
+func providerRetriesWholeSyncFrameWithoutDuplicatingReplies() async throws {
+    let sourceDocument = YDoc(clientID: 28)
+    let sourceText = try sourceDocument.text(named: "body")
+    try sourceDocument.write { transaction in
+        try transaction.insert("A", into: sourceText, at: 0)
+    }
+    let clientDocument = YDoc(clientID: 29)
+    let clientText = try clientDocument.text(named: "body")
+    let serverDocument = YDoc(clientID: 30)
+    let serverText = try serverDocument.text(named: "body")
+    let socket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([socket, FakeHocuspocusWebSocket()])
+    let conflicts = AsyncStream.makeStream(of: Void.self)
+    let statuses = ConnectionStatusRecorder()
+    let syncEvents = LockedCounter()
+    let heldWrite = HeldWriteTransaction(document: clientDocument)
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: clientDocument,
+        maxRetries: 1,
+        initialDelay: .milliseconds(5),
+        maxDelay: .milliseconds(5),
+        testHooks: .init(
+            onTransactionConflict: {
+                heldWrite.releaseAndWait()
+                conflicts.continuation.yield(())
+            },
+            onSyncMessageHandled: { index in
+                if index == 0 {
+                    heldWrite.startAndWait()
+                }
+            },
+            onSyncStatusEmitted: { _ = syncEvents.increment() }
+        ),
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    let statusTask = Task {
+        for await status in provider.connectionStatus {
+            statuses.append(status)
+        }
+    }
+    defer { statusTask.cancel() }
+    var statelessIterator = provider.stateless.makeAsyncIterator()
+
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+    await statuses.waitForCount(2)
+    #expect(statuses.values() == [.connecting, .connected])
+    let frame = HocuspocusMessage.syncMessages(documentName: "room-1", [
+        try YSyncMessage.update(sourceDocument.encodeStateAsUpdateV1()),
+        try YSyncMessage.syncStep1(serverDocument.stateVector()),
+    ]).encoded()
+    socket.receive(frame)
+    var conflictIterator = conflicts.stream.makeAsyncIterator()
+    _ = await conflictIterator.next()
+
+    let reply = try HocuspocusMessage.decode(try await socket.requireSentMessage())
+    if case let .sync(documentName, .syncStep2(update, _)) = reply {
+        #expect(documentName == "room-1")
+        try serverDocument.apply(update)
+    } else {
+        Issue.record("Expected one SyncStep2 reply")
+    }
+    try clientDocument.read { transaction in
+        try #expect(transaction.string(from: clientText) == "A")
+    }
+    try serverDocument.read { transaction in
+        try #expect(transaction.string(from: serverText) == "A")
+    }
+
+    socket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "after-frame").encoded())
+    #expect(await statelessIterator.next() == "after-frame")
+    #expect(socket.sentMessageCount() == 0)
+    #expect(syncEvents.value() <= 1)
+    #expect(!statuses.values().contains(.disconnected))
+    #expect(socket.closeCount() == 0)
+    #expect(socketFactory.createdCount() == 1)
+
+    await provider.disconnect()
+}
+
+@Test
+func providerStopsTransactionRetryWhenDisconnected() async throws {
+    let serverDocument = YDoc(clientID: 31)
+    let serverText = try serverDocument.text(named: "body")
+    try serverDocument.write { transaction in
+        try transaction.insert("remote", into: serverText, at: 0)
+    }
+    let clientDocument = YDoc(clientID: 32)
+    let clientText = try clientDocument.text(named: "body")
+    let frame = HocuspocusMessage.sync(
+        documentName: "room-1",
+        try YSyncMessage.syncStep2(serverDocument.encodeStateAsUpdateV1())
+    ).encoded()
+    let socket = FakeHocuspocusWebSocket()
+    let replacementSocket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([socket, replacementSocket])
+    let pauseEntered = AsyncStream.makeStream(of: Void.self)
+    let pauseGate = AsyncStream.makeStream(of: Void.self)
+    let pauseExited = AsyncStream.makeStream(of: Void.self)
+    let heldWrite = HeldWriteTransaction(document: clientDocument)
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1",
+        document: clientDocument,
+        maxRetries: 1,
+        testHooks: .init(transactionRetryWait: {
+            pauseEntered.continuation.yield(())
+            defer { pauseExited.continuation.yield(()) }
+            var iterator = pauseGate.stream.makeAsyncIterator()
+            _ = await iterator.next()
+            try Task.checkCancellation()
+        }),
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    var statusIterator = provider.connectionStatus.makeAsyncIterator()
+
+    try await provider.connect()
+    #expect(await statusIterator.next() == .connecting)
+    #expect(await statusIterator.next() == .connected)
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+
+    await heldWrite.start()
+    socket.receive(frame)
+    var pauseIterator = pauseEntered.stream.makeAsyncIterator()
+    _ = await pauseIterator.next()
+    await provider.disconnect()
+    #expect(await statusIterator.next() == .disconnected)
+    await heldWrite.release()
+    pauseGate.continuation.finish()
+    var exitedIterator = pauseExited.stream.makeAsyncIterator()
+    _ = await exitedIterator.next()
+
+    #expect(socketFactory.createdCount() == 1)
+    #expect(socket.sentMessageCount() == 0)
+    #expect(replacementSocket.sentMessageCount() == 0)
+    try clientDocument.read { transaction in
+        try #expect(transaction.string(from: clientText) == "")
+    }
+}
+
+@Test
 func providerReconnectsAfterIncomingTransactionRetriesAreExhausted() async throws {
     let serverDocument = YDoc(clientID: 25)
     let serverText = try serverDocument.text(named: "body")
@@ -197,10 +347,10 @@ func providerReconnectsAfterIncomingTransactionRetriesAreExhausted() async throw
     let firstSocket = FakeHocuspocusWebSocket()
     let secondSocket = FakeHocuspocusWebSocket()
     let socketFactory = FakeSocketFactory([firstSocket, secondSocket])
-    let allowReconnect = DispatchSemaphore(value: 0)
-    defer { allowReconnect.signal() }
     let conflicts = AsyncStream.makeStream(of: Void.self)
     let statuses = ConnectionStatusRecorder()
+    let heldWrite = HeldWriteTransaction(document: clientDocument)
+    let conflictCount = LockedCounter()
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1",
@@ -208,14 +358,13 @@ func providerReconnectsAfterIncomingTransactionRetriesAreExhausted() async throw
         maxRetries: 1,
         initialDelay: .milliseconds(5),
         maxDelay: .milliseconds(5),
-        onTransactionConflict: { conflicts.continuation.yield(()) },
-        webSocketFactory: { _ in
-            let socket = socketFactory.next()
-            if socket === secondSocket {
-                allowReconnect.wait()
+        testHooks: .init(onTransactionConflict: {
+            if conflictCount.increment() == 8 {
+                heldWrite.releaseAndWait()
             }
-            return socket
-        }
+            conflicts.continuation.yield(())
+        }),
+        webSocketFactory: { _ in socketFactory.next() }
     )
     let statusTask = Task {
         for await status in provider.connectionStatus {
@@ -228,26 +377,23 @@ func providerReconnectsAfterIncomingTransactionRetriesAreExhausted() async throw
     try await provider.connect()
     _ = try await firstSocket.requireSentMessage()
     _ = try await firstSocket.requireSentMessage()
-    try await expectEventually { statuses.values() == [.connecting, .connected] }
+    await statuses.waitForCount(2)
+    #expect(statuses.values() == [.connecting, .connected])
 
-    let heldWrite = HeldWriteTransaction(document: clientDocument)
-    await heldWrite.waitUntilStarted()
+    await heldWrite.start()
     firstSocket.receive(frame)
     var conflictIterator = conflicts.stream.makeAsyncIterator()
     for _ in 0..<8 {
         _ = await conflictIterator.next()
     }
-    await heldWrite.release()
-    allowReconnect.signal()
 
     _ = try await secondSocket.requireSentMessage()
     let handshake = try HocuspocusMessage.decode(try await secondSocket.requireSentMessage())
     if case .sync(documentName: "room-1", .syncStep1) = handshake {} else {
         Issue.record("Expected a fresh SyncStep1 after retry exhaustion")
     }
-    try await expectEventually {
-        statuses.values() == [.connecting, .connected, .disconnected, .connecting, .connected]
-    }
+    await statuses.waitForCount(5)
+    #expect(statuses.values() == [.connecting, .connected, .disconnected, .connecting, .connected])
     #expect(firstSocket.closeCount() == 1)
     #expect(socketFactory.createdCount() == 2)
     try clientDocument.read { transaction in
@@ -801,53 +947,126 @@ private struct TestWebSocketError: Error {}
 private struct TestTokenError: Error {}
 
 private final class HeldWriteTransaction: @unchecked Sendable {
+    private let document: YDoc
+    private let lock = NSLock()
+    private var startedWork = false
+    private var released = false
     private let releaseSignal = DispatchSemaphore(value: 0)
+    private let startedSignal = DispatchSemaphore(value: 0)
+    private let endedSignal = DispatchSemaphore(value: 0)
     private let started = AsyncStream.makeStream(of: Void.self)
     private let ended = AsyncStream.makeStream(of: Void.self)
 
     init(document: YDoc) {
-        let started = self.started.continuation
-        let ended = self.ended.continuation
-        let releaseSignal = self.releaseSignal
-        DispatchQueue.global().async {
-            do {
-                try document.write { _ in
-                    started.yield(())
-                    releaseSignal.wait()
-                }
-            } catch {
-                Issue.record("Failed to hold write transaction: \(error)")
-            }
-            ended.yield(())
-        }
+        self.document = document
     }
 
     deinit {
         releaseSignal.signal()
     }
 
-    func waitUntilStarted() async {
+    func start() async {
+        begin()
         var iterator = started.stream.makeAsyncIterator()
         _ = await iterator.next()
     }
 
+    func startAndWait() {
+        if begin() {
+            startedSignal.wait()
+        }
+    }
+
+    func releaseAndWait() {
+        guard markReleased() else { return }
+        releaseSignal.signal()
+        endedSignal.wait()
+    }
+
     func release() async {
+        guard markReleased() else { return }
         releaseSignal.signal()
         var iterator = ended.stream.makeAsyncIterator()
         _ = await iterator.next()
+    }
+
+    @discardableResult
+    private func begin() -> Bool {
+        let shouldStart = lock.withLock {
+            guard !startedWork else { return false }
+            startedWork = true
+            return true
+        }
+        guard shouldStart else { return false }
+
+        let document = self.document
+        let started = self.started.continuation
+        let ended = self.ended.continuation
+        let releaseSignal = self.releaseSignal
+        let startedSignal = self.startedSignal
+        let endedSignal = self.endedSignal
+        DispatchQueue.global().async {
+            do {
+                try document.write { _ in
+                    started.yield(())
+                    startedSignal.signal()
+                    releaseSignal.wait()
+                }
+            } catch {
+                Issue.record("Failed to hold write transaction: \(error)")
+                started.yield(())
+                startedSignal.signal()
+            }
+            ended.yield(())
+            endedSignal.signal()
+        }
+        return true
+    }
+
+    private func markReleased() -> Bool {
+        lock.withLock {
+            guard !released else { return false }
+            released = true
+            return true
+        }
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
+
+    func value() -> Int {
+        lock.withLock { count }
     }
 }
 
 private final class ConnectionStatusRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var statuses: [ConnectionStatus] = []
+    private let signal = AsyncStream.makeStream(of: Void.self)
 
     func append(_ status: ConnectionStatus) {
         lock.withLock { statuses.append(status) }
+        signal.continuation.yield(())
     }
 
     func values() -> [ConnectionStatus] {
         lock.withLock { statuses }
+    }
+
+    func waitForCount(_ count: Int) async {
+        var iterator = signal.stream.makeAsyncIterator()
+        while values().count < count {
+            _ = await iterator.next()
+        }
     }
 }
 
