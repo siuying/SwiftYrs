@@ -24,6 +24,9 @@ protocol HocuspocusWebSocket: Sendable {
 
 public actor HocuspocusProvider {
     public static let productName = "SwiftYrsHocuspocus"
+    // Match CloudKitProvider's transaction retry policy.
+    private static let maxTransactionAttempts = 8
+    private static let transactionRetryDelay: Duration = .milliseconds(5)
 
     public nonisolated let connectionStatus: AsyncStream<ConnectionStatus>
     public nonisolated let isSynced: AsyncStream<Bool>
@@ -39,6 +42,7 @@ public actor HocuspocusProvider {
     private let initialDelay: Duration
     private let maxDelay: Duration
     private let webSocketFactory: @Sendable (URL) -> any HocuspocusWebSocket
+    private let onTransactionConflict: (@Sendable () -> Void)?
     private let connectionStatusContinuation: AsyncStream<ConnectionStatus>.Continuation
     private let isSyncedContinuation: AsyncStream<Bool>.Continuation
     private let authStatusContinuation: AsyncStream<AuthStatus>.Continuation
@@ -86,6 +90,7 @@ public actor HocuspocusProvider {
         maxRetries: Int = .max,
         initialDelay: Duration = .seconds(1),
         maxDelay: Duration = .seconds(30),
+        onTransactionConflict: (@Sendable () -> Void)? = nil,
         webSocketFactory: @escaping @Sendable (URL) -> any HocuspocusWebSocket
     ) {
         self.url = url
@@ -96,6 +101,7 @@ public actor HocuspocusProvider {
         self.maxRetries = maxRetries
         self.initialDelay = initialDelay
         self.maxDelay = maxDelay
+        self.onTransactionConflict = onTransactionConflict
         self.webSocketFactory = webSocketFactory
 
         let connectionStatusPair = AsyncStream.makeStream(of: ConnectionStatus.self)
@@ -260,11 +266,9 @@ public actor HocuspocusProvider {
         let message = try HocuspocusMessage.decode(data)
         switch message {
         case let .sync(_, syncMessage):
-            try await handle(syncMessage)
+            try await handle([syncMessage])
         case let .syncMessages(_, syncMessages):
-            for syncMessage in syncMessages {
-                try await handle(syncMessage)
-            }
+            try await handle(syncMessages)
         case let .auth(_, auth):
             try await handle(auth)
         case let .awareness(_, update):
@@ -278,18 +282,43 @@ public actor HocuspocusProvider {
         }
     }
 
-    private func handle(_ syncMessage: YSyncMessage) async throws {
+    private func handle(_ syncMessages: [YSyncMessage]) async throws {
         guard let webSocket else {
             return
         }
-        var outgoing: [YSyncMessage] = []
-        let syncEngine = makeSyncEngine { message in
-            outgoing.append(message)
-        }
-        let result = try syncEngine.handle(syncMessage)
-        try await sendEngineMessages(outgoing, on: webSocket)
-        if result.didSync {
-            isSyncedContinuation.yield(true)
+        var attempts = 0
+        while true {
+            try Task.checkCancellation()
+            guard !disconnectRequested else { throw CancellationError() }
+
+            var outgoing: [YSyncMessage] = []
+            let syncEngine = makeSyncEngine { message in
+                outgoing.append(message)
+            }
+            var didSync = false
+            do {
+                for message in syncMessages {
+                    let result = try syncEngine.handle(message)
+                    didSync = didSync || result.didSync
+                }
+            } catch YError.transactionConflict {
+                onTransactionConflict?()
+                attempts += 1
+                guard attempts < Self.maxTransactionAttempts else {
+                    // Reconnect after exhaustion so a full resync can recover this frame.
+                    throw YError.transactionConflict
+                }
+                try await Task.sleep(for: Self.transactionRetryDelay)
+                continue
+            }
+
+            try Task.checkCancellation()
+            guard !disconnectRequested else { throw CancellationError() }
+            try await sendEngineMessages(outgoing, on: webSocket)
+            if didSync {
+                isSyncedContinuation.yield(true)
+            }
+            return
         }
     }
 
