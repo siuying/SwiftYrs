@@ -5,8 +5,8 @@ import SwiftYrs
 
 extension RealNetworkE2E {
     /// Awareness (presence) propagation over the WebRTC transport, interoperable
-    /// with the real `y-webrtc` peer: presence flows both directions, and a peer's
-    /// collaborators disappear when its data channel closes.
+    /// with the real `y-webrtc` peer: presence flows both directions, and a
+    /// graceful shutdown broadcasts local removal before the channel closes.
     @Suite(.serialized)
     struct WebRTCAwarenessInteropTests {
         @Test

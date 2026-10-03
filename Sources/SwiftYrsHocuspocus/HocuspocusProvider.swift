@@ -252,6 +252,7 @@ public actor HocuspocusProvider {
         }
         webSocket?.close()
         webSocket = nil
+        clearRemoteAwarenessStates()
         connectionStatusContinuation.yield(.disconnected)
         guard retryAttempt < maxRetries else {
             return
@@ -515,9 +516,8 @@ public actor HocuspocusProvider {
         guard let awareness, let states = try? awareness.states() else {
             return
         }
-        for state in states where state.clientID != awareness.clientID {
-            awareness.removeState(for: state.clientID)
-        }
+        let clientIDs = states.map(\.clientID).filter { $0 != awareness.clientID }
+        awareness.removeStates(for: clientIDs, origin: awarenessOrigin)
     }
 }
 

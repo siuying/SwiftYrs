@@ -41,6 +41,8 @@ public final class YAwareness {
     private var accessDepth = 0
     private var deliveringEvents = false
     private var pendingEvents: [() -> Void] = []
+    private var removalEvent: YAwarenessChange?
+    private var suppressEvents = false
 
     public convenience init(document: YDoc) {
         self.init(document: document, timing: .init())
@@ -109,11 +111,53 @@ public final class YAwareness {
     }
 
     public func clearLocalState() {
-        withAccess { yrs_bridge_awareness_clear_local_state(handle) }
+        clearLocalState(origin: nil)
     }
 
+    public func clearLocalState(origin: String?) {
+        withAccess { removeState(for: clientID, origin: origin) }
+    }
+
+    /// Removes an active state, retaining remote clocks like Yjs.
     public func removeState(for clientID: UInt64) {
-        withAccess { yrs_bridge_awareness_remove_state(handle, clientID) }
+        removeState(for: clientID, origin: nil)
+    }
+
+    public func removeState(for clientID: UInt64, origin: String?) {
+        removeStates(for: [clientID], origin: origin)
+    }
+
+    /// Emits one change and update for the active clients that were removed.
+    public func removeStates(for clientIDs: [UInt64], origin: String? = nil) {
+        do {
+            try withAccess {
+                var seen = Set<UInt64>()
+                let removed = clientIDs.filter { seen.insert($0).inserted && hasState(for: $0) }
+                guard !removed.isEmpty else { return }
+                let remote = removed.filter { $0 != clientID }
+                let update = remote.isEmpty ? nil : try encodeClientUpdate(for: remote).removingStates()
+                let previousOrigin = eventOrigin
+                let previousRemoval = removalEvent
+                eventOrigin = origin
+                removalEvent = YAwarenessChange(added: [], updated: [], removed: removed, origin: origin)
+                defer {
+                    eventOrigin = previousOrigin
+                    removalEvent = previousRemoval
+                    suppressEvents = false
+                }
+                if removed.contains(clientID) {
+                    // Defer the combined event until the remote states are gone.
+                    suppressEvents = update != nil
+                    yrs_bridge_awareness_remove_state(handle, clientID)
+                    suppressEvents = false
+                }
+                if let update {
+                    try applyUpdate(update, origin: origin)
+                }
+            }
+        } catch {
+            preconditionFailure("YrsBridge failed to remove known awareness states: \(error)")
+        }
     }
 
     public func localState() throws -> Any? {
@@ -265,12 +309,13 @@ public final class YAwareness {
                 handle: handle, observe: operation, synchronizationLock: lock, onCancel: delivery.cancel
             ) { [weak self] event in
                 guard let self else { return }
+                guard !self.suppressEvents else { return }
                 let delivered: YEvent
                 switch event {
                 case let .awarenessUpdate(change):
-                    delivered = .awarenessUpdate(self.withOrigin(change, origin: self.eventOrigin))
+                    delivered = .awarenessUpdate(self.removalEvent ?? self.withOrigin(change, origin: self.eventOrigin))
                 case let .awarenessChange(change):
-                    delivered = .awarenessChange(self.withOrigin(change, origin: self.eventOrigin))
+                    delivered = .awarenessChange(self.removalEvent ?? self.withOrigin(change, origin: self.eventOrigin))
                 default:
                     delivered = event
                 }

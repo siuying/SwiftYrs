@@ -134,3 +134,92 @@ private final class WebRTCAwarenessClock: @unchecked Sendable {
     func now() -> Duration { lock.withLock { time } }
     func set(_ time: Duration) { lock.withLock { self.time = time } }
 }
+
+@Test
+func webRTCPeerCloseRetainsAwarenessUntilTimeoutAndAcceptsNextClock() async throws {
+    let clock = WebRTCAwarenessClock()
+    let document = YDoc(clientID: 1)
+    let awareness = YAwareness(
+        document: document, timing: .init(checkInterval: .seconds(3600)), now: { clock.now() }
+    )
+    let remote = YAwareness(document: YDoc(clientID: 2))
+    try remote.setLocalState(["name": "remote"])
+    let provider = WebRTCProvider(
+        "peer-close-awareness", doc: document, signaling: [],
+        options: .init(awareness: awareness, iceServers: [])
+    )
+    try await provider.connect()
+    let peers = provider.peers
+    await provider.handleSignal(from: "remote", token: 1, signal: .offer(sdp: "v=0"))
+    #expect(try await nextTestEvent(peers)?.added == ["remote"])
+    let connection = try #require(await provider.peerConnection(for: "remote"))
+    let received = try #require(connection.onData)
+    let closed = try #require(connection.onClosed)
+    let updates = try awareness.updateEvents()
+    received(try YSyncMessage.awareness(remote.encodeUpdate()).payload)
+    if case let .awarenessUpdate(change) = try await nextTestEvent(updates) {
+        #expect(change.added == [2])
+        #expect(change.origin == "SwiftYrsWebRTC")
+    } else {
+        Issue.record("Expected remote awareness")
+    }
+    #expect(await provider.peerCount == 1)
+    let beforeClose = try awareness.encodeUpdate(for: [2])
+    let removals = WebRTCAwarenessRemovals()
+    let observation = try awareness.observeUpdate { event in
+        if case let .awarenessUpdate(change) = event, !change.removed.isEmpty { removals.append(change) }
+    }
+    defer { observation.cancel() }
+    closed()
+    #expect(try await nextTestEvent(peers)?.removed == ["remote"])
+    #expect(await provider.peerCount == 0)
+    #expect(try awareness.encodeUpdate(for: [2]) == beforeClose)
+    #expect(removals.values.isEmpty)
+
+    clock.set(.milliseconds(29_999))
+    try awareness.checkTimeouts()
+    #expect(try awareness.state(for: 2) != nil)
+    clock.set(.seconds(30))
+    try awareness.checkTimeouts()
+    #expect(try awareness.state(for: 2) == nil)
+    #expect(removals.values == [YAwarenessChange(added: [], updated: [], removed: [2], origin: YAwarenessChange.timeoutOrigin)])
+    #expect(try awareness.encodeUpdate(for: [2]).data == Data([1, 2, 1, 4] + Array("null".utf8)))
+    try remote.setLocalState(["name": "returned"])
+    try awareness.applyUpdate(remote.encodeUpdate())
+    #expect(try (awareness.state(for: 2) as? [String: Any])?["name"] as? String == "returned")
+    await provider.destroy()
+}
+
+@Test(arguments: [false, true])
+func webRTCStopsRemoveOnlyLocalAwarenessWithDisconnectOrigin(destroy: Bool) async throws {
+    let document = YDoc(clientID: 1)
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    let remote = YAwareness(document: YDoc(clientID: 2))
+    try awareness.setLocalState(["name": "local"])
+    try remote.setLocalState(["name": "remote"])
+    try awareness.applyUpdate(remote.encodeUpdate())
+    let provider = WebRTCProvider(
+        "local-removal", doc: document, signaling: [], options: .init(awareness: awareness, iceServers: [])
+    )
+    let removals = WebRTCAwarenessRemovals()
+    let observation = try awareness.observeUpdate { event in
+        if case let .awarenessUpdate(change) = event { removals.append(change) }
+    }
+    defer { observation.cancel() }
+    try await provider.connect()
+    if destroy { await provider.destroy() } else { await provider.disconnect() }
+    #expect(removals.values == [YAwarenessChange(added: [], updated: [], removed: [1], origin: "disconnect")])
+    #expect(try awareness.localState() == nil)
+    #expect(try awareness.state(for: 2) != nil)
+    #expect(try awareness.encodeUpdate(for: [1]).data == Data([1, 1, 2, 4] + Array("null".utf8)))
+    await provider.disconnect()
+    #expect(removals.values.count == 1)
+}
+
+private final class WebRTCAwarenessRemovals: @unchecked Sendable {
+    private let lock = NSLock()
+    private var changes: [YAwarenessChange] = []
+
+    var values: [YAwarenessChange] { lock.withLock { changes } }
+    func append(_ change: YAwarenessChange) { lock.withLock { changes.append(change) } }
+}

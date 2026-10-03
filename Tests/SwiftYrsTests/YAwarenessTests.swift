@@ -247,6 +247,25 @@ func awarenessOnlyAcceptedRemoteUpdatesRefreshLifetime() throws {
 }
 
 @Test
+func awarenessArrivalCallbackCannotShiftRemoteExpiryTimestamp() throws {
+    let clock = AwarenessTestClock()
+    let awareness = YAwareness(document: YDoc(clientID: 1), now: { clock.now() })
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    try peer.setLocalState(["name": "peer"])
+    var expired = false
+    let observation = try awareness.observeChange { event in
+        guard case let .awarenessChange(change) = event else { return }
+        if change.added == [2] { clock.set(.seconds(30)) }
+        if change.removed == [2] { expired = true }
+    }
+    defer { observation.cancel() }
+    try awareness.applyUpdate(peer.encodeUpdate())
+    try awareness.checkTimeouts()
+    #expect(expired)
+    #expect(try awareness.state(for: 2) == nil)
+}
+
+@Test
 func awarenessDoesNotRenewNullLocalState() throws {
     let clock = AwarenessTestClock()
     let local = YAwareness(document: YDoc(clientID: 1), now: { clock.now() })
@@ -349,9 +368,10 @@ func awarenessCallbacksCanReenterFromAnotherThread() async throws {
     }
 }
 
-@Test
-func awarenessCancellationSkipsQueuedCallbacksWithoutWaitingForDelivery() async throws {
+@Test(arguments: [false, true])
+func awarenessCancellationSkipsQueuedCallbacksWithoutWaitingForDelivery(removingState: Bool) async throws {
     let awareness = YAwareness(document: YDoc(clientID: 1))
+    if removingState { try awareness.setLocalState(["name": "Ada"]) }
     let entered = AsyncStream.makeStream(of: Void.self)
     let release = DispatchSemaphore(value: 0)
     let changes = try awareness.observeChange { _ in
@@ -368,7 +388,11 @@ func awarenessCancellationSkipsQueuedCallbacksWithoutWaitingForDelivery() async 
     let completed = AsyncStream.makeStream(of: Result<Void, Error>.self)
     Thread {
         completed.continuation.yield(Result {
-            try awareness.setLocalState(["name": "Ada"])
+            if removingState {
+                awareness.removeStates(for: [1], origin: "caller")
+            } else {
+                try awareness.setLocalState(["name": "Ada"])
+            }
         })
         completed.continuation.finish()
     }.start()
@@ -408,6 +432,164 @@ private final class AwarenessTestClock: @unchecked Sendable {
 
     func now() -> Duration { lock.withLock { time } }
     func set(_ time: Duration) { lock.withLock { self.time = time } }
+}
+
+@Test
+func awarenessRemovalKeepsRemoteClockAndAcceptsNextUpdate() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    try peer.setLocalState(["name": "peer"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    awareness.removeState(for: 2)
+    // One entry: client 2, clock 1, JSON null.
+    #expect(try awareness.encodeUpdate(for: [2]).data == Data([1, 2, 1, 4] + Array("null".utf8)))
+    try peer.setLocalState(["name": "returned"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    #expect(try (awareness.state(for: 2) as? [String: Any])?["name"] as? String == "returned")
+}
+
+@Test
+func awarenessConcurrentBatchRemovalPreservesLatestRemoteClock() async throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    var updates: [YAwarenessUpdate] = []
+    for version in 1...200 {
+        try peer.setLocalState(["version": version])
+        updates.append(try peer.encodeUpdate())
+    }
+    let receiver = Task.detached { [updates] in
+        for update in updates { try awareness.applyUpdate(update) }
+    }
+    let remover = Task.detached {
+        for _ in 1...200 { awareness.removeStates(for: [2, 99, 2], origin: "caller") }
+    }
+    try await receiver.value
+    await remover.value
+    awareness.removeStates(for: [2], origin: "caller")
+    #expect(try awareness.encodeUpdate(for: [2]).data == Data([1, 2, 0xc8, 1, 4] + Array("null".utf8)))
+    #expect(throws: YError.self) { try awareness.encodeUpdate(for: [99]) }
+    try peer.setLocalState(["version": 201])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    #expect(try (awareness.state(for: 2) as? [String: Any])?["version"] as? Int == 201)
+}
+
+@Test
+func awarenessRemovalOfUnknownOrAlreadyRemovedClientDoesNothing() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    var events: [YEvent] = []
+    let update = try awareness.observeUpdate { events.append($0) }
+    let change = try awareness.observeChange { events.append($0) }
+    defer { update.cancel(); change.cancel() }
+
+    awareness.removeState(for: 99)
+    awareness.clearLocalState()
+    #expect(events.isEmpty)
+    #expect(throws: YError.self) { try awareness.encodeUpdate(for: [99]) }
+    #expect(throws: YError.self) { try awareness.encodeUpdate(for: [1]) }
+
+    try awareness.setLocalState(["name": "local"])
+    awareness.removeState(for: 1)
+    let removed = try awareness.encodeUpdate(for: [1])
+    events.removeAll()
+    awareness.removeState(for: 1)
+    awareness.clearLocalState()
+    #expect(events.isEmpty)
+    #expect(try awareness.encodeUpdate(for: [1]) == removed)
+}
+
+@Test
+func awarenessRemovalOfLocalClientIncrementsClockAndEmits() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    try awareness.setLocalState(["name": "local"])
+    var events: [YEvent] = []
+    let update = try awareness.observeUpdate { events.append($0) }
+    let change = try awareness.observeChange { events.append($0) }
+    defer { update.cancel(); change.cancel() }
+    awareness.removeState(for: 1)
+    #expect(try awareness.encodeUpdate(for: [1]).data == Data([1, 1, 2, 4] + Array("null".utf8)))
+    #expect(events.compactMap(tag) == [.change, .update])
+    #expect(events.compactMap(awarenessChange).allSatisfy { $0.removed == [1] })
+}
+
+@Test(arguments: [false, true])
+func awarenessBatchRemovalEmitsOnceWithCallerOrigin(includingLocal: Bool) throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    let other = YAwareness(document: YDoc(clientID: 3))
+    try awareness.setLocalState(["name": "local"])
+    try peer.setLocalState(["name": "peer"])
+    try other.setLocalState(["name": "other"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    try awareness.applyUpdate(other.encodeUpdate())
+    let ids: [UInt64] = includingLocal ? [2, 1, 3] : [2, 3]
+    var events: [YEvent] = []
+    var sawRemovedStates = false
+    let update = try awareness.observeUpdate { events.append($0) }
+    let change = try awareness.observeChange {
+        events.append($0)
+        sawRemovedStates = ids.allSatisfy { (try? awareness.state(for: $0)) == nil }
+    }
+    defer { update.cancel(); change.cancel() }
+    awareness.removeStates(for: ids + [2, 99], origin: "caller")
+    #expect(sawRemovedStates)
+    #expect(events.compactMap(tag) == [.change, .update])
+    for event in events {
+        #expect(awarenessChange(event) == YAwarenessChange(added: [], updated: [], removed: ids, origin: "caller"))
+    }
+    #expect(try awareness.encodeUpdate(for: [2]).data == Data([1, 2, 1, 4] + Array("null".utf8)))
+    #expect(try awareness.encodeUpdate(for: [3]).data == Data([1, 3, 1, 4] + Array("null".utf8)))
+    if includingLocal {
+        #expect(try awareness.encodeUpdate(for: [1]).data == Data([1, 1, 2, 4] + Array("null".utf8)))
+    }
+    awareness.removeStates(for: ids, origin: "again")
+    #expect(events.count == 2)
+    try awareness.setLocalState(["name": "returned"])
+    #expect(awarenessChange(try #require(events.last))?.origin == nil)
+}
+
+@Test
+func awarenessRemovalOriginDoesNotLeakIntoNestedMutation() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    try peer.setLocalState(["name": "peer"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    var events: [YAwarenessChange] = []
+    let queue = DispatchQueue(label: "awareness-removal-reentry")
+    let update = try awareness.observeUpdate {
+        if case let .awarenessUpdate(change) = $0 { events.append(change) }
+    }
+    let change = try awareness.observeChange {
+        guard case let .awarenessChange(change) = $0, change.removed == [2] else { return }
+        do { try queue.sync { try awareness.setLocalState(["name": "nested"]) } }
+        catch { Issue.record("Failed nested mutation: \(error)") }
+    }
+    defer { update.cancel(); change.cancel() }
+    awareness.removeState(for: 2, origin: "caller")
+    #expect(events.first?.removed == [2])
+    #expect(events.first?.origin == "caller")
+    #expect(events.last?.added == [1])
+    #expect(events.last?.origin == nil)
+    awareness.clearLocalState(origin: "local removal")
+    #expect(events.last?.origin == "local removal")
+}
+
+@Test
+func awarenessAppliedRemovalUsesCallerOrigin() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    try peer.setLocalState(["name": "peer"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    var events: [YEvent] = []
+    let update = try awareness.observeUpdate { events.append($0) }
+    let change = try awareness.observeChange { events.append($0) }
+    defer { update.cancel(); change.cancel() }
+    let removal = YAwarenessUpdate(Data([1, 2, 1, 4] + Array("null".utf8)))
+    try awareness.applyUpdate(removal, origin: "wire")
+    #expect(events.compactMap(tag) == [.change, .update])
+    #expect(events.compactMap(awarenessChange).allSatisfy { $0.removed == [2] && $0.origin == "wire" })
+    try peer.setLocalState(["name": "returned"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    #expect(awarenessChange(try #require(events.last))?.origin == nil)
 }
 
 @Test

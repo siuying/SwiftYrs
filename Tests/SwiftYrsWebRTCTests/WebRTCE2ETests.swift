@@ -136,8 +136,8 @@ extension RealNetworkE2E {
             }
         }
 
-        @Test
-        func destroyBroadcastsOwnedAwarenessRemoval() async throws {
+        @Test(arguments: [false, true])
+        func stoppingBroadcastsLocalAwarenessRemoval(destroy: Bool) async throws {
             try await withE2EProcesses { processes in
                 let server = try processes.node(script: "webrtc-signaling-server.ts")
                 let ready = try await server.waitForLine("signaling server ready") { $0["type"] as? String == "ready" }
@@ -175,11 +175,13 @@ extension RealNetworkE2E {
                         try awarenessB.state(for: clientID) != nil
                     }
 
-                    await providerA.destroy()
+                    if destroy { await providerA.destroy() } else { await providerA.disconnect() }
 
-                    try await e2eEventually("awareness state removed after A destroys", timeout: .seconds(30)) {
+                    try await e2eEventually("awareness state removed after A stops", timeout: .seconds(30)) {
                         try awarenessB.state(for: clientID) == nil
                     }
+                    _ = await providerB.peerCount
+                    #expect(try awarenessB.encodeUpdate(for: [11]).data == Data([1, 11, 2, 4] + Array("null".utf8)))
                 }
             }
         }

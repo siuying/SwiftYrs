@@ -48,6 +48,13 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
     #expect(sourceForwards.value() == 0)
     #expect(sourceSocket.sentMessageCount() == 0)
     await source.disconnect()
+    let removal = try HocuspocusMessage.decode(
+        try await otherSocket.requireSentMessage(timeout: .milliseconds(500))
+    )
+    #expect(removal == .awareness(
+        documentName: "room-1", YAwarenessUpdate(Data([1, 90, 1, 4] + Array("null".utf8)))
+    ))
+    #expect(sourceSocket.sentMessageCount() == 0)
     await other.disconnect()
 }
 
@@ -878,6 +885,11 @@ func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async thro
     await provider.disconnect()
     #expect(try localAwareness.state(for: remoteAwareness.clientID) == nil)
     #expect(try localAwareness.localState() != nil)
+    #expect(try localAwareness.encodeUpdate(for: [7]).data == Data([1, 7, 1, 4] + Array("null".utf8)))
+    try remoteAwareness.setLocalState(["name": "returned"])
+    try localAwareness.applyUpdate(remoteAwareness.encodeUpdate(for: [7]))
+    #expect(try (localAwareness.state(for: 7) as? [String: Any])?["name"] as? String == "returned")
+    try await socket.expectNoSentMessage(for: .milliseconds(20))
 }
 
 @Test
@@ -912,6 +924,75 @@ func providerAnswersAwarenessQueriesWithKnownStates() async throws {
     }
 
     await provider.disconnect()
+}
+
+@Test(arguments: [false, true])
+func providerCloseRemovesRemoteAwarenessInOneEventWithoutBroadcast(unexpected: Bool) async throws {
+    let document = YDoc(clientID: 1)
+    let awareness = YAwareness(document: document)
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    let other = YAwareness(document: YDoc(clientID: 3))
+    try awareness.setLocalState(["name": "local"])
+    try peer.setLocalState(["name": "peer"])
+    try other.setLocalState(["name": "other"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    try awareness.applyUpdate(other.encodeUpdate())
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!, name: "room-1",
+        document: document, awareness: awareness, maxRetries: 0,
+        webSocketFactory: { _ in socket }
+    )
+    var statuses = provider.connectionStatus.makeAsyncIterator()
+    try await provider.connect()
+    #expect(await statuses.next() == .connecting)
+    #expect(await statuses.next() == .connected)
+    for _ in 0..<3 { _ = try await socket.requireSentMessage() }
+    var changes: [YAwarenessChange] = []
+    var updates: [YAwarenessChange] = []
+    let change = try awareness.observeChange {
+        if case let .awarenessChange(event) = $0 { changes.append(event) }
+    }
+    let update = try awareness.observeUpdate {
+        if case let .awarenessUpdate(event) = $0 { updates.append(event) }
+    }
+    defer { change.cancel(); update.cancel() }
+    if unexpected { socket.failReceive() } else { await provider.disconnect() }
+    #expect(await statuses.next() == .disconnected)
+    #expect(changes.count == 1)
+    #expect(updates == changes)
+    #expect(changes.first?.removed.sorted() == [2, 3])
+    #expect(changes.first?.origin.flatMap(UUID.init(uuidString:)) != nil)
+    #expect(try awareness.localState() != nil)
+    #expect(try awareness.encodeUpdate(for: [2]).data == Data([1, 2, 1, 4] + Array("null".utf8)))
+    #expect(try awareness.encodeUpdate(for: [3]).data == Data([1, 3, 1, 4] + Array("null".utf8)))
+    #expect(socket.sentMessageCount() == 0)
+    await provider.disconnect()
+    #expect(updates.count == 1)
+    try peer.setLocalState(["name": "returned"])
+    try awareness.applyUpdate(peer.encodeUpdate())
+    #expect(try (awareness.state(for: 2) as? [String: Any])?["name"] as? String == "returned")
+}
+
+@Test
+func providerBroadcastsLocalRemovalAtIncrementedClock() async throws {
+    let document = YDoc(clientID: 1)
+    let awareness = YAwareness(document: document)
+    try awareness.setLocalState(["name": "local"])
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!, name: "room-1",
+        document: document, awareness: awareness, webSocketFactory: { _ in socket }
+    )
+    try await provider.connect()
+    for _ in 0..<3 { _ = try await socket.requireSentMessage() }
+    awareness.clearLocalState(origin: "page hide")
+    let frame = try await socket.requireSentMessage(timeout: .milliseconds(500))
+    #expect(try HocuspocusMessage.decode(frame) == .awareness(
+        documentName: "room-1", YAwarenessUpdate(Data([1, 1, 2, 4] + Array("null".utf8)))
+    ))
+    await provider.disconnect()
+    #expect(socket.sentMessageCount() == 0)
 }
 
 @Test
