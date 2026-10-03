@@ -135,14 +135,16 @@ public enum YSyncProtocol {
     }
 
     public static func handle(_ payload: Data, awareness: YAwareness) throws -> Data {
-        try withUInt8Pointer(payload) { pointer, length in
-            return try readingBuffer {
-                yrs_bridge_sync_handle(
-                    awareness.handle,
-                    pointer,
-                    length,
-                    &$0
-                )
+        try awareness.withTrackedUpdates {
+            try withUInt8Pointer(payload) { pointer, length in
+                return try readingBuffer {
+                    yrs_bridge_sync_handle(
+                        awareness.handle,
+                        pointer,
+                        length,
+                        &$0
+                    )
+                }
             }
         }
     }

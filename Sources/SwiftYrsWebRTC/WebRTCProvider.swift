@@ -106,6 +106,8 @@ public actor WebRTCProvider {
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
     private var reannounceTask: Task<Void, Never>?
+    private var awarenessTask: Task<Void, Never>?
+    private var awarenessTaskID: UUID?
     private var started = false
     private var connectionStatus: WebRTCConnectionStatus = .disconnected
     private var lastSynced = false
@@ -164,6 +166,7 @@ public actor WebRTCProvider {
         started = true
         emitStatus(.connecting)
         try startObserving()
+        startAwarenessMaintenance()
         signalingConnections = signalingURLs.map { url in
             SignalingConnection(
                 url: url,
@@ -198,6 +201,7 @@ public actor WebRTCProvider {
     /// closing peers, then finishes the event streams so iterators end.
     public func destroy() async {
         guard started else { return }
+        stopAwarenessMaintenance()
         if ownsAwareness {
             await clearOwnedAwareness()
         }
@@ -218,8 +222,19 @@ public actor WebRTCProvider {
     /// observations are torn down afterwards in `finishTearDown`.
     private func beginTearDown() {
         started = false
+        stopAwarenessMaintenance()
         reannounceTask?.cancel()
         reannounceTask = nil
+    }
+
+    private func stopAwarenessMaintenance() {
+        awarenessTaskID = nil
+        awarenessTask?.cancel()
+        awarenessTask = nil
+    }
+
+    deinit {
+        awarenessTask?.cancel()
     }
 
     /// Releases everything that does not need to outlive a stop: signaling
@@ -515,6 +530,30 @@ public actor WebRTCProvider {
                 Task { [weak self] in await self?.broadcastAwarenessUpdate(update) }
             }
         }
+    }
+
+    private func startAwarenessMaintenance() {
+        let id = UUID()
+        awarenessTaskID = id
+        let interval = awareness.timing.checkInterval
+        awarenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch { return }
+                guard await self?.checkAwarenessTimeouts(id: id) == true else { return }
+            }
+        }
+    }
+
+    private func checkAwarenessTimeouts(id: UUID) -> Bool {
+        guard started, awarenessTaskID == id, !Task.isCancelled else { return false }
+        do {
+            try awareness.checkTimeouts()
+        } catch {
+            webRTCLogger.error("failed to check awareness timeouts: \(error, privacy: .public)")
+        }
+        return true
     }
 
     private func broadcastDocumentUpdate(_ update: YUpdate) {

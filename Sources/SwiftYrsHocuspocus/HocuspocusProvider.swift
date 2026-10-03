@@ -72,10 +72,13 @@ public actor HocuspocusProvider {
     private var receiveTask: Task<Void, Never>?
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
+    private var awarenessTask: Task<Void, Never>?
+    private var awarenessTaskID: UUID?
     private let documentObservationGate = RemoteApplyGate()
     private let awarenessObservationGate = RemoteApplyGate()
     private var retryAttempt = 0
     private var disconnectRequested = false
+    private var destroyed = false
 
     public init(
         url: URL,
@@ -143,6 +146,7 @@ public actor HocuspocusProvider {
     }
 
     public func connect() async throws {
+        guard !destroyed else { return }
         disconnectRequested = false
         retryAttempt = 0
         try await openWebSocket()
@@ -150,6 +154,7 @@ public actor HocuspocusProvider {
 
     public func disconnect() {
         disconnectRequested = true
+        stopAwarenessMaintenance()
         receiveTask?.cancel()
         receiveTask = nil
         documentObservation?.cancel()
@@ -160,6 +165,20 @@ public actor HocuspocusProvider {
         webSocket?.close()
         webSocket = nil
         connectionStatusContinuation.yield(.disconnected)
+    }
+
+    public func destroy() {
+        guard !destroyed else { return }
+        destroyed = true
+        disconnect()
+        connectionStatusContinuation.finish()
+        isSyncedContinuation.finish()
+        authStatusContinuation.finish()
+        statelessContinuation.finish()
+    }
+
+    deinit {
+        awarenessTask?.cancel()
     }
 
     public func sendStateless(_ payload: String) async {
@@ -198,9 +217,11 @@ public actor HocuspocusProvider {
             ).encoded())
         }
 
+        guard !disconnectRequested, !destroyed else { return }
         receiveTask = Task { [weak self] in
             await self?.receiveLoop()
         }
+        startAwarenessMaintenance()
     }
 
     private func receiveLoop() async {
@@ -223,6 +244,7 @@ public actor HocuspocusProvider {
     }
 
     private func reconnectAfterUnexpectedDisconnect() async {
+        stopAwarenessMaintenance()
         guard !disconnectRequested else {
             return
         }
@@ -281,6 +303,38 @@ public actor HocuspocusProvider {
                 }
             }
         }
+    }
+
+    private func startAwarenessMaintenance() {
+        stopAwarenessMaintenance()
+        guard let awareness else { return }
+        let id = UUID()
+        awarenessTaskID = id
+        let interval = awareness.timing.checkInterval
+        awarenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: interval)
+                } catch { return }
+                guard await self?.checkAwarenessTimeouts(id: id) == true else { return }
+            }
+        }
+    }
+
+    private func stopAwarenessMaintenance() {
+        awarenessTaskID = nil
+        awarenessTask?.cancel()
+        awarenessTask = nil
+    }
+
+    private func checkAwarenessTimeouts(id: UUID) -> Bool {
+        guard awarenessTaskID == id, webSocket != nil, !Task.isCancelled else { return false }
+        do {
+            try awareness?.checkTimeouts()
+        } catch {
+            logger.error("failed to check awareness timeouts: \(error, privacy: .public)")
+        }
+        return true
     }
 
     private func handle(_ data: Data) async throws {

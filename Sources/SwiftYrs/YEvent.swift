@@ -14,11 +14,17 @@ public struct YAwarenessChange: Equatable, Sendable {
     public let added: [UInt64]
     public let updated: [UInt64]
     public let removed: [UInt64]
+    public let origin: String?
 
     public init(added: [UInt64], updated: [UInt64], removed: [UInt64]) {
+        self.init(added: added, updated: updated, removed: removed, origin: nil)
+    }
+
+    public init(added: [UInt64], updated: [UInt64], removed: [UInt64], origin: String?) {
         self.added = added
         self.updated = updated
         self.removed = removed
+        self.origin = origin
     }
 
     /// Every client ID touched by the event, regardless of bucket.
