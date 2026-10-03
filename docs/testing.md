@@ -20,6 +20,12 @@ locked because provider callbacks run on other executors. Cancelled maintenance
 waits remain parked until a test delivers a stale tick and awaits its rejection.
 Ticks and startup handshakes each have a 30-second watchdog.
 
+Awareness lifetime tests drive the shared checks through constructor startup,
+disconnect, reconnect, and terminal teardown. They assert remote tombstone clocks
+and local removal counts after acknowledged ticks or events. A rejected stale
+tick precedes provider deallocation assertions; advancing the injected clock
+alone does not wake the maintenance task.
+
 Contention tests park a dedicated writer thread and release it on an actual
 transaction conflict. Async tests await entry and completion events. Core sync
 tests advance an injected retry clock and still assert the production one-second

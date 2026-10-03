@@ -82,7 +82,8 @@ func providerBroadcastsRepeatedLocalNullButNotAbsentClientRemoval() async throws
         ))
     }
     awareness.removeStates(for: [99])
-    try await socket.expectNoSentMessage(for: .milliseconds(30))
+    try await receiveLoopMarker(provider, socket: socket)
+    #expect(socket.sentMessageCount() == 0)
     await provider.disconnect()
 }
 
@@ -110,6 +111,7 @@ func providerRenewsIdleAwarenessLocallyAfterDisconnect() async throws {
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
 
+    try await scheduler.park()
     clock.set(.milliseconds(14_999))
     #expect(try await scheduler.tick())
     #expect(try awareness.encodeUpdate() == initial)
@@ -155,6 +157,7 @@ func providerExpiresSilentRemoteAwarenessWithTimeoutChange() async throws {
     )
     let changes = try awareness.changeEvents()
     try await provider.connect()
+    try await scheduler.park()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
     let peer = YAwareness(document: YDoc(clientID: 94))
@@ -186,7 +189,7 @@ func providerExpiresSilentRemoteAwarenessWithTimeoutChange() async throws {
         Issue.record("Expected timeout awareness update")
     }
     await provider.disconnect()
-    #expect(try await scheduler.tick() == false)
+    #expect(try await scheduler.tick())
 }
 
 @Test
@@ -213,7 +216,7 @@ func providerDoesNotRenewNullAwareness() async throws {
     #expect(try await scheduler.tick())
     #expect(socket.sentMessageCount() == 0)
     await provider.disconnect()
-    #expect(try await scheduler.tick() == false)
+    #expect(try await scheduler.tick())
 }
 
 @Test
@@ -238,16 +241,17 @@ func providerRenewsAwarenessDuringUnexpectedDisconnectAndSendsCurrentClockOnReco
         testHooks: .init(awarenessCheckWait: { await scheduler.wait() }, onAwarenessCheck: { scheduler.checked($0) }),
         webSocketFactory: { _ in factory.next() }
     )
-    var statuses = provider.connectionStatus.makeAsyncIterator()
+    let statuses = provider.connectionStatus
     try await provider.connect()
-    _ = await statuses.next()
-    _ = await statuses.next()
+    try await scheduler.park()
+    _ = try await nextTestEvent(statuses)
+    _ = try await nextTestEvent(statuses)
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
     try await scheduler.park()
     socket.failReceive()
-    #expect(await statuses.next() == .disconnected)
+    #expect(try await nextTestEvent(statuses) == .disconnected)
     clock.set(.seconds(60))
     #expect(try await scheduler.tick())
     #expect(socket.sentMessageCount() == 0)
@@ -279,6 +283,7 @@ func providerRenewsAwarenessDuringUnexpectedDisconnectAndSendsCurrentClockOnReco
 @Test
 func providerRenewsAwarenessBeforeFirstConnect() async throws {
     let clock = ProviderAwarenessClock()
+    let checks = AwarenessChecks()
     let document = YDoc(clientID: 98)
     let awareness = YAwareness(
         document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
@@ -289,10 +294,13 @@ func providerRenewsAwarenessBeforeFirstConnect() async throws {
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(awarenessCheckWait: { await checks.wait() }, onAwarenessCheck: { checks.checked($0) }),
         webSocketFactory: { _ in socket }
     )
     clock.set(.seconds(15))
-    try await expectEventually { try awareness.encodeUpdate() != initial }
+    try await checks.park()
+    #expect(try await checks.tick())
+    #expect(try awareness.encodeUpdate() != initial)
     #expect(socket.sentMessageCount() == 0)
     await provider.disconnect()
 }
@@ -300,6 +308,7 @@ func providerRenewsAwarenessBeforeFirstConnect() async throws {
 @Test
 func providerAwarenessTimerDoesNotRetainDisconnectedProvider() async throws {
     let clock = ProviderAwarenessClock()
+    let checks = AwarenessChecks()
     let document = YDoc(clientID: 100)
     let awareness = YAwareness(
         document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
@@ -309,19 +318,22 @@ func providerAwarenessTimerDoesNotRetainDisconnectedProvider() async throws {
     var provider: HocuspocusProvider? = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(awarenessCheckWait: { await checks.wait() }, onAwarenessCheck: { checks.checked($0) }),
         webSocketFactory: { _ in socket }
     )
     weak let weakProvider = provider
     try await provider?.connect()
+    try await checks.park()
     let initial = try awareness.encodeUpdate()
     clock.set(.seconds(15))
-    try await expectEventually { try awareness.encodeUpdate() != initial }
+    #expect(try await checks.tick())
+    #expect(try awareness.encodeUpdate() != initial)
     await provider?.disconnect()
     provider = nil
-    try await expectEventually { weakProvider == nil }
     let released = try awareness.encodeUpdate()
     clock.set(.seconds(60))
-    try await Task.sleep(for: .milliseconds(30))
+    #expect(try await checks.tick() == false)
+    #expect(weakProvider == nil)
     #expect(try awareness.encodeUpdate() == released)
 }
 
@@ -972,7 +984,7 @@ func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async thro
     try remoteAwareness.setLocalState(["name": "returned"])
     try localAwareness.applyUpdate(remoteAwareness.encodeUpdate(for: [7]))
     #expect(try (localAwareness.state(for: 7) as? [String: Any])?["name"] as? String == "returned")
-    try await socket.expectNoSentMessage(for: .milliseconds(20))
+    #expect(socket.sentMessageCount() == 0)
 }
 
 @Test
@@ -1026,10 +1038,10 @@ func providerCloseRemovesRemoteAwarenessInOneEventWithoutBroadcast(unexpected: B
         document: document, awareness: awareness, maxRetries: 0,
         webSocketFactory: { _ in socket }
     )
-    var statuses = provider.connectionStatus.makeAsyncIterator()
+    let statuses = provider.connectionStatus
     try await provider.connect()
-    #expect(await statuses.next() == .connecting)
-    #expect(await statuses.next() == .connected)
+    #expect(try await nextTestEvent(statuses) == .connecting)
+    #expect(try await nextTestEvent(statuses) == .connected)
     for _ in 0..<3 { _ = try await socket.requireSentMessage() }
     var changes: [YAwarenessChange] = []
     var updates: [YAwarenessChange] = []
@@ -1041,7 +1053,7 @@ func providerCloseRemovesRemoteAwarenessInOneEventWithoutBroadcast(unexpected: B
     }
     defer { change.cancel(); update.cancel() }
     if unexpected { socket.failReceive() } else { await provider.disconnect() }
-    #expect(await statuses.next() == .disconnected)
+    #expect(try await nextTestEvent(statuses) == .disconnected)
     #expect(changes.count == 1)
     #expect(updates == changes)
     #expect(changes.first?.removed.sorted() == [2, 3])
@@ -1336,6 +1348,7 @@ private final class ProviderAwarenessClock: @unchecked Sendable {
     func now() -> Duration { lock.withLock { time } }
     func set(_ time: Duration) { lock.withLock { self.time = time } }
 }
+
 
 private final class HeldWriteTransaction: @unchecked Sendable {
     private let document: YDoc

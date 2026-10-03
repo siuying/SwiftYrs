@@ -150,11 +150,11 @@ public actor WebRTCProvider {
         _ roomName: String, doc: YDoc, signaling: [URL], options: Options = .init(),
         testHooks: TestHooks
     ) {
-        self.testHooks = testHooks
         self.roomName = roomName
         self.doc = doc
         self.signalingURLs = signaling
         self.options = options
+        self.testHooks = testHooks
         self.inboundUpdatePolicy = options.inboundUpdatePolicy
         self.maxPeers = options.maxPeers
         if let password = options.password {

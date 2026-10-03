@@ -457,14 +457,18 @@ func awarenessConcurrentBatchRemovalPreservesLatestRemoteClock() async throws {
         try peer.setLocalState(["version": version])
         updates.append(try peer.encodeUpdate())
     }
-    let receiver = Task.detached { [updates] in
-        for update in updates { try awareness.applyUpdate(update) }
-    }
-    let remover = Task.detached {
+    let finished = AsyncStream.makeStream(of: Result<Void, Error>.self)
+    Thread { [updates] in
+        finished.continuation.yield(Result {
+            for update in updates { try awareness.applyUpdate(update) }
+        })
+    }.start()
+    Thread {
         for _ in 1...200 { awareness.removeStates(for: [2, 99, 2], origin: "caller") }
-    }
-    try await receiver.value
-    await remover.value
+        finished.continuation.yield(.success(()))
+    }.start()
+    for _ in 0..<2 { try await nextTestEvent(finished.stream).get() }
+    finished.continuation.finish()
     awareness.removeStates(for: [2], origin: "caller")
     #expect(try awareness.encodeUpdate(for: [2]).data == Data([1, 2, 0xc8, 1, 4] + Array("null".utf8)))
     #expect(throws: YError.self) { try awareness.encodeUpdate(for: [99]) }
