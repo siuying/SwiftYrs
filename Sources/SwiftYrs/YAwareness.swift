@@ -112,6 +112,9 @@ public final class YAwareness {
             return
         }
         try withAccess {
+            let previousOrigin = eventOrigin
+            eventOrigin = "local"
+            defer { eventOrigin = previousOrigin }
             try json.withCString { pointer in
                 try throwIfNeeded(yrs_bridge_awareness_set_local_state_json(handle, pointer))
             }

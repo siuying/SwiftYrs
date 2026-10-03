@@ -298,6 +298,34 @@ func providerRenewsAwarenessBeforeFirstConnect() async throws {
 }
 
 @Test
+func providerAwarenessTimerDoesNotRetainDisconnectedProvider() async throws {
+    let clock = ProviderAwarenessClock()
+    let document = YDoc(clientID: 100)
+    let awareness = YAwareness(
+        document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
+    )
+    try awareness.setLocalState(["name": "idle"])
+    let socket = FakeHocuspocusWebSocket()
+    var provider: HocuspocusProvider? = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        webSocketFactory: { _ in socket }
+    )
+    weak let weakProvider = provider
+    try await provider?.connect()
+    let initial = try awareness.encodeUpdate()
+    clock.set(.seconds(15))
+    try await expectEventually { try awareness.encodeUpdate() != initial }
+    await provider?.disconnect()
+    provider = nil
+    try await expectEventually { weakProvider == nil }
+    let released = try awareness.encodeUpdate()
+    clock.set(.seconds(60))
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(try awareness.encodeUpdate() == released)
+}
+
+@Test
 func providerConnectsSendsSyncStepOneAndAppliesSyncStepTwo() async throws {
     let serverDocument = YDoc(clientID: 1)
     let serverText = try serverDocument.text(named: "body")

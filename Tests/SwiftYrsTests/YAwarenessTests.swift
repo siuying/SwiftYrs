@@ -498,6 +498,27 @@ func awarenessRemovalOfUnknownOrAlreadyRemovedClientDoesNothing() throws {
 }
 
 @Test(arguments: [false, true])
+func awarenessLocalMutationsUseLocalOrigin(json: Bool) throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    var events: [YEvent] = []
+    let update = try awareness.observeUpdate { events.append($0) }
+    let change = try awareness.observeChange { events.append($0) }
+    defer { update.cancel(); change.cancel() }
+    for index in 0..<2 {
+        events.removeAll()
+        if json { try awareness.setLocalStateJSON(Data("{\"name\":\"local\"}".utf8)) }
+        else { try awareness.setLocalState(["name": "local"]) }
+        #expect(events.compactMap(tag) == (index == 0 ? [.change, .update] : [.update]))
+        #expect(events.compactMap(awarenessChange).allSatisfy { $0.origin == "local" })
+    }
+    events.removeAll()
+    if json { try awareness.setLocalStateJSON(Data("null".utf8)) }
+    else { awareness.clearLocalState() }
+    #expect(events.compactMap(tag) == [.change, .update])
+    #expect(events.compactMap(awarenessChange).allSatisfy { $0.origin == "local" })
+}
+
+@Test(arguments: [false, true])
 func awarenessSettingLocalNullAlwaysAdvancesClockAndEmits(initiallyPresent: Bool) throws {
     let awareness = YAwareness(document: YDoc(clientID: 1))
     if initiallyPresent { try awareness.setLocalState(["name": "local"]) }
@@ -588,7 +609,7 @@ func awarenessBatchRemovalEmitsOnceWithCallerOrigin(includingLocal: Bool) throws
     awareness.removeStates(for: ids, origin: "again")
     #expect(events.count == 2)
     try awareness.setLocalState(["name": "returned"])
-    #expect(awarenessChange(try #require(events.last))?.origin == nil)
+    #expect(awarenessChange(try #require(events.last))?.origin == "local")
 }
 
 @Test
@@ -612,7 +633,7 @@ func awarenessRemovalOriginDoesNotLeakIntoNestedMutation() throws {
     #expect(events.first?.removed == [2])
     #expect(events.first?.origin == "caller")
     #expect(events.last?.added == [1])
-    #expect(events.last?.origin == nil)
+    #expect(events.last?.origin == "local")
     awareness.clearLocalState(origin: "local removal")
     #expect(events.last?.origin == "local removal")
 }
@@ -672,12 +693,12 @@ func awarenessTimeoutCallbacksCanRestorePeerWithoutLosingLifetimeOrLeakingOrigin
     #expect(restored)
     #expect(try local.state(for: 2) != nil)
     #expect(localUpdates.count == 1)
-    #expect(localUpdates.allSatisfy { $0.origin == nil })
+    #expect(localUpdates.allSatisfy { $0.origin == "local" })
     clock.set(.seconds(60))
     try local.checkTimeouts()
     #expect(try local.state(for: 2) == nil)
     #expect(localUpdates.count == 2)
-    #expect(localUpdates.allSatisfy { $0.origin == nil })
+    #expect(localUpdates.allSatisfy { $0.origin == "local" })
 }
 
 @Test(arguments: [false, true])
