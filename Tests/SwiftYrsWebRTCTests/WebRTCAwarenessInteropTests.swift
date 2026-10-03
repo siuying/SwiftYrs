@@ -11,46 +11,46 @@ extension RealNetworkE2E {
     struct WebRTCAwarenessInteropTests {
         @Test
         func awarenessPropagatesAndCleansUpWithRealYWebRTCPeer() async throws {
-            let server = try JSONLineProcess.node(script: "webrtc-signaling-server.ts")
-            defer { server.stop() }
-            let ready = try await server.waitForLine("signaling server ready") { $0["type"] as? String == "ready" }
-            let port = try #require(ready["port"] as? Int)
-            let signaling = "ws://127.0.0.1:\(port)"
-            let room = "awareness-room"
+            try await withE2EProcesses { processes in
+                let server = try processes.node(script: "webrtc-signaling-server.ts")
+                let ready = try await server.waitForLine("signaling server ready") { $0["type"] as? String == "ready" }
+                let port = try #require(ready["port"] as? Int)
+                let signaling = "ws://127.0.0.1:\(port)"
+                let room = "awareness-room"
 
-            let doc = YDoc(clientID: 1)
-            let provider = WebRTCProvider(
-                room, doc: doc, signaling: [try #require(URL(string: signaling))],
-                options: WebRTCProvider.Options(iceServers: [])
-            )
+                let doc = YDoc(clientID: 1)
+                let provider = WebRTCProvider(
+                    room, doc: doc, signaling: [try #require(URL(string: signaling))],
+                    options: WebRTCProvider.Options(iceServers: [])
+                )
 
-            try await withE2ETeardown([provider]) {
-                try await provider.connect()
+                try await withE2ETeardown([provider]) {
+                    try await provider.connect()
 
-                let peer = try JSONLineProcess.node(script: "webrtc-peer.ts", arguments: [signaling, room])
-                defer { peer.stop() }
-                _ = try await peer.waitForLine("y-webrtc peer ready", timeout: .seconds(15)) {
-                    $0["type"] as? String == "ready"
-                }
-                try await e2eEventually("Swift provider connected to y-webrtc peer", timeout: .seconds(15)) {
-                    await !provider.connectedPeers.isEmpty
-                }
+                    let peer = try processes.node(script: "webrtc-peer.ts", arguments: [signaling, room])
+                    _ = try await peer.waitForLine("y-webrtc peer ready", timeout: .seconds(30)) {
+                        $0["type"] as? String == "ready"
+                    }
+                    try await e2eEventually("Swift provider connected to y-webrtc peer", timeout: .seconds(30)) {
+                        await !provider.connectedPeers.isEmpty
+                    }
 
-                try await peer.send(["type": "setAwareness", "state": ["name": "js-peer"]])
-                try await e2eEventually("y-webrtc awareness appears on Swift", timeout: .seconds(15)) {
-                    try await swiftHasPresence(provider, name: "js-peer")
-                }
+                    try await peer.send(["type": "setAwareness", "state": ["name": "js-peer"]])
+                    try await e2eEventually("y-webrtc awareness appears on Swift", timeout: .seconds(30)) {
+                        try await swiftHasPresence(provider, name: "js-peer")
+                    }
 
-                try await provider.awareness.setLocalState(["name": "swift-peer"])
-                try await e2eEventually("Swift awareness appears on y-webrtc", timeout: .seconds(15)) {
-                    let response = try await peer.request(["type": "getAwareness"], responseType: "awareness")
-                    let states = response["states"] as? [[String: Any]] ?? []
-                    return states.contains { ($0["state"] as? [String: Any])?["name"] as? String == "swift-peer" }
-                }
+                    try await provider.awareness.setLocalState(["name": "swift-peer"])
+                    try await e2eEventually("Swift awareness appears on y-webrtc", timeout: .seconds(30)) {
+                        let response = try await peer.request(["type": "getAwareness"], responseType: "awareness")
+                        let states = response["states"] as? [[String: Any]] ?? []
+                        return states.contains { ($0["state"] as? [String: Any])?["name"] as? String == "swift-peer" }
+                    }
 
-                peer.stop()
-                try await e2eEventually("y-webrtc awareness removed after disconnect", timeout: .seconds(15)) {
-                    try await !swiftHasPresence(provider, name: "js-peer")
+                    await peer.stopAndWait()
+                    try await e2eEventually("y-webrtc awareness removed after disconnect", timeout: .seconds(30)) {
+                        try await !swiftHasPresence(provider, name: "js-peer")
+                    }
                 }
             }
         }

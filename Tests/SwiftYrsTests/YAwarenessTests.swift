@@ -281,29 +281,37 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
     let received = AwarenessUpdateCounter()
     let observation = try local.observeUpdate { _ in received.increment() }
     defer { observation.cancel() }
-    let writer = Task.detached {
-        for version in 1...iterations {
-            try local.setLocalState(["version": version])
-            #expect(try (local.localState() as? [String: Any])?["version"] as? Int == version)
+    let writer = Task {
+        try await onAwarenessThread {
+            for version in 1...iterations {
+                try local.setLocalState(["version": version])
+                #expect(try (local.localState() as? [String: Any])?["version"] as? Int == version)
+            }
         }
     }
-    let receiver = Task.detached {
-        for version in 1...iterations {
-            try remote.setLocalState(["version": version])
-            try local.applyUpdate(remote.encodeUpdate())
-            try local.checkTimeouts()
+    let receiver = Task {
+        try await onAwarenessThread {
+            for version in 1...iterations {
+                try remote.setLocalState(["version": version])
+                try local.applyUpdate(remote.encodeUpdate())
+                try local.checkTimeouts()
+            }
         }
     }
-    let otherProvider = Task.detached {
-        for _ in 1...iterations {
-            try local.checkTimeouts()
-            _ = try local.encodeUpdate()
+    let otherProvider = Task {
+        try await onAwarenessThread {
+            for _ in 1...iterations {
+                try local.checkTimeouts()
+                _ = try local.encodeUpdate()
+            }
         }
     }
-    let subscriptions = Task.detached {
-        for _ in 1...iterations {
-            let observation = try local.observeUpdate { _ in }
-            observation.cancel()
+    let subscriptions = Task {
+        try await onAwarenessThread {
+            for _ in 1...iterations {
+                let observation = try local.observeUpdate { _ in }
+                observation.cancel()
+            }
         }
     }
     try await writer.value
@@ -317,25 +325,27 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
 }
 
 @Test
-func awarenessCallbacksCanReenterFromAnotherThread() throws {
-    let awareness = YAwareness(document: YDoc(clientID: 1))
-    let queue = DispatchQueue(label: "awareness-callback-reentry")
-    var reentered = false
-    let observation = try awareness.observeChange { event in
-        guard case let .awarenessChange(change) = event, !change.added.isEmpty else { return }
-        do {
-            try queue.sync {
-                try awareness.setLocalState(["name": "updated"])
+func awarenessCallbacksCanReenterFromAnotherThread() async throws {
+    try await onAwarenessThread {
+        let awareness = YAwareness(document: YDoc(clientID: 1))
+        let queue = DispatchQueue(label: "awareness-callback-reentry")
+        var reentered = false
+        let observation = try awareness.observeChange { event in
+            guard case let .awarenessChange(change) = event, !change.added.isEmpty else { return }
+            do {
+                try queue.sync {
+                    try awareness.setLocalState(["name": "updated"])
+                }
+                reentered = true
+            } catch {
+                Issue.record("Failed to re-enter awareness from another thread: \(error)")
             }
-            reentered = true
-        } catch {
-            Issue.record("Failed to re-enter awareness from another thread: \(error)")
         }
+        defer { observation.cancel() }
+        try awareness.setLocalState(["name": "initial"])
+        #expect(reentered)
+        #expect(try (awareness.localState() as? [String: Any])?["name"] as? String == "updated")
     }
-    defer { observation.cancel() }
-    try awareness.setLocalState(["name": "initial"])
-    #expect(reentered)
-    #expect(try (awareness.localState() as? [String: Any])?["name"] as? String == "updated")
 }
 
 @Test
@@ -477,4 +487,10 @@ func awarenessTimeoutUpdateCallbackCanRestorePeerUntilNextTimeout(usingSyncProto
     clock.set(.seconds(60))
     try local.checkTimeouts()
     #expect(try local.state(for: 2) == nil)
+}
+
+private func onAwarenessThread(_ operation: @escaping @Sendable () throws -> Void) async throws {
+    try await withCheckedThrowingContinuation { continuation in
+        Thread { continuation.resume(with: Result(catching: operation)) }.start()
+    }
 }

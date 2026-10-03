@@ -2,7 +2,8 @@
 import CloudKit
 import Foundation
 import SwiftYrs
-import SwiftYrsCloudKit
+@testable import SwiftYrsCloudKit
+import SwiftYrsTestSupport
 import Testing
 
 private struct Device {
@@ -12,7 +13,10 @@ private struct Device {
     let provider: CloudKitProvider
     let doc: YDoc
 
-    static func make(documentName: String, clientID: UInt64, maxTransactionRetries: Int = 8) async throws -> Device {
+    static func make(
+        documentName: String, clientID: UInt64, maxTransactionRetries: Int = 8,
+        testHooks: CloudKitProvider.TestHooks = .none
+    ) async throws -> Device {
         let engine = MockCloudKitSyncEngine()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("swiftyrs-ck-inbound-\(UUID().uuidString)")
@@ -25,7 +29,8 @@ private struct Device {
             documentName: documentName,
             doc: doc,
             store: store,
-            options: CloudKitProviderOptions(debounce: .seconds(600), maxTransactionRetries: maxTransactionRetries)
+            options: CloudKitProviderOptions(debounce: .seconds(600), maxTransactionRetries: maxTransactionRetries),
+            testHooks: testHooks
         )
         return Device(engine: engine, store: store, codec: codec, provider: provider, doc: doc)
     }
@@ -129,16 +134,18 @@ func applyingRemoteUpdateDoesNotReUploadIt() async throws {
     #expect(await device.engine.pendingSaveIDs.isEmpty)
 }
 
-private final class Flag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-    func set() { lock.lock(); value = true; lock.unlock() }
-    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
-}
-
 @Test
 func applyRetriesPastAConcurrentWriteTransaction() async throws {
-    let device = try await Device.make(documentName: "doc", clientID: 1, maxTransactionRetries: 200)
+    let gate = TestThreadGate()
+    defer { gate.open() }
+    let finished = AsyncStream.makeStream(of: Void.self)
+    let device = try await Device.make(
+        documentName: "doc", clientID: 1, maxTransactionRetries: 200,
+        testHooks: .init(onTransactionConflict: {
+            gate.open()
+            _ = try? await nextTestEvent(finished.stream)
+        })
+    )
     try await device.provider.start()
     defer { Task { await device.provider.destroy() } }
 
@@ -157,16 +164,17 @@ func applyRetriesPastAConcurrentWriteTransaction() async throws {
 
     // Hold a write transaction open while the fetch applies; the apply must
     // retry past the transactionConflict.
-    let localText = try device.doc.text(named: "body")
-    let acquired = Flag()
-    let holder = Task.detached {
-        try device.doc.write { transaction in
-            try transaction.insert("local", into: localText, at: 0)
-            acquired.set()
-            Thread.sleep(forTimeInterval: 0.05)
+    let holder = Task {
+        try await onTestThread {
+            defer { finished.continuation.yield(()); finished.continuation.finish() }
+            let localText = try device.doc.text(named: "body")
+            try device.doc.write { transaction in
+                try transaction.insert("local", into: localText, at: 0)
+                gate.enterAndWait()
+            }
         }
     }
-    while !acquired.get() { try? await Task.sleep(for: .milliseconds(1)) }
+    try await gate.waitForEntry()
     try await device.provider.fetch()
     try await holder.value
 

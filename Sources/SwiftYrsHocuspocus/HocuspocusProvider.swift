@@ -33,19 +33,31 @@ public actor HocuspocusProvider {
     struct TestHooks: Sendable {
         static let none = TestHooks()
 
-        let onTransactionConflict: (@Sendable () -> Void)?
-        let onSyncMessageHandled: (@Sendable (Int) -> Void)?
+        let onTransactionConflict: (@Sendable () async -> Void)?
+        let onSyncMessageHandled: (@Sendable (Int) async -> Void)?
+        let onAwarenessForwarded: (@Sendable () -> Void)?
+        let onDocumentForwarded: (@Sendable () -> Void)?
+        let awarenessCheckWait: (@Sendable () async throws -> Void)?
+        let onAwarenessCheck: (@Sendable (Bool) -> Void)?
         let onSyncStatusEmitted: (@Sendable () -> Void)?
         let transactionRetryWait: (@Sendable () async throws -> Void)?
 
         init(
-            onTransactionConflict: (@Sendable () -> Void)? = nil,
-            onSyncMessageHandled: (@Sendable (Int) -> Void)? = nil,
+            onTransactionConflict: (@Sendable () async -> Void)? = nil,
+            onSyncMessageHandled: (@Sendable (Int) async -> Void)? = nil,
+            onAwarenessForwarded: (@Sendable () -> Void)? = nil,
+            onDocumentForwarded: (@Sendable () -> Void)? = nil,
+            awarenessCheckWait: (@Sendable () async throws -> Void)? = nil,
+            onAwarenessCheck: (@Sendable (Bool) -> Void)? = nil,
             onSyncStatusEmitted: (@Sendable () -> Void)? = nil,
             transactionRetryWait: (@Sendable () async throws -> Void)? = nil
         ) {
             self.onTransactionConflict = onTransactionConflict
             self.onSyncMessageHandled = onSyncMessageHandled
+            self.onAwarenessForwarded = onAwarenessForwarded
+            self.onDocumentForwarded = onDocumentForwarded
+            self.awarenessCheckWait = awarenessCheckWait
+            self.onAwarenessCheck = onAwarenessCheck
             self.onSyncStatusEmitted = onSyncStatusEmitted
             self.transactionRetryWait = transactionRetryWait
         }
@@ -264,6 +276,7 @@ public actor HocuspocusProvider {
 
     private func startObservingIfNeeded() throws {
         if documentObservation == nil {
+            let onForwarded = testHooks.onDocumentForwarded
             documentObservation = try document.observeUpdates { [weak self, documentObservationGate] event in
                 guard !documentObservationGate.isApplyingRemote else {
                     return
@@ -271,12 +284,14 @@ public actor HocuspocusProvider {
                 guard case let .update(update) = event else {
                     return
                 }
+                onForwarded?()
                 Task { [weak self] in
                     await self?.sendLocalUpdate(update)
                 }
             }
         }
         if awarenessObservation == nil, let awareness {
+            let onForwarded = testHooks.onAwarenessForwarded
             awarenessObservation = try awareness.observeUpdate { [weak self, awareness, awarenessOrigin] event in
                 guard case let .awarenessUpdate(change) = event else {
                     return
@@ -286,6 +301,7 @@ public actor HocuspocusProvider {
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }
+                onForwarded?()
                 Task { [weak self] in
                     await self?.sendAwareness(update)
                 }
@@ -299,12 +315,17 @@ public actor HocuspocusProvider {
         let id = UUID()
         awarenessTaskID = id
         let interval = awareness.timing.checkInterval
+        let wait = testHooks.awarenessCheckWait
+        let checked = testHooks.onAwarenessCheck
         awarenessTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: interval)
+                    if let wait { try await wait() }
+                    else { try await Task.sleep(for: interval) }
                 } catch { return }
-                guard await self?.checkAwarenessTimeouts(id: id) == true else { return }
+                let active = await self?.checkAwarenessTimeouts(id: id) == true
+                checked?(active)
+                guard active else { return }
             }
         }
     }
@@ -362,10 +383,11 @@ public actor HocuspocusProvider {
                 for (index, message) in syncMessages.enumerated() {
                     let result = try syncEngine.handle(message)
                     didSync = didSync || result.didSync
-                    testHooks.onSyncMessageHandled?(index)
+                    // This hook suspends mid-frame only in tests; production uses .none.
+                    await testHooks.onSyncMessageHandled?(index)
                 }
             } catch YError.transactionConflict {
-                testHooks.onTransactionConflict?()
+                await testHooks.onTransactionConflict?()
                 attempts += 1
                 guard attempts < Self.maxTransactionAttempts else {
                     // Reconnect after exhaustion so a full resync can recover this frame.

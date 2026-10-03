@@ -1,4 +1,5 @@
 import Foundation
+import SwiftYrsTestSupport
 import Testing
 import SwiftYrs
 @testable import SwiftYrsHocuspocus
@@ -12,9 +13,11 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
     let awareness = YAwareness(document: document)
     let sourceSocket = FakeHocuspocusWebSocket()
     let otherSocket = FakeHocuspocusWebSocket()
+    let sourceForwards = LockedCounter()
     let source = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(onAwarenessForwarded: { _ = sourceForwards.increment() }),
         webSocketFactory: { _ in sourceSocket }
     )
     let other = HocuspocusProvider(
@@ -32,7 +35,7 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
     try remote.setLocalState(["name": "remote"])
     sourceSocket.receive(HocuspocusMessage.awareness(documentName: "room-1", try remote.encodeUpdate()).encoded())
     let message = try HocuspocusMessage.decode(
-        try await otherSocket.requireSentMessage(timeout: .milliseconds(500))
+        try await otherSocket.requireSentMessage()
     )
     if case let .awareness(_, update) = message {
         let receiver = YAwareness(document: YDoc(clientID: 88))
@@ -41,7 +44,9 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
     } else {
         Issue.record("Expected awareness forwarded by the other provider")
     }
-    try await sourceSocket.expectNoSentMessage(for: .milliseconds(30))
+    try await receiveLoopMarker(source, socket: sourceSocket)
+    #expect(sourceForwards.value() == 0)
+    #expect(sourceSocket.sentMessageCount() == 0)
     await source.disconnect()
     await other.disconnect()
 }
@@ -49,6 +54,7 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
 @Test
 func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
     let clock = ProviderAwarenessClock()
+    let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 91)
     let awareness = YAwareness(
         document: document,
@@ -61,6 +67,7 @@ func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(awarenessCheckWait: { await scheduler.wait() }, onAwarenessCheck: { scheduler.checked($0) }),
         webSocketFactory: { _ in socket }
     )
     try await provider.connect()
@@ -69,10 +76,13 @@ func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
     _ = try await socket.requireSentMessage()
 
     clock.set(.milliseconds(14_999))
-    try await socket.expectNoSentMessage(for: .milliseconds(30))
+    #expect(try await scheduler.tick())
+    #expect(try awareness.encodeUpdate() == initial)
+    #expect(socket.sentMessageCount() == 0)
     clock.set(.seconds(15))
+    #expect(try await scheduler.tick())
     let message = try HocuspocusMessage.decode(
-        try await socket.requireSentMessage(timeout: .milliseconds(500))
+        try await socket.requireSentMessage()
     )
     if case let .awareness(name, update) = message {
         #expect(name == "room-1")
@@ -85,12 +95,14 @@ func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
     }
     await provider.disconnect()
     clock.set(.seconds(60))
-    try await socket.expectNoSentMessage(for: .milliseconds(30))
+    #expect(try await scheduler.tick() == false)
+    #expect(socket.sentMessageCount() == 0)
 }
 
 @Test
 func providerExpiresSilentRemoteAwarenessWithTimeoutChange() async throws {
     let clock = ProviderAwarenessClock()
+    let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 93)
     let awareness = YAwareness(
         document: document,
@@ -101,30 +113,32 @@ func providerExpiresSilentRemoteAwarenessWithTimeoutChange() async throws {
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(awarenessCheckWait: { await scheduler.wait() }, onAwarenessCheck: { scheduler.checked($0) }),
         webSocketFactory: { _ in socket }
     )
-    var changes = try awareness.changeEvents().makeAsyncIterator()
+    let changes = try awareness.changeEvents()
     try await provider.connect()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
     let peer = YAwareness(document: YDoc(clientID: 94))
     try peer.setLocalState(["name": "silent"])
     socket.receive(HocuspocusMessage.awareness(documentName: "room-1", try peer.encodeUpdate()).encoded())
-    if case let .awarenessChange(change) = await changes.next() {
+    if case let .awarenessChange(change) = try await nextTestEvent(changes) {
         #expect(change.added == [94])
     } else {
         Issue.record("Expected remote awareness arrival")
     }
 
     clock.set(.seconds(30))
-    if case let .awarenessChange(change) = await changes.next() {
+    #expect(try await scheduler.tick())
+    if case let .awarenessChange(change) = try await nextTestEvent(changes) {
         #expect(change.removed == [94])
         #expect(change.origin == YAwarenessChange.timeoutOrigin)
     } else {
         Issue.record("Expected timeout removal")
     }
     let message = try HocuspocusMessage.decode(
-        try await socket.requireSentMessage(timeout: .milliseconds(500))
+        try await socket.requireSentMessage()
     )
     if case let .awareness(_, update) = message {
         let receiver = YAwareness(document: YDoc(clientID: 95))
@@ -135,11 +149,13 @@ func providerExpiresSilentRemoteAwarenessWithTimeoutChange() async throws {
         Issue.record("Expected timeout awareness update")
     }
     await provider.disconnect()
+    #expect(try await scheduler.tick() == false)
 }
 
 @Test
 func providerDoesNotRenewNullAwareness() async throws {
     let clock = ProviderAwarenessClock()
+    let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 96)
     let awareness = YAwareness(
         document: document,
@@ -150,19 +166,23 @@ func providerDoesNotRenewNullAwareness() async throws {
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(awarenessCheckWait: { await scheduler.wait() }, onAwarenessCheck: { scheduler.checked($0) }),
         webSocketFactory: { _ in socket }
     )
     try await provider.connect()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
     clock.set(.seconds(60))
-    try await socket.expectNoSentMessage(for: .milliseconds(30))
+    #expect(try await scheduler.tick())
+    #expect(socket.sentMessageCount() == 0)
     await provider.disconnect()
+    #expect(try await scheduler.tick() == false)
 }
 
 @Test
 func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() async throws {
     let clock = ProviderAwarenessClock()
+    let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 97)
     let awareness = YAwareness(
         document: document,
@@ -177,7 +197,9 @@ func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() asy
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
-        maxRetries: 0, webSocketFactory: { _ in factory.next() }
+        maxRetries: 0,
+        testHooks: .init(awarenessCheckWait: { await scheduler.wait() }, onAwarenessCheck: { scheduler.checked($0) }),
+        webSocketFactory: { _ in factory.next() }
     )
     var statuses = provider.connectionStatus.makeAsyncIterator()
     try await provider.connect()
@@ -186,18 +208,21 @@ func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() asy
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
+    try await scheduler.park()
     socket.failReceive()
     #expect(await statuses.next() == .disconnected)
     clock.set(.seconds(60))
-    try await socket.expectNoSentMessage(for: .milliseconds(30))
+    #expect(try await scheduler.tick() == false)
+    #expect(socket.sentMessageCount() == 0)
     #expect(try awareness.encodeUpdate() == initial)
 
     try await provider.connect()
     _ = try await nextSocket.requireSentMessage()
     _ = try await nextSocket.requireSentMessage()
     _ = try await nextSocket.requireSentMessage()
+    #expect(try await scheduler.tick())
     let message = try HocuspocusMessage.decode(
-        try await nextSocket.requireSentMessage(timeout: .milliseconds(500))
+        try await nextSocket.requireSentMessage()
     )
     if case let .awareness(_, update) = message {
         #expect(update != initial)
@@ -206,7 +231,8 @@ func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() asy
     }
     await provider.disconnect()
     clock.set(.seconds(120))
-    try await nextSocket.expectNoSentMessage(for: .milliseconds(30))
+    #expect(try await scheduler.tick() == false)
+    #expect(nextSocket.sentMessageCount() == 0)
 }
 
 @Test
@@ -282,7 +308,7 @@ func providerRetriesIncomingSyncAfterTransactionConflictWithoutReconnecting() as
         initialDelay: .milliseconds(5),
         maxDelay: .milliseconds(5),
         testHooks: .init(onTransactionConflict: {
-            heldWrite.releaseAndWait()
+            await heldWrite.release()
             conflicts.continuation.yield(())
         }),
         webSocketFactory: { _ in socketFactory.next() }
@@ -343,7 +369,7 @@ func providerRetriesSyncStepOneReplyWithoutDuplicatingIt() async throws {
         initialDelay: .milliseconds(5),
         maxDelay: .milliseconds(5),
         testHooks: .init(onTransactionConflict: {
-            heldWrite.releaseAndWait()
+            await heldWrite.release()
             conflicts.continuation.yield(())
         }),
         webSocketFactory: { _ in socketFactory.next() }
@@ -417,12 +443,12 @@ func providerRetriesWholeSyncFrameWithoutDuplicatingReplies() async throws {
         maxDelay: .milliseconds(5),
         testHooks: .init(
             onTransactionConflict: {
-                heldWrite.releaseAndWait()
+                await heldWrite.release()
                 conflicts.continuation.yield(())
             },
             onSyncMessageHandled: { index in
                 if index == 0 {
-                    heldWrite.startAndWait()
+                    await heldWrite.start()
                 }
             },
             onSyncStatusEmitted: { _ = syncEvents.increment() }
@@ -563,7 +589,7 @@ func providerReconnectsAfterIncomingTransactionRetriesAreExhausted() async throw
         maxDelay: .milliseconds(5),
         testHooks: .init(onTransactionConflict: {
             if conflictCount.increment() == 8 {
-                heldWrite.releaseAndWait()
+                await heldWrite.release()
             }
             conflicts.continuation.yield(())
         }),
@@ -661,10 +687,12 @@ func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
     let remoteDocument = YDoc(clientID: 4)
     let remoteText = try remoteDocument.text(named: "body")
     let socket = FakeHocuspocusWebSocket()
+    let forwarded = LockedCounter()
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1",
         document: localDocument,
+        testHooks: .init(onDocumentForwarded: { _ = forwarded.increment() }),
         webSocketFactory: { _ in socket }
     )
 
@@ -699,7 +727,8 @@ func providerPropagatesLocalAndRemoteUpdatesWithoutEcho() async throws {
         }
     }
 
-    try await Task.sleep(for: .milliseconds(20))
+    try await receiveLoopMarker(provider, socket: socket)
+    #expect(forwarded.value() == 1)
     #expect(socket.sentMessageCount() == 0)
 
     await provider.disconnect()
@@ -712,10 +741,12 @@ func providerDoesNotEchoRemoteUpdatesButStillSendsLocalEdits() async throws {
     let remoteDocument = YDoc(clientID: 15)
     let remoteText = try remoteDocument.text(named: "body")
     let socket = FakeHocuspocusWebSocket()
+    let forwarded = LockedCounter()
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1",
         document: localDocument,
+        testHooks: .init(onDocumentForwarded: { _ = forwarded.increment() }),
         webSocketFactory: { _ in socket }
     )
 
@@ -741,13 +772,15 @@ func providerDoesNotEchoRemoteUpdatesButStillSendsLocalEdits() async throws {
             }
         }
     }
-    try await socket.expectNoSentMessage(for: .milliseconds(20))
+    try await receiveLoopMarker(provider, socket: socket)
+    #expect(forwarded.value() == 0)
+    #expect(socket.sentMessageCount() == 0)
 
     // A genuine local edit must still be propagated (the gate resets correctly).
     try localDocument.write { transaction in
         try transaction.insert("!", into: localText, at: 0)
     }
-    let localFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    let localFrame = try await socket.requireSentMessage()
     if case .sync(documentName: "room-1", .update) = try HocuspocusMessage.decode(localFrame) {} else {
         Issue.record("Expected local edit to be sent as a Sync update")
     }
@@ -800,23 +833,25 @@ func providerSendsFreshAuthTokenAndEmitsAuthStatuses() async throws {
 @Test
 func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async throws {
     let localDocument = YDoc(clientID: 6)
-    let localAwareness = YAwareness(document: localDocument)
+    let localAwareness = YAwareness(document: localDocument, now: { .zero })
     try localAwareness.setLocalState(["name": "local"])
     let remoteAwareness = YAwareness(document: YDoc(clientID: 7))
     try remoteAwareness.setLocalState(["name": "remote"])
     let socket = FakeHocuspocusWebSocket()
+    let forwarded = LockedCounter()
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1",
         document: localDocument,
         awareness: localAwareness,
+        testHooks: .init(onAwarenessForwarded: { _ = forwarded.increment() }),
         webSocketFactory: { _ in socket }
     )
 
     try await provider.connect()
     _ = try await socket.requireSentMessage()
     _ = try await socket.requireSentMessage()
-    let initialAwarenessFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    let initialAwarenessFrame = try await socket.requireSentMessage()
     #expect(try HocuspocusMessage.decode(initialAwarenessFrame) == .awareness(
         documentName: "room-1",
         try localAwareness.encodeUpdate(for: [localAwareness.clientID])
@@ -827,10 +862,12 @@ func providerSynchronizesAwarenessAndClearsRemoteStatesOnDisconnect() async thro
         let state = try localAwareness.state(for: remoteAwareness.clientID) as? [String: Any]
         return state?["name"] as? String == "remote"
     }
-    try await socket.expectNoSentMessage(for: .milliseconds(20))
+    try await receiveLoopMarker(provider, socket: socket)
+    #expect(forwarded.value() == 0)
+    #expect(socket.sentMessageCount() == 0)
 
     try localAwareness.setLocalState(["name": "changed"])
-    let changedFrame = try await socket.requireSentMessage(timeout: .milliseconds(100))
+    let changedFrame = try await socket.requireSentMessage()
     if case let .awareness(documentName: "room-1", update) = try HocuspocusMessage.decode(changedFrame) {
         try remoteAwareness.applyUpdate(update)
     } else {
@@ -865,7 +902,7 @@ func providerAnswersAwarenessQueriesWithKnownStates() async throws {
 
     socket.receive(HocuspocusMessage.queryAwareness(documentName: "room-1").encoded())
 
-    let response = try HocuspocusMessage.decode(try await socket.requireSentMessage(timeout: .milliseconds(100)))
+    let response = try HocuspocusMessage.decode(try await socket.requireSentMessage())
     if case let .awareness(documentName: "room-1", update) = response {
         let remoteAwareness = YAwareness(document: YDoc(clientID: 12))
         try remoteAwareness.applyUpdate(update)
@@ -911,9 +948,9 @@ func providerReconnectsAfterUnexpectedCloseAndResendsHandshake() async throws {
     #expect(await statusIterator.next() == .connecting)
     #expect(await statusIterator.next() == .connected)
     let reconnectMessages = [
-        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
-        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
-        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage(timeout: .milliseconds(100))),
+        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage()),
+        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage()),
+        try HocuspocusMessage.decode(try await secondSocket.requireSentMessage()),
     ]
     #expect(reconnectMessages.contains { message in
         if case .auth(documentName: "room-1", .token("", version: HocuspocusProvider.productName)) = message {
@@ -981,7 +1018,7 @@ func providerResetsBackoffAfterHealthyReconnect() async throws {
     #expect(await statusIterator.next() == .disconnected)
     #expect(await statusIterator.next() == .connecting)
     #expect(await statusIterator.next() == .connected)
-    _ = try await thirdSocket.requireSentMessage(timeout: .milliseconds(100))
+    _ = try await thirdSocket.requireSentMessage()
 
     await provider.disconnect()
 }
@@ -1019,7 +1056,7 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     private let queue = DispatchQueue(label: "FakeHocuspocusWebSocket")
     private var sentMessages: [Data] = []
     private var receiveMessages: [Data] = []
-    private var sendContinuations: [CheckedContinuation<Data, Never>] = []
+    private var sendContinuations: [(id: UUID, continuation: CheckedContinuation<Data, Error>)] = []
     private var receiveContinuations: [CheckedContinuation<Data, Error>] = []
     private var pendingError: Error?
     private var closes = 0
@@ -1027,9 +1064,9 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     func resume() {}
 
     func send(_ data: Data) {
-        let continuation: CheckedContinuation<Data, Never>? = queue.sync {
+        let continuation: CheckedContinuation<Data, Error>? = queue.sync {
             if !sendContinuations.isEmpty {
-                return sendContinuations.removeFirst()
+                return sendContinuations.removeFirst().continuation
             }
             sentMessages.append(data)
             return nil
@@ -1095,46 +1132,29 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
         continuation?.resume(returning: data)
     }
 
-    func requireSentMessage(timeout: Duration = .seconds(1)) async throws -> Data {
-        if timeout == .seconds(1) {
-            return await requireSentMessage()
-        }
-        let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
-            if let data = dequeueSentMessage() {
-                return data
-            }
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        throw TimeoutError()
+    // Delivery is awaited directly; the shared watchdog bounds eventual completion.
+    func requireSentMessage() async throws -> Data {
+        try await withTestTimeout { try await self.waitForSentMessage() }
     }
 
-    func expectNoSentMessage(for duration: Duration) async throws {
-        do {
-            _ = try await requireSentMessage(timeout: duration)
-            Issue.record("Expected no sent message")
-        } catch is TimeoutError {
-        }
-    }
-
-    private func requireSentMessage() async -> Data {
-        await withCheckedContinuation { continuation in
-            let buffered: Data? = queue.sync {
-                if !sentMessages.isEmpty {
-                    return sentMessages.removeFirst()
+    private func waitForSentMessage() async throws -> Data {
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let outcome: Result<Data, Error>? = queue.sync {
+                    if Task.isCancelled { return .failure(CancellationError()) }
+                    if !sentMessages.isEmpty { return .success(sentMessages.removeFirst()) }
+                    sendContinuations.append((id, continuation))
+                    return nil
                 }
-                sendContinuations.append(continuation)
-                return nil
+                if let outcome { continuation.resume(with: outcome) }
             }
-            if let buffered {
-                continuation.resume(returning: buffered)
+        } onCancel: {
+            let continuation: CheckedContinuation<Data, Error>? = self.queue.sync {
+                guard let index = self.sendContinuations.firstIndex(where: { $0.id == id }) else { return nil }
+                return self.sendContinuations.remove(at: index).continuation
             }
-        }
-    }
-
-    private func dequeueSentMessage() -> Data? {
-        queue.sync {
-            sentMessages.isEmpty ? nil : sentMessages.removeFirst()
+            continuation?.resume(throwing: CancellationError())
         }
     }
 
@@ -1145,7 +1165,6 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     }
 }
 
-private struct TimeoutError: Error {}
 private struct TestWebSocketError: Error {}
 private struct TestTokenError: Error {}
 
@@ -1163,8 +1182,6 @@ private final class HeldWriteTransaction: @unchecked Sendable {
     private var startedWork = false
     private var released = false
     private let releaseSignal = DispatchSemaphore(value: 0)
-    private let startedSignal = DispatchSemaphore(value: 0)
-    private let endedSignal = DispatchSemaphore(value: 0)
     private let started = AsyncStream.makeStream(of: Void.self)
     private let ended = AsyncStream.makeStream(of: Void.self)
 
@@ -1177,21 +1194,9 @@ private final class HeldWriteTransaction: @unchecked Sendable {
     }
 
     func start() async {
-        begin()
+        guard begin() else { return }
         var iterator = started.stream.makeAsyncIterator()
         _ = await iterator.next()
-    }
-
-    func startAndWait() {
-        if begin() {
-            startedSignal.wait()
-        }
-    }
-
-    func releaseAndWait() {
-        guard markReleased() else { return }
-        releaseSignal.signal()
-        endedSignal.wait()
     }
 
     func release() async {
@@ -1214,22 +1219,17 @@ private final class HeldWriteTransaction: @unchecked Sendable {
         let started = self.started.continuation
         let ended = self.ended.continuation
         let releaseSignal = self.releaseSignal
-        let startedSignal = self.startedSignal
-        let endedSignal = self.endedSignal
         Thread {
             do {
                 try document.write { _ in
                     started.yield(())
-                    startedSignal.signal()
                     releaseSignal.wait()
                 }
             } catch {
                 Issue.record("Failed to hold write transaction: \(error)")
                 started.yield(())
-                startedSignal.signal()
             }
             ended.yield(())
-            endedSignal.signal()
         }.start()
         return true
     }
@@ -1305,10 +1305,12 @@ private final class FakeSocketFactory: @unchecked Sendable {
 }
 
 private func expectEventually(_ predicate: @escaping () throws -> Bool) async throws {
-    for _ in 0..<50 {
+    let deadline = ContinuousClock.now + .seconds(30)
+    while true {
         if try predicate() {
             return
         }
+        guard ContinuousClock.now < deadline else { break }
         try await Task.sleep(for: .milliseconds(10))
     }
     #expect(try predicate())
@@ -1333,4 +1335,12 @@ private actor FailingOnceToken {
         }
         return "token-\(calls)"
     }
+}
+
+
+// A stateless marker is processed after preceding inbound frames on this actor.
+private func receiveLoopMarker(_ provider: HocuspocusProvider, socket: FakeHocuspocusWebSocket) async throws {
+    let marker = UUID().uuidString
+    socket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: marker).encoded())
+    #expect(try await nextTestEvent(provider.stateless) == marker)
 }

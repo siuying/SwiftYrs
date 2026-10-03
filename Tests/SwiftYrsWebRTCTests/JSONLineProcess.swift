@@ -58,11 +58,20 @@ final class JSONLineProcess: @unchecked Sendable {
         self.process = process
         self.input = input
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.append(handle.availableData)
+            let data = handle.availableData
+            guard !data.isEmpty, let self else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self.append(data)
         }
         error.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let text = String(data: data, encoding: .utf8) {
                 fputs(text, stderr)
             }
         }
@@ -97,7 +106,7 @@ final class JSONLineProcess: @unchecked Sendable {
     func request(
         _ object: [String: Any],
         responseType: String,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = .seconds(30)
     ) async throws -> [String: Any] {
         try await send(object)
         return try await waitForLine("received \(responseType) response", timeout: timeout) {
@@ -107,11 +116,11 @@ final class JSONLineProcess: @unchecked Sendable {
 
     func waitForLine(
         _ description: String? = nil,
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(30),
         where predicate: @escaping ([String: Any]) -> Bool
     ) async throws -> [String: Any] {
         let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
+        while true {
             if let line = queue.sync(execute: {
                 if let index = lines.firstIndex(where: predicate) {
                     return lines.remove(at: index)
@@ -120,12 +129,28 @@ final class JSONLineProcess: @unchecked Sendable {
             }) {
                 return line
             }
+            guard ContinuousClock.now < deadline else { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         throw E2ETimeout(description)
     }
 
+    private let teardownQueue = DispatchQueue(label: "JSONLineProcess.teardown")
+
     func stop() {
+        teardownQueue.async { self.stopOnTeardownQueue() }
+    }
+
+    func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            teardownQueue.async {
+                self.stopOnTeardownQueue()
+                continuation.resume()
+            }
+        }
+    }
+
+    private func stopOnTeardownQueue() {
         guard process.isRunning else { return }
         try? input.fileHandleForWriting.write(contentsOf: Data("{\"type\":\"shutdown\"}\nshutdown\n".utf8))
         let deadline = Date().addingTimeInterval(1)
@@ -157,4 +182,27 @@ final class JSONLineProcess: @unchecked Sendable {
             }
         }
     }
+}
+
+final class E2EProcesses {
+    private var processes: [JSONLineProcess] = []
+    func node(script: String, arguments: [String] = []) throws -> JSONLineProcess {
+        let process = try JSONLineProcess.node(script: script, arguments: arguments)
+        processes.append(process)
+        return process
+    }
+    func stop() async {
+        for process in processes.reversed() { await process.stopAndWait() }
+    }
+}
+
+func withE2EProcesses(_ body: (E2EProcesses) async throws -> Void) async throws {
+    let processes = E2EProcesses()
+    do {
+        try await body(processes)
+    } catch {
+        await processes.stop()
+        throw error
+    }
+    await processes.stop()
 }

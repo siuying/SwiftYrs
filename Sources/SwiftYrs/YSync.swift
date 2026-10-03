@@ -134,9 +134,27 @@ public enum YSyncProtocol {
     private static let transactionRetryDelay: Duration = .milliseconds(5)
     private static let transactionRetryTimeout: Duration = .seconds(1)
 
+    struct RetryPolicy {
+        var now: () -> Duration
+        var wait: (Duration) -> Void = { delay in
+            let components = delay.components
+            Thread.sleep(forTimeInterval: Double(components.seconds) + Double(components.attoseconds) / 1e18)
+        }
+        var onConflict: () -> Void = {}
+
+        static func live() -> RetryPolicy {
+            let start = ContinuousClock.now
+            return RetryPolicy(now: { start.duration(to: .now) })
+        }
+    }
+
     /// Waits up to one second for document contention, then throws `YError.transactionConflict`.
     public static func start(awareness: YAwareness) throws -> Data {
-        let stateVector = try retryDocumentOperation { try awareness.document.stateVector() }
+        try start(awareness: awareness, retry: .live())
+    }
+
+    static func start(awareness: YAwareness, retry: RetryPolicy) throws -> Data {
+        let stateVector = try retryDocumentOperation(retry: retry) { try awareness.document.stateVector() }
         let step1 = try YSyncMessage.syncStep1(stateVector)
         let presence = try YSyncMessage.awareness(awareness.encodeUpdate())
         return YSyncMessage.joinedPayload([step1, presence])
@@ -150,17 +168,21 @@ public enum YSyncProtocol {
     /// Tags inbound awareness events with `origin` so providers can suppress echoes.
     /// Waits up to one second per document operation, then throws `YError.transactionConflict`.
     public static func handle(_ payload: Data, awareness: YAwareness, origin: String?) throws -> Data {
+        try handle(payload, awareness: awareness, origin: origin, retry: .live())
+    }
+
+    static func handle(_ payload: Data, awareness: YAwareness, origin: String? = nil, retry: RetryPolicy) throws -> Data {
         let messages = try YSyncMessage.decodePayload(payload, includePayload: false)
         var responses: [YSyncMessage] = []
         for message in messages {
             switch message {
             case let .syncStep1(stateVector, _):
-                let update = try retryDocumentOperation {
+                let update = try retryDocumentOperation(retry: retry) {
                     try awareness.document.encodeStateAsUpdateV1(from: stateVector)
                 }
                 responses.append(try .syncStep2(update))
             case let .syncStep2(update, _), let .update(update, _):
-                try retryDocumentOperation { try awareness.document.apply(update) }
+                try retryDocumentOperation(retry: retry) { try awareness.document.apply(update) }
             case let .awareness(update, _):
                 try awareness.applyUpdate(update, origin: origin)
             case .awarenessQuery:
@@ -174,18 +196,17 @@ public enum YSyncProtocol {
         return YSyncMessage.joinedPayload(responses)
     }
 
-    private static func retryDocumentOperation<T>(_ operation: () throws -> T) throws -> T {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: transactionRetryTimeout)
+    private static func retryDocumentOperation<T>(retry: RetryPolicy, _ operation: () throws -> T) throws -> T {
+        let deadline = retry.now() + transactionRetryTimeout
         while true {
             do {
                 return try operation()
             } catch YError.transactionConflict {
-                let remaining = clock.now.duration(to: deadline)
+                retry.onConflict()
+                let remaining = deadline - retry.now()
                 guard remaining > .zero else { throw YError.transactionConflict }
-                let delay = min(transactionRetryDelay, remaining).components
-                Thread.sleep(forTimeInterval: Double(delay.seconds) + Double(delay.attoseconds) / 1e18)
-                guard clock.now < deadline else { throw YError.transactionConflict }
+                retry.wait(min(transactionRetryDelay, remaining))
+                guard retry.now() < deadline else { throw YError.transactionConflict }
             }
         }
     }

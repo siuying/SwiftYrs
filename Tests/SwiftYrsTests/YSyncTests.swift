@@ -1,6 +1,7 @@
 import Foundation
+import SwiftYrsTestSupport
 import Testing
-import SwiftYrs
+@testable import SwiftYrs
 
 private struct YjsSyncFixture: Decodable {
     let multiMessage: Data
@@ -101,7 +102,7 @@ func syncProtocolStartReturnsStepOneAndAwarenessMessages() throws {
 }
 
 @Test(arguments: ["start", "syncStep1", "syncStep2", "update"])
-func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String) throws {
+func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String) async throws {
     let source = YDoc(clientID: 1)
     let text = try source.text(named: "body")
     try source.write { try $0.insert("hello", into: text, at: 0) }
@@ -114,11 +115,11 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
     case "syncStep2": payload = try YSyncMessage.syncStep2(update).payload
     default: payload = try YSyncMessage.update(update).payload
     }
-    let transactionHeld = DispatchSemaphore(value: 0)
+    let transactionHeld = AsyncStream.makeStream(of: Void.self)
     let setPresence = DispatchSemaphore(value: 0)
+    defer { setPresence.signal() }
     let writerFinished = DispatchSemaphore(value: 0)
-    let syncStarted = DispatchSemaphore(value: 0)
-    let syncFinished = DispatchSemaphore(value: 0)
+    let syncFinished = AsyncStream.makeStream(of: Void.self)
     let writerResult = SyncAttemptResult()
     let syncResult = SyncAttemptResult()
 
@@ -126,37 +127,36 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
         defer { writerFinished.signal() }
         writerResult.record {
             try doc.write { _ in
-                transactionHeld.signal()
-                guard setPresence.wait(timeout: .now() + 5) == .success else {
-                    throw YError.transactionConflict
-                }
+                transactionHeld.continuation.yield(())
+                setPresence.wait()
                 try awareness.setLocalState(["cursor": 42])
             }
             return Data()
         }
     }.start()
-    guard transactionHeld.wait(timeout: .now() + 5) == .success else {
+    let acquired = await testCompletion(transactionHeld.stream)
+    #expect(acquired, "Writer must acquire its transaction")
+    guard acquired else {
         setPresence.signal()
-        Issue.record("Writer did not acquire its transaction")
         return
     }
     Thread {
-        defer { syncFinished.signal() }
+        defer { syncFinished.continuation.yield(()) }
         syncResult.record {
-            syncStarted.signal()
-            if operation == "start" { return try YSyncProtocol.start(awareness: awareness) }
-            return try YSyncProtocol.handle(payload, awareness: awareness)
+            // The first real conflict proves sync reached the held document transaction.
+            // Only one conflict is expected: release presence and await the writer here.
+            let retry = YSyncProtocol.RetryPolicy(
+                now: { .zero }, wait: { _ in },
+                onConflict: { setPresence.signal(); writerFinished.wait() }
+            )
+            if operation == "start" { return try YSyncProtocol.start(awareness: awareness, retry: retry) }
+            return try YSyncProtocol.handle(payload, awareness: awareness, retry: retry)
         }
     }.start()
 
-    #expect(syncStarted.wait(timeout: .now() + 5) == .success)
-    Thread.sleep(forTimeInterval: 0.03)
-    setPresence.signal()
-    let completedWriter = writerFinished.wait(timeout: .now() + 2) == .success
-    let completedSync = syncFinished.wait(timeout: .now() + 2) == .success
-    #expect(completedSync, "Sync must complete after the writer releases its transaction")
-    #expect(completedWriter, "Setting presence inside a document transaction must not deadlock")
-    guard completedSync && completedWriter else { return }
+    let completed = await testCompletion(syncFinished.stream)
+    #expect(completed, "Sync and setting presence inside the writer transaction must complete without deadlock")
+    guard completed else { return }
     #expect(syncResult.error() == nil)
     #expect(writerResult.error() == nil)
     #expect(try (awareness.localState() as? [String: Any])?["cursor"] as? Int == 42)
@@ -174,7 +174,7 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
 }
 
 @Test(arguments: [false, true], [false, true])
-func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObserver: Bool) throws {
+func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObserver: Bool) async throws {
     let source = YDoc(clientID: 1)
     let text = try source.text(named: "body")
     try source.write { try $0.insert("hello", into: text, at: 0) }
@@ -182,13 +182,14 @@ func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObser
     let doc = YDoc(clientID: 2)
     let awareness = YAwareness(document: doc)
     let result = SyncAttemptResult()
-    let finished = DispatchSemaphore(value: 0)
-    let began = ContinuousClock.now
+    let finished = AsyncStream.makeStream(of: Void.self)
+    let clock = SyncRetryClock()
     Thread {
-        defer { finished.signal() }
+        defer { finished.continuation.yield(()) }
         let sync = {
-            if starting { return try YSyncProtocol.start(awareness: awareness) }
-            return try YSyncProtocol.handle(payload, awareness: awareness)
+            let retry = YSyncProtocol.RetryPolicy(now: { clock.now() }, wait: { clock.advance($0) })
+            if starting { return try YSyncProtocol.start(awareness: awareness, retry: retry) }
+            return try YSyncProtocol.handle(payload, awareness: awareness, retry: retry)
         }
         do {
             if inObserver {
@@ -203,11 +204,11 @@ func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObser
             result.record { throw error }
         }
     }.start()
-    let completed = finished.wait(timeout: .now() + 3) == .success
+    let completed = await testCompletion(finished.stream)
     #expect(completed, "Re-entrant sync must time out rather than deadlock")
     guard completed else { return }
     #expect(result.error() as? YError == .transactionConflict)
-    #expect(began.duration(to: .now) >= .seconds(1))
+    #expect(clock.now() == .seconds(1))
 }
 
 @Test
@@ -330,3 +331,11 @@ func syncCanDecodeJavaScriptYjsFixture() throws {
         Issue.record("Expected JS awareness query")
     }
 }
+
+private final class SyncRetryClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var time: Duration = .zero
+    func now() -> Duration { lock.withLock { time } }
+    func advance(_ duration: Duration) { lock.withLock { time += duration } }
+}
+

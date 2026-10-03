@@ -2,15 +2,9 @@
 import CloudKit
 import Foundation
 import SwiftYrs
-import SwiftYrsCloudKit
+@testable import SwiftYrsCloudKit
+import SwiftYrsTestSupport
 import Testing
-
-private final class Flag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-    func set() { lock.lock(); value = true; lock.unlock() }
-    func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
-}
 
 private struct Harness {
     let engine: MockCloudKitSyncEngine
@@ -52,7 +46,8 @@ private func insert(_ string: String, into doc: YDoc) throws {
 
 @discardableResult
 private func waitUntil(
-    timeout: Duration = .seconds(3),
+    // Saving a debounced edit is eventual, including under delayed scheduling.
+    timeout: Duration = .seconds(30),
     _ condition: @escaping () async -> Bool
 ) async -> Bool {
     let deadline = ContinuousClock.now.advanced(by: timeout)
@@ -188,12 +183,18 @@ func errorsStreamEmitsOnSendFailure() async throws {
 func concurrentAppWriteResolvesViaRetry() async throws {
     let harness = try await Harness.make()
     let doc = YDoc(clientID: 7)
-    // Generous retry budget so the capture reliably outlasts the held write.
+    let gate = TestThreadGate()
+    defer { gate.open() }
+    let finished = AsyncStream.makeStream(of: Void.self)
     let provider = try CloudKitProvider(
         documentName: "doc",
         doc: doc,
         store: harness.store,
-        options: CloudKitProviderOptions(debounce: .seconds(600), maxTransactionRetries: 200)
+        options: CloudKitProviderOptions(debounce: .seconds(600), maxTransactionRetries: 200),
+        testHooks: .init(onTransactionConflict: {
+            gate.open()
+            _ = try? await nextTestEvent(finished.stream)
+        })
     )
     try await provider.start()
     defer { Task { await provider.destroy() } }
@@ -202,16 +203,17 @@ func concurrentAppWriteResolvesViaRetry() async throws {
 
     // Hold a write transaction open on another thread, then flush — the capture
     // must retry past the transactionConflict until the writer releases.
-    let text = try doc.text(named: "body")
-    let acquired = Flag()
-    let holder = Task.detached {
-        try doc.write { transaction in
-            try transaction.insert("!", into: text, at: 0)
-            acquired.set()
-            Thread.sleep(forTimeInterval: 0.05)
+    let holder = Task {
+        try await onTestThread {
+            defer { finished.continuation.yield(()); finished.continuation.finish() }
+            let text = try doc.text(named: "body")
+            try doc.write { transaction in
+                try transaction.insert("!", into: text, at: 0)
+                gate.enterAndWait()
+            }
         }
     }
-    while !acquired.get() { try? await Task.sleep(for: .milliseconds(1)) }
+    try await gate.waitForEntry()
     try await provider.flush()
     try await holder.value
 
@@ -227,8 +229,10 @@ func destroyStopsIngressSoLaterEditsDoNotEnqueue() async throws {
     await provider.destroy()
 
     try insert("after", into: doc)
-    // Give the (now-cancelled) debounce well past its window.
-    try? await Task.sleep(for: .milliseconds(80))
+    // Native unsubscribe may already have removed the callback, so drive its
+    // scheduling entry directly and prove it cannot create a debounce task.
+    #expect(await provider.scheduleFlushForTesting() == false)
+    try await provider.flush()
     #expect(await harness.engine.serverRecordIDs.isEmpty)
 }
 

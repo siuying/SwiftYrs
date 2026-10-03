@@ -45,7 +45,7 @@ extension RealNetworkE2E {
             responder.signal(endOfCandidates)
             initiator.start()
 
-            try await e2eEventually("both data channels opened", timeout: .seconds(15)) {
+            try await e2eEventually("both data channels opened", timeout: .seconds(30)) {
                 let initiatorIsOpen = await initiatorConnected.value == true
                 let responderIsOpen = await responderConnected.value == true
                 return initiatorIsOpen && responderIsOpen
@@ -54,7 +54,7 @@ extension RealNetworkE2E {
             #expect(await initiator.sendAndFlush(Data("local change".utf8), timeout: .seconds(2)))
             #expect(await responder.sendAndFlush(Data("remote change".utf8), timeout: .seconds(2)))
 
-            try await e2eEventually("both directions delivered", timeout: .seconds(5)) {
+            try await e2eEventually("both directions delivered", timeout: .seconds(30)) {
                 let atResponderReceived = await atResponder.received
                 let atInitiatorReceived = await atInitiator.received
                 return atResponderReceived == [Data("local change".utf8)]

@@ -1,11 +1,13 @@
 import Foundation
+import SwiftYrsTestSupport
 import Testing
 import SwiftYrs
-import SwiftYrsWebRTC
+@testable import SwiftYrsWebRTC
 
 @Test
 func webRTCAwarenessRenewsExpiresAndStopsWithProviderLifecycle() async throws {
     let clock = WebRTCAwarenessClock()
+    let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 301)
     let awareness = YAwareness(
         document: document,
@@ -18,23 +20,26 @@ func webRTCAwarenessRenewsExpiresAndStopsWithProviderLifecycle() async throws {
     try awareness.applyUpdate(remote.encodeUpdate())
     let provider = WebRTCProvider(
         "awareness-lifetime", doc: document, signaling: [],
-        options: .init(awareness: awareness, iceServers: [])
+        options: .init(awareness: awareness, iceServers: []),
+        testHooks: .init(awarenessCheckWait: { await scheduler.wait() }, onAwarenessCheck: { scheduler.checked($0) })
     )
-    var updates = try awareness.updateEvents().makeAsyncIterator()
-    var changes = try awareness.changeEvents().makeAsyncIterator()
+    let updates = try awareness.updateEvents()
+    let changes = try awareness.changeEvents()
     let received = WebRTCAwarenessUpdates()
     let observation = try awareness.observeUpdate { _ in received.increment() }
     defer { observation.cancel() }
     try await provider.connect()
     clock.set(.seconds(15))
-    if case let .awarenessUpdate(change) = await updates.next() {
+    #expect(try await scheduler.tick())
+    if case let .awarenessUpdate(change) = try await nextTestEvent(updates) {
         #expect(change.updated == [301])
     } else {
         Issue.record("Expected WebRTC awareness renewal")
     }
 
     clock.set(.seconds(30))
-    if case let .awarenessChange(change) = await changes.next() {
+    #expect(try await scheduler.tick())
+    if case let .awarenessChange(change) = try await nextTestEvent(changes) {
         #expect(change.removed == [302])
         #expect(change.origin == YAwarenessChange.timeoutOrigin)
     } else {
@@ -43,14 +48,15 @@ func webRTCAwarenessRenewsExpiresAndStopsWithProviderLifecycle() async throws {
     await provider.disconnect()
     let stopped = received.count()
     clock.set(.seconds(60))
-    try await Task.sleep(for: .milliseconds(30))
+    #expect(try await scheduler.tick() == false)
     #expect(received.count() == stopped)
 
     try await provider.connect()
+    try await scheduler.park()
     await provider.destroy()
     let destroyed = received.count()
     clock.set(.seconds(120))
-    try await Task.sleep(for: .milliseconds(30))
+    #expect(try await scheduler.tick() == false)
     #expect(received.count() == destroyed)
 }
 
@@ -59,42 +65,55 @@ extension RealNetworkE2E {
     struct WebRTCAwarenessLifetimeTests {
         @Test
         func idleAwarenessRenewalReachesSwiftPeerOverDataChannel() async throws {
-            let server = try JSONLineProcess.node(script: "webrtc-signaling-server.ts")
-            defer { server.stop() }
-            let ready = try await server.waitForLine("signaling server ready") { $0["type"] as? String == "ready" }
-            let port = try #require(ready["port"] as? Int)
-            let url = try #require(URL(string: "ws://127.0.0.1:\(port)"))
-            let clock = WebRTCAwarenessClock()
-            let document = YDoc(clientID: 303)
-            let awareness = YAwareness(
-                document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
-            )
-            try awareness.setLocalState(["name": "idle"])
-            let provider = WebRTCProvider(
-                "awareness-renewal", doc: document, signaling: [url], options: .init(awareness: awareness, iceServers: [])
-            )
-            let peerDocument = YDoc(clientID: 304)
-            let peerAwareness = YAwareness(document: peerDocument)
-            let peer = WebRTCProvider(
-                "awareness-renewal", doc: peerDocument, signaling: [url], options: .init(awareness: peerAwareness, iceServers: [])
-            )
-            try await withE2ETeardown([provider, peer]) {
-                try await provider.connect()
-                try await peer.connect()
-                try await e2eEventually("initial awareness reaches Swift peer", timeout: .seconds(10)) {
-                    try (peerAwareness.state(for: 303) as? [String: Any])?["name"] as? String == "idle"
-                }
-                let received = WebRTCAwarenessUpdates()
-                let observation = try peerAwareness.observeUpdate { event in
-                    if case let .awarenessUpdate(change) = event, change.updated.contains(303) {
-                        received.increment()
+            try await withE2EProcesses { processes in
+                let server = try processes.node(script: "webrtc-signaling-server.ts")
+                let ready = try await server.waitForLine("signaling server ready") { $0["type"] as? String == "ready" }
+                let port = try #require(ready["port"] as? Int)
+                let url = try #require(URL(string: "ws://127.0.0.1:\(port)"))
+                let clock = WebRTCAwarenessClock()
+                let checks = AwarenessChecks()
+                let document = YDoc(clientID: 303)
+                let awareness = YAwareness(
+                    document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
+                )
+                try awareness.setLocalState(["name": "idle"])
+                let provider = WebRTCProvider(
+                    "awareness-renewal", doc: document, signaling: [url], options: .init(awareness: awareness, iceServers: []),
+                    testHooks: .init(awarenessCheckWait: { await checks.wait() }, onAwarenessCheck: { checks.checked($0) })
+                )
+                let peerDocument = YDoc(clientID: 304)
+                let peerAwareness = YAwareness(document: peerDocument)
+                let peer = WebRTCProvider(
+                    "awareness-renewal", doc: peerDocument, signaling: [url], options: .init(awareness: peerAwareness, iceServers: [])
+                )
+                let arrivals = AsyncStream.makeStream(of: Void.self)
+                let arrivalObservation = try peerAwareness.observeUpdate { event in
+                    if case let .awarenessUpdate(change) = event, change.changed.contains(303) {
+                        arrivals.continuation.yield(())
                     }
                 }
-                defer { observation.cancel() }
-                clock.set(.seconds(15))
-                try await e2eEventually("idle awareness renewal reaches Swift peer", timeout: .seconds(5)) {
-                    received.count() > 0
+                defer { arrivalObservation.cancel() }
+                try await withE2ETeardown([provider, peer]) {
+                    try await provider.connect()
+                    try await checks.park()
+                    try await peer.connect()
+                    #expect(await testCompletion(arrivals.stream), "Initial awareness reaches Swift peer")
+                    #expect(try (peerAwareness.state(for: 303) as? [String: Any])?["name"] as? String == "idle")
+                    let received = WebRTCAwarenessUpdates()
+                    let renewals = AsyncStream.makeStream(of: Void.self)
+                    let observation = try peerAwareness.observeUpdate { event in
+                        if case let .awarenessUpdate(change) = event, change.updated.contains(303) {
+                            received.increment()
+                            renewals.continuation.yield(())
+                        }
+                    }
+                    defer { observation.cancel() }
+                    clock.set(.seconds(15))
+                    #expect(try await checks.tick())
+                    #expect(await testCompletion(renewals.stream), "Idle awareness renewal reaches Swift peer")
+                    #expect(received.count() > 0)
                 }
+                #expect(try await checks.tick() == false)
             }
         }
     }

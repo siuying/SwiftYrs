@@ -17,6 +17,23 @@ func webRTCDebug(_ message: @autoclosure () -> String) {
 /// borrows y-webrtc's vocabulary but is a Swift `actor` with an explicit async
 /// lifecycle — see ADR-0021 (shape) and ADR-0020 (the simple-peer seam).
 public actor WebRTCProvider {
+    struct TestHooks: Sendable {
+        static let none = TestHooks()
+        let awarenessCheckWait: (@Sendable () async throws -> Void)?
+        let onAwarenessCheck: (@Sendable (Bool) -> Void)?
+        let onSyncMessageHandled: (@Sendable (Data) -> Void)?
+
+        init(
+            awarenessCheckWait: (@Sendable () async throws -> Void)? = nil,
+            onAwarenessCheck: (@Sendable (Bool) -> Void)? = nil,
+            onSyncMessageHandled: (@Sendable (Data) -> Void)? = nil
+        ) {
+            self.awarenessCheckWait = awarenessCheckWait
+            self.onAwarenessCheck = onAwarenessCheck
+            self.onSyncMessageHandled = onSyncMessageHandled
+        }
+    }
+
     public struct Options: Sendable {
         /// Controls whether document updates received from WebRTC peers are
         /// applied to this provider's document.
@@ -108,6 +125,7 @@ public actor WebRTCProvider {
     private var reannounceTask: Task<Void, Never>?
     private var awarenessTask: Task<Void, Never>?
     private var awarenessTaskID: UUID?
+    private let testHooks: TestHooks
     private var started = false
     private var connectionStatus: WebRTCConnectionStatus = .disconnected
     private var lastSynced = false
@@ -126,6 +144,14 @@ public actor WebRTCProvider {
     }
 
     public init(_ roomName: String, doc: YDoc, signaling: [URL], options: Options = .init()) {
+        self.init(roomName, doc: doc, signaling: signaling, options: options, testHooks: .none)
+    }
+
+    init(
+        _ roomName: String, doc: YDoc, signaling: [URL], options: Options = .init(),
+        testHooks: TestHooks
+    ) {
+        self.testHooks = testHooks
         self.roomName = roomName
         self.doc = doc
         self.signalingURLs = signaling
@@ -479,6 +505,7 @@ public actor WebRTCProvider {
             }
             record.awarenessClientIDs.formUnion(result.awarenessAddedClientIDs)
             record.awarenessClientIDs.subtract(result.awarenessRemovedClientIDs)
+            testHooks.onSyncMessageHandled?(message.payload)
         } catch {
             webRTCLogger.error("failed to handle sync message from peer: \(error, privacy: .public)")
         }
@@ -536,12 +563,17 @@ public actor WebRTCProvider {
         let id = UUID()
         awarenessTaskID = id
         let interval = awareness.timing.checkInterval
+        let wait = testHooks.awarenessCheckWait
+        let checked = testHooks.onAwarenessCheck
         awarenessTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: interval)
+                    if let wait { try await wait() }
+                    else { try await Task.sleep(for: interval) }
                 } catch { return }
-                guard await self?.checkAwarenessTimeouts(id: id) == true else { return }
+                let active = await self?.checkAwarenessTimeouts(id: id) == true
+                checked?(active)
+                guard active else { return }
             }
         }
     }
