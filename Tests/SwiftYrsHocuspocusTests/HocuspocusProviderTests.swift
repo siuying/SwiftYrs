@@ -240,7 +240,7 @@ func providerRetriesWholeSyncFrameWithoutDuplicatingReplies() async throws {
     await statuses.waitForCount(2)
     #expect(statuses.values() == [.connecting, .connected])
     let frame = HocuspocusMessage.syncMessages(documentName: "room-1", [
-        try YSyncMessage.update(sourceDocument.encodeStateAsUpdateV1()),
+        try YSyncMessage.syncStep2(sourceDocument.encodeStateAsUpdateV1()),
         try YSyncMessage.syncStep1(serverDocument.stateVector()),
     ]).encoded()
     socket.receive(frame)
@@ -264,7 +264,7 @@ func providerRetriesWholeSyncFrameWithoutDuplicatingReplies() async throws {
     socket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "after-frame").encoded())
     #expect(await statelessIterator.next() == "after-frame")
     #expect(socket.sentMessageCount() == 0)
-    #expect(syncEvents.value() <= 1)
+    #expect(syncEvents.value() == 1)
     #expect(!statuses.values().contains(.disconnected))
     #expect(socket.closeCount() == 0)
     #expect(socketFactory.createdCount() == 1)
