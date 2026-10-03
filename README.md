@@ -501,7 +501,7 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | `Y.XmlFragment` | ✅ | ✅ | ✅ | `YXmlFragment` child insert/remove/read |
 | `Y.XmlElement` | ✅ | ✅ | ✅ | `YXmlElement` tag, attributes, children |
 | `Y.XmlText` | ✅ | ✅ | ✅ | `YXmlText` insert/remove/attributes |
-| Subdocuments | ✅ | ✅ | ✅ | `setNewSubdoc(guid:forKey:in:)` or auto-GUID `setNewSubdoc`, `subdocDoc(forKey:in:)` / `subdocDoc(guid:)`, `loadSubdoc`, `clearSubdoc`, `subdocGuids` |
+| Subdocuments | ✅ | ✅ | ✅ | `setNewSubdoc(guid:forKey:in:)` / `setNewSubdoc(guid:forKey:in:options:)` or auto-GUID `setNewSubdoc`, `subdocDoc(forKey:in:)` / `subdocDoc(guid:)`, `loadSubdoc`, `clearSubdoc`, `subdocGuids` |
 | Observers (callback) | ✅ | ✅ | ✅ | `Observation` token, per-type `.observe(_:)` |
 | Observers (async stream) | ✅ | ✅ | ✅ | `.events()` returns `AsyncStream<YEvent>` |
 | Document update observers | ✅ | ✅ | ✅ | `observeUpdates`, `observeTransactionCleanup`, `observeSubdocs`, `observeDestroy` |
@@ -510,7 +510,7 @@ The table below maps Yjs 13.6 public API surface to SwiftYrs. The Yrs/yffi colum
 | Encode state as update (v2) | ✅ | ✅ | ✅ | `encodeStateAsUpdateV2(from:)` |
 | Apply update (v1 / v2) | ✅ | ✅ | ✅ | `apply(_:)` — encoding inferred from `YUpdate.encoding` |
 | State vector | ✅ | ✅ | ✅ | `YStateVector` |
-| Snapshots | ✅ | ✅ | ✅ | `YSnapshot`, `encodeStateFromSnapshot` |
+| Snapshots | ✅ | ✅ | ✅ | `YDoc.Options`, `YDoc.options`, `YReadTransaction.snapshot()`, `YSnapshot.encode()/decode(_:)`, `encodeStateFromSnapshotV1/V2` (state-from-snapshot requires `YDoc.Options(skipGC: true)`) |
 | Sticky indexes / relative positions | ✅ | ✅ | ✅ | `YRelativePosition`, `relativePosition(in:at:association:)` / `absolutePosition(of:in:)` |
 | Undo Manager | ✅ | ✅ | ✅ | `YUndoManager` with scope, origin include/exclude, undo/redo stacks |
 | Awareness | ✅ | ✅ (shim) | ✅ | `YAwareness`, `YAwarenessUpdate` — implemented via project-owned Rust shim |

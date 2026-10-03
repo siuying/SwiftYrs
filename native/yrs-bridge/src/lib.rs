@@ -21,25 +21,30 @@ use yrs::updates::encoder::{Encode, Encoder, EncoderV1, EncoderV2};
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Assoc, ClientID, Doc, GetString, In, IndexScope,
     IndexedSequence, Map, MapPrelim, MapRef, Offset, OffsetKind, Options, Out, Quotable, ReadTxn,
-    StateVector, StickyIndex, Store, Subscription, Text, TextPrelim, TextRef, Transact,
+    Snapshot, StateVector, StickyIndex, Store, Subscription, Text, TextPrelim, TextRef, Transact,
     UndoManager, Update, WeakRef, Xml,
 };
 
 /// All docs use UTF-16 text offsets so index-based APIs (text insert/remove,
 /// deltas, sticky-index offsets) match Yjs semantics; yrs defaults to UTF-8
 /// byte offsets, which diverge from JS peers on any non-ASCII text.
-fn yjs_compatible_options() -> Options {
+fn yjs_compatible_options(skip_gc: bool) -> Options {
     let mut options = Options::default();
     options.offset_kind = OffsetKind::Utf16;
+    options.skip_gc = skip_gc;
     options
 }
 
 pub(crate) fn new_doc() -> Doc {
-    Doc::with_options(yjs_compatible_options())
+    new_doc_with_options(false)
 }
 
-fn new_doc_with_client_id(client_id: u64) -> Doc {
-    let mut options = yjs_compatible_options();
+pub(crate) fn new_doc_with_options(skip_gc: bool) -> Doc {
+    Doc::with_options(yjs_compatible_options(skip_gc))
+}
+
+fn new_doc_with_client_id(client_id: u64, skip_gc: bool) -> Doc {
+    let mut options = yjs_compatible_options(skip_gc);
     options.client_id = ClientID::new(client_id);
     Doc::with_options(options)
 }
@@ -55,6 +60,7 @@ pub(crate) const YRS_BRIDGE_ERR_NATIVE_PANIC: i32 = 5;
 pub(crate) const YRS_BRIDGE_ERR_TYPE_MISMATCH: i32 = 6;
 pub(crate) const YRS_BRIDGE_ERR_INVALID_GUID: i32 = 7;
 pub(crate) const YRS_BRIDGE_ERR_DUPLICATE_SUBDOC_GUID: i32 = 8;
+pub(crate) const YRS_BRIDGE_ERR_GARBAGE_COLLECTION_ENABLED: i32 = 9;
 
 const YRS_BRIDGE_VALUE_UNDEFINED: i32 = 0;
 const YRS_BRIDGE_VALUE_NULL: i32 = 1;
@@ -658,6 +664,15 @@ unsafe fn decode_state_vector(data: *const c_uchar, len: usize) -> Result<StateV
     }
 }
 
+unsafe fn decode_snapshot(data: *const c_uchar, len: usize) -> Result<Snapshot, i32> {
+    if data.is_null() {
+        Err(YRS_BRIDGE_ERR_NULL_POINTER)
+    } else {
+        let bytes = std::slice::from_raw_parts(data, len);
+        Snapshot::decode_v1(bytes).map_err(|_| YRS_BRIDGE_ERR_DECODE)
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_doc_get_text(
     doc: *mut Doc,
@@ -729,9 +744,25 @@ pub extern "C" fn yrs_bridge_doc_new() -> *mut Doc {
 }
 
 #[no_mangle]
-pub extern "C" fn yrs_bridge_doc_new_with_client_id(client_id: u64) -> *mut Doc {
+pub extern "C" fn yrs_bridge_doc_new_with_options(skip_gc: bool) -> *mut Doc {
     catch_unwind(AssertUnwindSafe(|| {
-        Box::into_raw(Box::new(new_doc_with_client_id(client_id)))
+        Box::into_raw(Box::new(new_doc_with_options(skip_gc)))
+    }))
+    .unwrap_or(null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn yrs_bridge_doc_new_with_client_id(client_id: u64) -> *mut Doc {
+    yrs_bridge_doc_new_with_client_id_and_options(client_id, false)
+}
+
+#[no_mangle]
+pub extern "C" fn yrs_bridge_doc_new_with_client_id_and_options(
+    client_id: u64,
+    skip_gc: bool,
+) -> *mut Doc {
+    catch_unwind(AssertUnwindSafe(|| {
+        Box::into_raw(Box::new(new_doc_with_client_id(client_id, skip_gc)))
     }))
     .unwrap_or(null_mut())
 }
@@ -745,6 +776,17 @@ pub unsafe extern "C" fn yrs_bridge_doc_client_id(doc: *mut Doc) -> u64 {
         (*doc).client_id().get()
     }))
     .unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_doc_skip_gc(doc: *mut Doc, out: *mut bool) -> i32 {
+    ffi_boundary(|| {
+        if doc.is_null() || out.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+        *out = (*doc).skip_gc();
+        YRS_BRIDGE_OK
+    })
 }
 
 #[no_mangle]
@@ -865,6 +907,35 @@ pub unsafe extern "C" fn yrs_bridge_transaction_state_vector_v1(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_snapshot(
+    transaction: *mut YrsBridgeTransaction,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+
+        write_buffer((*transaction).snapshot().encode_v1(), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_snapshot_decode(
+    snapshot: *const c_uchar,
+    snapshot_len: usize,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        let snapshot = match decode_snapshot(snapshot, snapshot_len) {
+            Ok(snapshot) => snapshot,
+            Err(code) => return code,
+        };
+        write_buffer(snapshot.encode_v1(), out)
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn yrs_bridge_transaction_client_clock(
     transaction: *mut YrsBridgeTransaction,
     client_id: u64,
@@ -918,6 +989,60 @@ pub unsafe extern "C" fn yrs_bridge_transaction_state_diff_v2(
         };
         let mut encoder = EncoderV2::new();
         (*transaction).encode_diff(&state_vector, &mut encoder);
+        write_buffer(encoder.to_vec(), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_encode_state_from_snapshot_v1(
+    transaction: *mut YrsBridgeTransaction,
+    snapshot: *const c_uchar,
+    snapshot_len: usize,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+
+        let snapshot = match decode_snapshot(snapshot, snapshot_len) {
+            Ok(snapshot) => snapshot,
+            Err(code) => return code,
+        };
+        let mut encoder = EncoderV1::new();
+        if let Err(error) = (*transaction).encode_state_from_snapshot(&snapshot, &mut encoder) {
+            return match error {
+                yrs::error::Error::Gc => YRS_BRIDGE_ERR_GARBAGE_COLLECTION_ENABLED,
+                _ => YRS_BRIDGE_ERR_DECODE,
+            };
+        }
+        write_buffer(encoder.to_vec(), out)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_transaction_encode_state_from_snapshot_v2(
+    transaction: *mut YrsBridgeTransaction,
+    snapshot: *const c_uchar,
+    snapshot_len: usize,
+    out: *mut YrsBridgeBuffer,
+) -> i32 {
+    ffi_boundary(|| {
+        if transaction.is_null() {
+            return YRS_BRIDGE_ERR_NULL_POINTER;
+        }
+
+        let snapshot = match decode_snapshot(snapshot, snapshot_len) {
+            Ok(snapshot) => snapshot,
+            Err(code) => return code,
+        };
+        let mut encoder = EncoderV2::new();
+        if let Err(error) = (*transaction).encode_state_from_snapshot(&snapshot, &mut encoder) {
+            return match error {
+                yrs::error::Error::Gc => YRS_BRIDGE_ERR_GARBAGE_COLLECTION_ENABLED,
+                _ => YRS_BRIDGE_ERR_DECODE,
+            };
+        }
         write_buffer(encoder.to_vec(), out)
     })
 }
@@ -3664,4 +3789,45 @@ pub unsafe extern "C" fn yrs_bridge_lib0_decode_any(
         };
         write_buffer(json, out)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_skip_gc_reports_document_state_and_pointer_errors() {
+        let mut document = new_doc();
+        let mut skip_gc = true;
+        assert_eq!(
+            unsafe { yrs_bridge_doc_skip_gc(&mut document, &mut skip_gc) },
+            YRS_BRIDGE_OK
+        );
+        assert!(!skip_gc);
+
+        let mut no_gc_document = new_doc_with_options(true);
+        skip_gc = false;
+        assert_eq!(
+            unsafe { yrs_bridge_doc_skip_gc(&mut no_gc_document, &mut skip_gc) },
+            YRS_BRIDGE_OK
+        );
+        assert!(skip_gc);
+
+        assert_eq!(
+            unsafe { yrs_bridge_doc_skip_gc(std::ptr::null_mut(), &mut skip_gc) },
+            YRS_BRIDGE_ERR_NULL_POINTER
+        );
+        assert_eq!(
+            unsafe { yrs_bridge_doc_skip_gc(&mut document, std::ptr::null_mut()) },
+            YRS_BRIDGE_ERR_NULL_POINTER
+        );
+    }
+
+    #[test]
+    fn ffi_boundary_reports_panics_separately() {
+        assert_eq!(
+            ffi_boundary(|| panic!("test panic")),
+            YRS_BRIDGE_ERR_NATIVE_PANIC
+        );
+    }
 }

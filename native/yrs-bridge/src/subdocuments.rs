@@ -12,7 +12,7 @@ use yrs::branch::Branch;
 use yrs::{Doc, Map, MapRef, ReadTxn};
 
 use crate::{
-    ffi_boundary, new_doc, read_name, write_buffer, BranchPointable, YrsBridgeBuffer,
+    ffi_boundary, new_doc_with_options, read_name, write_buffer, BranchPointable, YrsBridgeBuffer,
     YrsBridgeTransaction, YRS_BRIDGE_ERR_DECODE, YRS_BRIDGE_ERR_DUPLICATE_SUBDOC_GUID,
     YRS_BRIDGE_ERR_INVALID_GUID, YRS_BRIDGE_ERR_NULL_POINTER, YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION,
     YRS_BRIDGE_ERR_TYPE_MISMATCH, YRS_BRIDGE_OK,
@@ -45,6 +45,17 @@ pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc(
     key: *const c_char,
     guid_out: *mut YrsBridgeBuffer,
 ) -> i32 {
+    yrs_bridge_map_set_new_subdoc_with_options(map, transaction, key, false, guid_out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc_with_options(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    skip_gc: bool,
+    guid_out: *mut YrsBridgeBuffer,
+) -> i32 {
     ffi_boundary(|| {
         if map.is_null() || transaction.is_null() {
             return YRS_BRIDGE_ERR_NULL_POINTER;
@@ -56,7 +67,8 @@ pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc(
         let Some(transaction) = (*transaction).as_write_mut() else {
             return YRS_BRIDGE_ERR_READ_ONLY_TRANSACTION;
         };
-        let subdoc = MapRef::from_raw_branch(map).insert(transaction, key, new_doc());
+        let subdoc =
+            MapRef::from_raw_branch(map).insert(transaction, key, new_doc_with_options(skip_gc));
         write_buffer(subdoc.guid().to_string().into_bytes(), guid_out)
     })
 }
@@ -67,6 +79,25 @@ pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc_with_guid(
     transaction: *mut YrsBridgeTransaction,
     key: *const c_char,
     guid: *const c_char,
+    guid_out: *mut YrsBridgeBuffer,
+) -> i32 {
+    yrs_bridge_map_set_new_subdoc_with_guid_and_options(
+        map,
+        transaction,
+        key,
+        guid,
+        false,
+        guid_out,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc_with_guid_and_options(
+    map: *mut Branch,
+    transaction: *mut YrsBridgeTransaction,
+    key: *const c_char,
+    guid: *const c_char,
+    skip_gc: bool,
     guid_out: *mut YrsBridgeBuffer,
 ) -> i32 {
     ffi_boundary(|| {
@@ -94,7 +125,7 @@ pub unsafe extern "C" fn yrs_bridge_map_set_new_subdoc_with_guid(
         {
             return YRS_BRIDGE_ERR_DUPLICATE_SUBDOC_GUID;
         }
-        let mut options = crate::yjs_compatible_options();
+        let mut options = crate::yjs_compatible_options(skip_gc);
         options.guid = guid.into();
         let subdoc =
             MapRef::from_raw_branch(map).insert(transaction, key, Doc::with_options(options));

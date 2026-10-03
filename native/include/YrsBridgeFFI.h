@@ -32,8 +32,11 @@ typedef struct YrsBridgeValue {
 } YrsBridgeValue;
 
 YrsBridgeDoc *_Nullable yrs_bridge_doc_new(void);
+YrsBridgeDoc *_Nullable yrs_bridge_doc_new_with_options(bool skip_gc);
 YrsBridgeDoc *_Nullable yrs_bridge_doc_new_with_client_id(uint64_t client_id);
+YrsBridgeDoc *_Nullable yrs_bridge_doc_new_with_client_id_and_options(uint64_t client_id, bool skip_gc);
 uint64_t yrs_bridge_doc_client_id(YrsBridgeDoc *_Nonnull doc);
+int yrs_bridge_doc_skip_gc(YrsBridgeDoc *_Nonnull doc, bool *_Nonnull out);
 int yrs_bridge_doc_guid(YrsBridgeDoc *_Nonnull doc, YrsBridgeBuffer *_Nonnull out);
 void yrs_bridge_doc_destroy(YrsBridgeDoc *_Nonnull doc);
 
@@ -44,9 +47,13 @@ void yrs_bridge_transaction_destroy(YrsBridgeTransaction *_Nonnull transaction);
 int yrs_bridge_transaction_is_writable(YrsBridgeTransaction *_Nonnull transaction, bool *_Nonnull out);
 
 int yrs_bridge_transaction_state_vector_v1(YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_transaction_snapshot(YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_snapshot_decode(const unsigned char *_Nonnull snapshot, unsigned long snapshot_len, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_client_clock(YrsBridgeTransaction *_Nonnull transaction, uint64_t client_id, uint32_t *_Nonnull out);
 int yrs_bridge_transaction_state_diff_v1(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nullable state_vector, unsigned long state_vector_len, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_state_diff_v2(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nullable state_vector, unsigned long state_vector_len, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_transaction_encode_state_from_snapshot_v1(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nonnull snapshot, unsigned long snapshot_len, YrsBridgeBuffer *_Nonnull out);
+int yrs_bridge_transaction_encode_state_from_snapshot_v2(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nonnull snapshot, unsigned long snapshot_len, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_client_state_diff_v1(YrsBridgeTransaction *_Nonnull transaction, uint64_t client_id, uint32_t from_clock, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_client_state_diff_v2(YrsBridgeTransaction *_Nonnull transaction, uint64_t client_id, uint32_t from_clock, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_transaction_apply_v1(YrsBridgeTransaction *_Nonnull transaction, const unsigned char *_Nonnull update, unsigned long update_len);
@@ -108,7 +115,9 @@ int yrs_bridge_xml_text_apply_delta_json(YrsBridgeBranch *_Nonnull text, YrsBrid
 int yrs_bridge_xml_text_delta_json(YrsBridgeBranch *_Nonnull text, YrsBridgeTransaction *_Nonnull transaction, YrsBridgeBuffer *_Nonnull out);
 
 int yrs_bridge_map_set_new_subdoc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull guid_out);
+int yrs_bridge_map_set_new_subdoc_with_options(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, bool skip_gc, YrsBridgeBuffer *_Nonnull guid_out);
 int yrs_bridge_map_set_new_subdoc_with_guid(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, const char *_Nonnull guid, YrsBridgeBuffer *_Nonnull guid_out);
+int yrs_bridge_map_set_new_subdoc_with_guid_and_options(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, const char *_Nonnull guid, bool skip_gc, YrsBridgeBuffer *_Nonnull guid_out);
 int yrs_bridge_map_get_subdoc_guid(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeBuffer *_Nonnull out);
 int yrs_bridge_map_get_subdoc_doc(YrsBridgeBranch *_Nonnull map, YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull key, YrsBridgeDoc *_Nullable *_Nonnull doc_out);
 int yrs_bridge_transaction_get_subdoc_doc_by_guid(YrsBridgeTransaction *_Nonnull transaction, const char *_Nonnull guid, YrsBridgeDoc *_Nullable *_Nonnull doc_out);
