@@ -102,6 +102,7 @@ public actor WebRTCProvider {
     private var signalingConnections: [SignalingConnection] = []
     private var openSignalingConnections: Set<ObjectIdentifier> = []
     private var conns: [String: PeerRecord] = [:]
+    private var peerRecordGeneration: UInt64 = 0
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
     private var reannounceTask: Task<Void, Never>?
@@ -111,11 +112,15 @@ public actor WebRTCProvider {
 
     private final class PeerRecord: @unchecked Sendable {
         let conn: WebRTCConn
+        let generation: UInt64
         var glareToken: Double?
         var synced = false
         var channelOpen = false
         var awarenessClientIDs: Set<UInt64> = []
-        init(conn: WebRTCConn) { self.conn = conn }
+        init(conn: WebRTCConn, generation: UInt64) {
+            self.conn = conn
+            self.generation = generation
+        }
     }
 
     public init(_ roomName: String, doc: YDoc, signaling: [URL], options: Options = .init()) {
@@ -374,7 +379,8 @@ public actor WebRTCProvider {
             iceServers: options.iceServers,
             factory: peerConnectionFactory
         )
-        let record = PeerRecord(conn: conn)
+        peerRecordGeneration += 1
+        let record = PeerRecord(conn: conn, generation: peerRecordGeneration)
         conns[remotePeerId] = record
         conn.onSignal = { [weak self, weak record] signal in
             Task { await self?.peerEmittedSignal(peerId: remotePeerId, record: record, signal: signal) }
@@ -395,8 +401,8 @@ public actor WebRTCProvider {
         conns.count
     }
 
-    func peerRecordIdentifier(for remotePeerId: String) -> ObjectIdentifier? {
-        conns[remotePeerId].map(ObjectIdentifier.init)
+    func peerRecordIdentifier(for remotePeerId: String) -> UInt64? {
+        conns[remotePeerId]?.generation
     }
 
     private var hasPeerCapacity: Bool {
