@@ -276,6 +276,12 @@ let observation = try awareness.observeChange { event in
 
 ### Sync protocol (y-protocols)
 
+`YSyncProtocol.start(awareness:)` and `handle(_:awareness:)` synchronously wait for document contention with a 5 ms retry delay and a one-second deadline per document operation. Only `YError.transactionConflict` is retried; other errors propagate immediately. Calls made inside a transaction or its commit observer can prevent that transaction from finishing, so they throw `transactionConflict` at the deadline instead of hanging. Awareness access stays synchronized independently; retries never hold the awareness lock.
+
+Custom providers can use `handle(_:awareness:origin:)` to tag inbound awareness events with a provider-specific origin and suppress their echoes. For example, `try YSyncProtocol.handle(receivedData, awareness: awareness, origin: providerOrigin)` returns the response payload. The origin applies to awareness events, not document updates.
+
+`handle` decodes the entire batched payload before applying messages. A malformed later protocol message rejects the batch without applying earlier messages, whereas the native handler applied the valid prefix first. Errors during application do not roll back earlier messages.
+
 ```swift
 // Initiating sync (client → server)
 let stateVector = try doc.stateVector()

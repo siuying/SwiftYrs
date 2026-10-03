@@ -117,6 +117,7 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
     let transactionHeld = DispatchSemaphore(value: 0)
     let setPresence = DispatchSemaphore(value: 0)
     let writerFinished = DispatchSemaphore(value: 0)
+    let syncStarted = DispatchSemaphore(value: 0)
     let syncFinished = DispatchSemaphore(value: 0)
     let writerResult = SyncAttemptResult()
     let syncResult = SyncAttemptResult()
@@ -142,30 +143,94 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
     DispatchQueue.global().async {
         defer { syncFinished.signal() }
         syncResult.record {
+            syncStarted.signal()
             if operation == "start" { return try YSyncProtocol.start(awareness: awareness) }
             return try YSyncProtocol.handle(payload, awareness: awareness)
         }
     }
 
-    let completedSync = syncFinished.wait(timeout: .now() + 1) == .success
+    #expect(syncStarted.wait(timeout: .now() + 5) == .success)
+    Thread.sleep(forTimeInterval: 0.03)
     setPresence.signal()
     let completedWriter = writerFinished.wait(timeout: .now() + 2) == .success
-    #expect(completedSync, "Sync must report contention without blocking")
+    let completedSync = syncFinished.wait(timeout: .now() + 2) == .success
+    #expect(completedSync, "Sync must complete after the writer releases its transaction")
     #expect(completedWriter, "Setting presence inside a document transaction must not deadlock")
     guard completedSync && completedWriter else { return }
-    #expect(syncResult.error() as? YError == .transactionConflict)
+    #expect(syncResult.error() == nil)
     #expect(writerResult.error() == nil)
     #expect(try (awareness.localState() as? [String: Any])?["cursor"] as? Int == 42)
 
     if operation == "start" {
-        #expect(try YSyncMessage.decodePayload(YSyncProtocol.start(awareness: awareness)).count == 2)
+        #expect(try YSyncMessage.decodePayload(syncResult.data()).count == 2)
     } else {
-        _ = try YSyncProtocol.handle(payload, awareness: awareness)
+        let responses = try YSyncMessage.decodePayload(syncResult.data())
+        #expect(responses.count == (operation == "syncStep1" ? 1 : 0))
         if operation != "syncStep1" {
             let targetText = try doc.text(named: "body")
             try doc.read { try #expect($0.string(from: targetText) == "hello") }
         }
     }
+}
+
+@Test(arguments: [false, true], [false, true])
+func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObserver: Bool) throws {
+    let source = YDoc(clientID: 1)
+    let text = try source.text(named: "body")
+    try source.write { try $0.insert("hello", into: text, at: 0) }
+    let payload = try YSyncMessage.update(source.encodeStateAsUpdateV1()).payload
+    let doc = YDoc(clientID: 2)
+    let awareness = YAwareness(document: doc)
+    let result = SyncAttemptResult()
+    let finished = DispatchSemaphore(value: 0)
+    let began = ContinuousClock.now
+    DispatchQueue.global().async {
+        defer { finished.signal() }
+        let sync = {
+            if starting { return try YSyncProtocol.start(awareness: awareness) }
+            return try YSyncProtocol.handle(payload, awareness: awareness)
+        }
+        do {
+            if inObserver {
+                let observation = try doc.observeUpdates { _ in result.record(sync) }
+                defer { observation.cancel() }
+                let targetText = try doc.text(named: "body")
+                try doc.write { try $0.insert("local", into: targetText, at: 0) }
+            } else {
+                try doc.write { _ in result.record(sync) }
+            }
+        } catch {
+            result.record { throw error }
+        }
+    }
+    let completed = finished.wait(timeout: .now() + 3) == .success
+    #expect(completed, "Re-entrant sync must time out rather than deadlock")
+    guard completed else { return }
+    #expect(result.error() as? YError == .transactionConflict)
+    #expect(began.duration(to: .now) >= .seconds(1))
+}
+
+@Test
+func syncProtocolRejectsMalformedBatchBeforeApplyingEarlierMessages() throws {
+    let source = YDoc(clientID: 1)
+    let sourceText = try source.text(named: "body")
+    try source.write { try $0.insert("hello", into: sourceText, at: 0) }
+    let sourceAwareness = YAwareness(document: source)
+    try sourceAwareness.setLocalState(["name": "peer"])
+    let messages = [
+        try YSyncMessage.update(source.encodeStateAsUpdateV1()),
+        try YSyncMessage.awareness(sourceAwareness.encodeUpdate())
+    ]
+    let doc = YDoc(clientID: 2)
+    let text = try doc.text(named: "body")
+    let awareness = YAwareness(document: doc)
+    let payload = YSyncMessage.joinedPayload(messages) + Data([0xff, 0xff])
+
+    #expect(throws: YError.decodeFailure) {
+        try YSyncProtocol.handle(payload, awareness: awareness)
+    }
+    try doc.read { try #expect($0.string(from: text).isEmpty) }
+    #expect(try awareness.states().isEmpty)
 }
 
 @Test
@@ -214,6 +279,13 @@ private final class SyncAttemptResult: @unchecked Sendable {
         lock.withLock {
             if case let .failure(error) = result { return error }
             return nil
+        }
+    }
+
+    func data() throws -> Data {
+        try lock.withLock {
+            guard let result else { throw YError.decodeFailure }
+            return try result.get()
         }
     }
 }
