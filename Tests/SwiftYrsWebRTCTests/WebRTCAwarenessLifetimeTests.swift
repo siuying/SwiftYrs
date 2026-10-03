@@ -5,7 +5,7 @@ import SwiftYrs
 @testable import SwiftYrsWebRTC
 
 @Test
-func webRTCAwarenessRenewsExpiresAndStopsWithProviderLifecycle() async throws {
+func webRTCAwarenessRenewsExpiresThroughDisconnectAndStopsAtDestroy() async throws {
     let clock = WebRTCAwarenessClock()
     let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 301)
@@ -46,18 +46,68 @@ func webRTCAwarenessRenewsExpiresAndStopsWithProviderLifecycle() async throws {
         Issue.record("Expected WebRTC awareness expiry")
     }
     await provider.disconnect()
-    let stopped = received.count()
+    try awareness.setLocalState(["name": "disconnected"])
+    try remote.setLocalState(["name": "returned"])
+    try awareness.applyUpdate(remote.encodeUpdate())
+    let disconnected = try awareness.encodeUpdate(for: [301])
     clock.set(.seconds(60))
-    #expect(try await scheduler.tick() == false)
-    #expect(received.count() == stopped)
-
-    try await provider.connect()
-    try await scheduler.park()
+    #expect(try await scheduler.tick())
+    #expect(try awareness.state(for: 302) == nil)
+    #expect(try awareness.encodeUpdate(for: [301]) != disconnected)
     await provider.destroy()
+    try awareness.setLocalState(["name": "after destroy"])
+    try remote.setLocalState(["name": "after destroy"])
+    try awareness.applyUpdate(remote.encodeUpdate())
     let destroyed = received.count()
     clock.set(.seconds(120))
     #expect(try await scheduler.tick() == false)
     #expect(received.count() == destroyed)
+}
+
+@Test(arguments: [false, true])
+func webRTCAwarenessExpiresBeforeConnectAndDestroyStopsDisconnectedTimer(connectFirst: Bool) async throws {
+    let clock = WebRTCAwarenessClock()
+    let document = YDoc(clientID: 305)
+    let awareness = YAwareness(
+        document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
+    )
+    try awareness.setLocalState(["name": "local"])
+    let remote = YAwareness(document: YDoc(clientID: 306))
+    try remote.setLocalState(["name": "remote"])
+    try awareness.applyUpdate(remote.encodeUpdate())
+    let provider = WebRTCProvider(
+        "disconnected-awareness", doc: document, signaling: [],
+        options: .init(awareness: awareness, iceServers: [])
+    )
+    if connectFirst {
+        try await provider.connect()
+        await provider.disconnect()
+    }
+    let removals = WebRTCAwarenessRemovals()
+    let observation = try awareness.observeUpdate { event in
+        if case let .awarenessUpdate(change) = event { removals.append(change) }
+    }
+    defer { observation.cancel() }
+    clock.set(.seconds(30))
+    try await e2eEventually("remote awareness expires while disconnected", timeout: .seconds(1)) {
+        removals.values.contains(YAwarenessChange(
+            added: [], updated: [], removed: [306], origin: YAwarenessChange.timeoutOrigin
+        ))
+    }
+    #expect(try awareness.encodeUpdate(for: [306]).data == Data([1, 0xb2, 2, 1, 4] + Array("null".utf8)))
+    if !connectFirst {
+        #expect(removals.values.contains { $0.updated == [305] })
+    }
+    await provider.destroy()
+    try awareness.setLocalState(["name": "after destroy"])
+    try remote.setLocalState(["name": "after destroy"])
+    try awareness.applyUpdate(remote.encodeUpdate())
+    let destroyed = try [305, 306].map { try awareness.encodeUpdate(for: [$0]) }
+    clock.set(.seconds(60))
+    try await Task.sleep(for: .milliseconds(30))
+    #expect(try [305, 306].map { try awareness.encodeUpdate(for: [$0]) } == destroyed)
+    try await provider.connect()
+    #expect(await provider.connected == false)
 }
 
 extension RealNetworkE2E {

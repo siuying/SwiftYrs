@@ -49,7 +49,7 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
     #expect(sourceSocket.sentMessageCount() == 0)
     await source.disconnect()
     let removal = try HocuspocusMessage.decode(
-        try await otherSocket.requireSentMessage(timeout: .milliseconds(500))
+        try await otherSocket.requireSentMessage()
     )
     #expect(removal == .awareness(
         documentName: "room-1", YAwarenessUpdate(Data([1, 90, 1, 4] + Array("null".utf8)))
@@ -59,7 +59,35 @@ func providersSharingAwarenessForwardInboundUpdatesWithoutEchoingToSource() asyn
 }
 
 @Test
-func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
+func providerBroadcastsRepeatedLocalNullButNotAbsentClientRemoval() async throws {
+    let document = YDoc(clientID: 99)
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        webSocketFactory: { _ in socket }
+    )
+    try await provider.connect()
+    _ = try await socket.requireSentMessage()
+    _ = try await socket.requireSentMessage()
+    for clock: UInt8 in 1...3 {
+        if clock == 3 { try awareness.setLocalStateJSON(Data("null".utf8)) }
+        else { awareness.clearLocalState() }
+        let message = try HocuspocusMessage.decode(
+            try await socket.requireSentMessage()
+        )
+        #expect(message == .awareness(
+            documentName: "room-1", YAwarenessUpdate(Data([1, 99, clock, 4] + Array("null".utf8)))
+        ))
+    }
+    awareness.removeStates(for: [99])
+    try await socket.expectNoSentMessage(for: .milliseconds(30))
+    await provider.disconnect()
+}
+
+@Test
+func providerRenewsIdleAwarenessLocallyAfterDisconnect() async throws {
     let clock = ProviderAwarenessClock()
     let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 91)
@@ -101,8 +129,10 @@ func providerRenewsIdleAwarenessAndStopsAfterDisconnect() async throws {
         Issue.record("Expected idle awareness renewal")
     }
     await provider.disconnect()
+    let disconnected = try awareness.encodeUpdate()
     clock.set(.seconds(60))
-    #expect(try await scheduler.tick() == false)
+    #expect(try await scheduler.tick())
+    #expect(try awareness.encodeUpdate() != disconnected)
     #expect(socket.sentMessageCount() == 0)
 }
 
@@ -187,7 +217,7 @@ func providerDoesNotRenewNullAwareness() async throws {
 }
 
 @Test
-func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() async throws {
+func providerRenewsAwarenessDuringUnexpectedDisconnectAndSendsCurrentClockOnReconnect() async throws {
     let clock = ProviderAwarenessClock()
     let scheduler = AwarenessChecks()
     let document = YDoc(clientID: 97)
@@ -219,27 +249,52 @@ func providerStopsAwarenessDuringUnexpectedDisconnectAndResumesOnReconnect() asy
     socket.failReceive()
     #expect(await statuses.next() == .disconnected)
     clock.set(.seconds(60))
-    #expect(try await scheduler.tick() == false)
+    #expect(try await scheduler.tick())
     #expect(socket.sentMessageCount() == 0)
-    #expect(try awareness.encodeUpdate() == initial)
+    #expect(try awareness.encodeUpdate() != initial)
+    let disconnected = try awareness.encodeUpdate()
 
     try await provider.connect()
     _ = try await nextSocket.requireSentMessage()
     _ = try await nextSocket.requireSentMessage()
-    _ = try await nextSocket.requireSentMessage()
-    #expect(try await scheduler.tick())
     let message = try HocuspocusMessage.decode(
         try await nextSocket.requireSentMessage()
     )
     if case let .awareness(_, update) = message {
-        #expect(update != initial)
+        #expect(update == disconnected)
     } else {
-        Issue.record("Expected awareness renewal after reconnect")
+        Issue.record("Expected current awareness on reconnect")
     }
+    clock.set(.seconds(75))
+    #expect(try await scheduler.tick())
+    _ = try await nextSocket.requireSentMessage()
     await provider.disconnect()
+    let stopped = try awareness.encodeUpdate()
     clock.set(.seconds(120))
-    #expect(try await scheduler.tick() == false)
+    #expect(try await scheduler.tick())
+    #expect(try awareness.encodeUpdate() != stopped)
     #expect(nextSocket.sentMessageCount() == 0)
+}
+
+@Test
+func providerRenewsAwarenessBeforeFirstConnect() async throws {
+    let clock = ProviderAwarenessClock()
+    let document = YDoc(clientID: 98)
+    let awareness = YAwareness(
+        document: document, timing: .init(checkInterval: .milliseconds(5)), now: { clock.now() }
+    )
+    try awareness.setLocalState(["name": "idle"])
+    let initial = try awareness.encodeUpdate()
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        webSocketFactory: { _ in socket }
+    )
+    clock.set(.seconds(15))
+    try await expectEventually { try awareness.encodeUpdate() != initial }
+    #expect(socket.sentMessageCount() == 0)
+    await provider.disconnect()
 }
 
 @Test
@@ -987,7 +1042,7 @@ func providerBroadcastsLocalRemovalAtIncrementedClock() async throws {
     try await provider.connect()
     for _ in 0..<3 { _ = try await socket.requireSentMessage() }
     awareness.clearLocalState(origin: "page hide")
-    let frame = try await socket.requireSentMessage(timeout: .milliseconds(500))
+    let frame = try await socket.requireSentMessage()
     #expect(try HocuspocusMessage.decode(frame) == .awareness(
         documentName: "room-1", YAwarenessUpdate(Data([1, 1, 2, 4] + Array("null".utf8)))
     ))

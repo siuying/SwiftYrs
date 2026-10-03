@@ -95,6 +95,10 @@ public final class YAwareness {
     }
 
     public func setLocalState(_ state: Any) throws {
+        if state is NSNull {
+            clearLocalState()
+            return
+        }
         let data = try JSONSerialization.data(withJSONObject: state)
         try setLocalStateJSON(data)
     }
@@ -102,6 +106,10 @@ public final class YAwareness {
     public func setLocalStateJSON(_ data: Data) throws {
         guard let json = String(data: data, encoding: .utf8) else {
             throw YError.decodeFailure
+        }
+        if json.trimmingCharacters(in: .whitespacesAndNewlines) == "null" {
+            clearLocalState()
+            return
         }
         try withAccess {
             try json.withCString { pointer in
@@ -111,11 +119,26 @@ public final class YAwareness {
     }
 
     public func clearLocalState() {
-        clearLocalState(origin: nil)
+        clearLocalState(origin: "local")
     }
 
+    /// Sets local state to null, advancing its clock even when already absent.
     public func clearLocalState(origin: String?) {
-        withAccess { removeState(for: clientID, origin: origin) }
+        do {
+            try withAccess {
+                // Yrs requires a change subscriber to emit for a missing entry.
+                let observation = try registerObservation(
+                    handle: handle, observe: yrs_bridge_awareness_observe_change, synchronizationLock: lock
+                ) { _ in }
+                defer { observation.cancel() }
+                let previousOrigin = eventOrigin
+                eventOrigin = origin
+                defer { eventOrigin = previousOrigin }
+                yrs_bridge_awareness_remove_state(handle, clientID)
+            }
+        } catch {
+            preconditionFailure("YrsBridge failed to clear local awareness: \(error)")
+        }
     }
 
     /// Removes an active state, retaining remote clocks like Yjs.
@@ -278,7 +301,7 @@ public final class YAwareness {
         try observe(yrs_bridge_awareness_observe_change, callback)
     }
 
-    /// Connection providers schedule checks while connected and stop on teardown.
+    /// Connection providers schedule checks throughout their lifetime.
     public func checkTimeouts() throws {
         try withAccess { try maintainLifetime() }
     }

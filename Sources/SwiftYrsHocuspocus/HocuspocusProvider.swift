@@ -156,6 +156,7 @@ public actor HocuspocusProvider {
         let statelessPair = AsyncStream.makeStream(of: String.self)
         self.stateless = statelessPair.stream
         self.statelessContinuation = statelessPair.continuation
+        Task { [weak self] in await self?.startAwarenessMaintenance() }
     }
 
     public func connect() async throws {
@@ -166,7 +167,6 @@ public actor HocuspocusProvider {
 
     public func disconnect() {
         disconnectRequested = true
-        stopAwarenessMaintenance()
         receiveTask?.cancel()
         receiveTask = nil
         documentObservation?.cancel()
@@ -246,7 +246,6 @@ public actor HocuspocusProvider {
     }
 
     private func reconnectAfterUnexpectedDisconnect() async {
-        stopAwarenessMaintenance()
         guard !disconnectRequested else {
             return
         }
@@ -311,8 +310,7 @@ public actor HocuspocusProvider {
     }
 
     private func startAwarenessMaintenance() {
-        stopAwarenessMaintenance()
-        guard let awareness else { return }
+        guard awarenessTask == nil, let awareness else { return }
         let id = UUID()
         awarenessTaskID = id
         let interval = awareness.timing.checkInterval
@@ -331,14 +329,8 @@ public actor HocuspocusProvider {
         }
     }
 
-    private func stopAwarenessMaintenance() {
-        awarenessTaskID = nil
-        awarenessTask?.cancel()
-        awarenessTask = nil
-    }
-
     private func checkAwarenessTimeouts(id: UUID) -> Bool {
-        guard awarenessTaskID == id, webSocket != nil, !Task.isCancelled else { return false }
+        guard awarenessTaskID == id, !Task.isCancelled else { return false }
         do {
             try awareness?.checkTimeouts()
         } catch {

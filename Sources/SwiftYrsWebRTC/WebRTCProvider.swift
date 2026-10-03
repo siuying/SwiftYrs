@@ -126,6 +126,7 @@ public actor WebRTCProvider {
     private var awarenessTaskID: UUID?
     private let testHooks: TestHooks
     private var started = false
+    private var destroyed = false
     private var connectionStatus: WebRTCConnectionStatus = .disconnected
     private var lastSynced = false
 
@@ -179,12 +180,13 @@ public actor WebRTCProvider {
         let peersPair = AsyncStream.makeStream(of: PeersEvent.self)
         peers = peersPair.stream
         peersContinuation = peersPair.continuation
+        Task { [weak self] in await self?.startAwarenessMaintenance() }
     }
 
     // MARK: - Lifecycle
 
     public func connect() async throws {
-        guard !started else { return }
+        guard !started, !destroyed else { return }
         started = true
         emitStatus(.connecting)
         try startObserving()
@@ -225,7 +227,8 @@ public actor WebRTCProvider {
     /// Terminal teardown: clears local awareness, awaits signaling stop before
     /// closing peers, then finishes the event streams so iterators end.
     public func destroy() async {
-        guard started else { return }
+        guard !destroyed else { return }
+        destroyed = true
         stopAwarenessMaintenance()
         if let payload = localAwarenessRemoval() {
             await broadcastAndFlush(payload)
@@ -247,7 +250,6 @@ public actor WebRTCProvider {
     /// observations are torn down afterwards in `finishTearDown`.
     private func beginTearDown() {
         started = false
-        stopAwarenessMaintenance()
         reannounceTask?.cancel()
         reannounceTask = nil
     }
@@ -553,6 +555,7 @@ public actor WebRTCProvider {
     }
 
     private func startAwarenessMaintenance() {
+        guard awarenessTask == nil, !destroyed else { return }
         let id = UUID()
         awarenessTaskID = id
         let interval = awareness.timing.checkInterval
@@ -572,7 +575,7 @@ public actor WebRTCProvider {
     }
 
     private func checkAwarenessTimeouts(id: UUID) -> Bool {
-        guard started, awarenessTaskID == id, !Task.isCancelled else { return false }
+        guard !destroyed, awarenessTaskID == id, !Task.isCancelled else { return false }
         do {
             try awareness.checkTimeouts()
         } catch {
@@ -596,7 +599,7 @@ public actor WebRTCProvider {
         awarenessObservation = nil
         guard (try? awareness.localState()) != nil else { return nil }
         let clientID = awareness.clientID
-        awareness.clearLocalState(origin: "disconnect")
+        awareness.removeState(for: clientID, origin: "disconnect")
         guard let update = try? awareness.encodeUpdate(for: [clientID]) else { return nil }
         return try? YSyncMessage.awareness(update).payload
     }

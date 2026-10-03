@@ -482,7 +482,7 @@ func awarenessRemovalOfUnknownOrAlreadyRemovedClientDoesNothing() throws {
     defer { update.cancel(); change.cancel() }
 
     awareness.removeState(for: 99)
-    awareness.clearLocalState()
+    awareness.removeStates(for: [1])
     #expect(events.isEmpty)
     #expect(throws: YError.self) { try awareness.encodeUpdate(for: [99]) }
     #expect(throws: YError.self) { try awareness.encodeUpdate(for: [1]) }
@@ -492,9 +492,53 @@ func awarenessRemovalOfUnknownOrAlreadyRemovedClientDoesNothing() throws {
     let removed = try awareness.encodeUpdate(for: [1])
     events.removeAll()
     awareness.removeState(for: 1)
-    awareness.clearLocalState()
+    awareness.removeStates(for: [1])
     #expect(events.isEmpty)
     #expect(try awareness.encodeUpdate(for: [1]) == removed)
+}
+
+@Test(arguments: [false, true])
+func awarenessSettingLocalNullAlwaysAdvancesClockAndEmits(initiallyPresent: Bool) throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    if initiallyPresent { try awareness.setLocalState(["name": "local"]) }
+    var events: [YEvent] = []
+    let update = try awareness.observeUpdate { events.append($0) }
+    let change = try awareness.observeChange { events.append($0) }
+    defer { update.cancel(); change.cancel() }
+
+    for index in 0..<4 {
+        events.removeAll()
+        switch index {
+        case 1: try awareness.setLocalStateJSON(Data(" \nnull\t".utf8))
+        case 2: try awareness.setLocalState(NSNull())
+        default: awareness.clearLocalState()
+        }
+        let clock = UInt8(index + (initiallyPresent ? 2 : 1))
+        #expect(try awareness.encodeUpdate(for: [1]).data == Data([1, 1, clock, 4] + Array("null".utf8)))
+        #expect(try awareness.localState() == nil)
+        #expect(try awareness.states().isEmpty)
+        #expect(events.compactMap(tag) == [.change, .update])
+        #expect(events.compactMap(awarenessChange) == Array(repeating:
+            YAwarenessChange(added: [], updated: [], removed: [1], origin: "local"), count: 2
+        ))
+
+        events.removeAll()
+        awareness.removeStates(for: [1], origin: "removal")
+        #expect(events.isEmpty)
+        #expect(try awareness.encodeUpdate(for: [1]).data == Data([1, 1, clock, 4] + Array("null".utf8)))
+    }
+}
+
+@Test
+func awarenessClearingUninitializedLocalStateEmitsWithOnlyUpdateObserver() throws {
+    let awareness = YAwareness(document: YDoc(clientID: 1))
+    var events: [YEvent] = []
+    let observation = try awareness.observeUpdate { events.append($0) }
+    defer { observation.cancel() }
+    awareness.clearLocalState()
+    #expect(events.compactMap(awarenessChange) == [
+        YAwarenessChange(added: [], updated: [], removed: [1], origin: "local")
+    ])
 }
 
 @Test
