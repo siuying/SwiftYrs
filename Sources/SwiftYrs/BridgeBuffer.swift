@@ -29,7 +29,7 @@ func readingBuffer(_ fill: (inout YrsBridgeBuffer) -> Int32) throws -> Data {
 /// document, and documents themselves (a subdocument handle, ADR-0024). `fill`
 /// does nothing but invoke the shim call with the supplied out-parameter.
 func makeOwnedHandle<T>(
-    _ make: (OpaquePointer) -> T,
+    _ make: (OpaquePointer) throws -> T,
     _ fill: (inout OpaquePointer?) -> Int32
 ) throws -> T {
     var output: OpaquePointer?
@@ -37,7 +37,7 @@ func makeOwnedHandle<T>(
     guard let output else {
         throw YError.nullPointer
     }
-    return make(output)
+    return try make(output)
 }
 
 /// Runs a shim call that fills a scalar out-parameter (e.g. a length or a

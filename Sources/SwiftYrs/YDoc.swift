@@ -10,6 +10,9 @@ public enum YError: Error, Equatable {
     case typeMismatch
     case invalidGUID
     case duplicateSubdocGUID
+    /// State-from-snapshot encoding is available only when document garbage
+    /// collection is disabled.
+    case garbageCollectionEnabled
     case unknown(code: Int32)
 }
 
@@ -18,6 +21,33 @@ public struct YStateVector: Equatable, Sendable {
 
     public init(_ data: Data) {
         self.data = data
+    }
+}
+
+/// A Yjs-compatible snapshot. Use `decode(_:)` to validate external bytes; use
+/// `YReadTransaction.snapshot()` to capture a document snapshot.
+public struct YSnapshot: Equatable, Sendable {
+    /// The canonical V1 snapshot bytes.
+    public let data: Data
+
+    /// Wraps snapshot bytes without validation.
+    public init(_ data: Data) {
+        self.data = data
+    }
+
+    /// Returns the canonical V1 snapshot bytes.
+    public func encode() -> Data {
+        data
+    }
+
+    /// Decodes and validates V1 snapshot bytes.
+    public static func decode(_ data: Data) throws -> YSnapshot {
+        let encoded = try withUInt8Pointer(data) { pointer, length in
+            try readingBuffer {
+                yrs_bridge_snapshot_decode(pointer, length, &$0)
+            }
+        }
+        return YSnapshot(encoded)
     }
 }
 
@@ -64,6 +94,8 @@ func throwIfNeeded(_ code: Int32) throws {
         throw YError.invalidGUID
     case 8:
         throw YError.duplicateSubdocGUID
+    case 9:
+        throw YError.garbageCollectionEnabled
     default:
         throw YError.unknown(code: code)
     }
@@ -85,21 +117,47 @@ func data(from buffer: YrsBridgeBuffer) -> Data {
 extension YDoc: @unchecked Sendable {}
 
 public final class YDoc: Equatable {
+    /// Options that control how a document stores deleted content.
+    public struct Options: Equatable, Sendable {
+        /// Keeps deleted structs so state can be encoded from an earlier
+        /// snapshot. This must be `true` for state-from-snapshot encoding.
+        public var skipGC: Bool
+
+        /// Creates document options. Garbage collection is enabled by default.
+        public init(skipGC: Bool = false) {
+            self.skipGC = skipGC
+        }
+    }
+
     let handle: OpaquePointer
+    /// The options used when this document was created.
+    public let options: Options
 
     public static func == (lhs: YDoc, rhs: YDoc) -> Bool {
         lhs === rhs
     }
 
     public init() {
+        self.options = Options()
         guard let handle = yrs_bridge_doc_new() else {
             preconditionFailure("YrsBridge failed to create a document")
         }
         self.handle = handle
     }
 
-    public init(clientID: UInt64) {
-        guard let handle = yrs_bridge_doc_new_with_client_id(clientID) else {
+    /// Creates a document with the supplied options.
+    public init(options: Options) {
+        self.options = options
+        guard let handle = yrs_bridge_doc_new_with_options(options.skipGC) else {
+            preconditionFailure("YrsBridge failed to create a document")
+        }
+        self.handle = handle
+    }
+
+    /// Creates a document with a fixed client ID and the supplied options.
+    public init(clientID: UInt64, options: Options = Options()) {
+        self.options = options
+        guard let handle = yrs_bridge_doc_new_with_client_id_and_options(clientID, options.skipGC) else {
             preconditionFailure("YrsBridge failed to create a document")
         }
         self.handle = handle
@@ -110,8 +168,17 @@ public final class YDoc: Equatable {
     /// reference to the document's store and `deinit` drops that reference; the
     /// store lives while any reference remains, so a handle's lifetime is
     /// independent of the parent document's.
-    init(handle: OpaquePointer) {
-        self.handle = handle
+    init(handle: OpaquePointer) throws {
+        do {
+            let skipGC = try readingScalar(false) {
+                yrs_bridge_doc_skip_gc(handle, &$0)
+            }
+            self.handle = handle
+            self.options = Options(skipGC: skipGC)
+        } catch {
+            yrs_bridge_doc_destroy(handle)
+            throw error
+        }
     }
 
     public var clientID: UInt64 {
@@ -194,6 +261,36 @@ public final class YDoc: Equatable {
         }
     }
 
+    /// Encodes the state from `snapshot` as a V1 update. The document must have
+    /// been created with `Options(skipGC: true)`.
+    public func encodeStateFromSnapshotV1(_ snapshot: YSnapshot) throws -> YUpdate {
+        try read { transaction in
+            try transaction.encodeStateFromSnapshotV1(snapshot)
+        }
+    }
+
+    /// Encodes the state from `snapshot` as a V2 update. The document must have
+    /// been created with `Options(skipGC: true)`.
+    public func encodeStateFromSnapshotV2(_ snapshot: YSnapshot) throws -> YUpdate {
+        try read { transaction in
+            try transaction.encodeStateFromSnapshotV2(snapshot)
+        }
+    }
+
+    /// Encodes the state from `snapshot` using the selected update encoding.
+    /// The document must have been created with `Options(skipGC: true)`.
+    public func encodeStateFromSnapshot(
+        _ snapshot: YSnapshot,
+        encoding: YUpdate.Encoding = .v1
+    ) throws -> YUpdate {
+        switch encoding {
+        case .v1:
+            try encodeStateFromSnapshotV1(snapshot)
+        case .v2:
+            try encodeStateFromSnapshotV2(snapshot)
+        }
+    }
+
     public func encodeClientStateAsUpdateV1(clientID: UInt64, fromClock: UInt32) throws -> YUpdate {
         try read { transaction in
             try transaction.encodeClientStateAsUpdateV1(clientID: clientID, fromClock: fromClock)
@@ -266,6 +363,13 @@ public class YReadTransaction {
         try YStateVector(readingBuffer { yrs_bridge_transaction_state_vector_v1(handle, &$0) })
     }
 
+    /// Captures the document state at this transaction. The returned snapshot
+    /// can be used to encode historical state when the document has garbage
+    /// collection disabled.
+    public func snapshot() throws -> YSnapshot {
+        try YSnapshot(readingBuffer { yrs_bridge_transaction_snapshot(handle, &$0) })
+    }
+
     public func clientClock(clientID: UInt64) throws -> UInt32 {
         try readingScalar(UInt32(0)) {
             yrs_bridge_transaction_client_clock(handle, clientID, &$0)
@@ -282,6 +386,38 @@ public class YReadTransaction {
     public func encodeStateAsUpdateV2(from stateVector: YStateVector? = nil) throws -> YUpdate {
         let updateData = try withOptionalBytes(stateVector?.data) { pointer, count in
             try readingBuffer { yrs_bridge_transaction_state_diff_v2(handle, pointer, UInt(count), &$0) }
+        }
+        return .v2(updateData)
+    }
+
+    /// Encodes the state from `snapshot` as a V1 update. The document must have
+    /// been created with `Options(skipGC: true)`.
+    public func encodeStateFromSnapshotV1(_ snapshot: YSnapshot) throws -> YUpdate {
+        let updateData = try withUInt8Pointer(snapshot.data) { pointer, length in
+            try readingBuffer {
+                yrs_bridge_transaction_encode_state_from_snapshot_v1(
+                    handle,
+                    pointer,
+                    length,
+                    &$0
+                )
+            }
+        }
+        return .v1(updateData)
+    }
+
+    /// Encodes the state from `snapshot` as a V2 update. The document must have
+    /// been created with `Options(skipGC: true)`.
+    public func encodeStateFromSnapshotV2(_ snapshot: YSnapshot) throws -> YUpdate {
+        let updateData = try withUInt8Pointer(snapshot.data) { pointer, length in
+            try readingBuffer {
+                yrs_bridge_transaction_encode_state_from_snapshot_v2(
+                    handle,
+                    pointer,
+                    length,
+                    &$0
+                )
+            }
         }
         return .v2(updateData)
     }
