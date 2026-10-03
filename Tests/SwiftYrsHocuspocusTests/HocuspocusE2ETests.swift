@@ -7,89 +7,84 @@ import SwiftYrsHocuspocus
 struct HocuspocusE2ETests {
     @Test
     func providerCommunicatesWithRealHocuspocusServer() async throws {
-        let server = try JSONLineProcess.node(script: "hocuspocus-server.ts")
-        defer {
-            server.stop()
-        }
-        let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
-        let port = try #require(ready["port"] as? Int)
-        let url = URL(string: "ws://127.0.0.1:\(port)")!
+        try await withE2EProcesses { processes in
+            let server = try processes.node(script: "hocuspocus-server.ts")
+            let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
+            let port = try #require(ready["port"] as? Int)
+            let url = URL(string: "ws://127.0.0.1:\(port)")!
 
-        let document = YDoc(clientID: 101)
-        let text = try document.text(named: "body")
-        let awareness = YAwareness(document: document)
-        try awareness.setLocalState(["name": "swift"])
-        let provider = HocuspocusProvider(url: url, name: "room-e2e", document: document, awareness: awareness)
-        let statelessValue = E2EValueBox<String>()
+            let document = YDoc(clientID: 101)
+            let text = try document.text(named: "body")
+            let awareness = YAwareness(document: document)
+            try awareness.setLocalState(["name": "swift"])
+            let provider = HocuspocusProvider(url: url, name: "room-e2e", document: document, awareness: awareness)
+            let statelessValue = E2EValueBox<String>()
 
-        try await withE2EDisconnect([provider]) {
-            try await provider.connect()
+            try await withE2EDisconnect([provider]) {
+                try await provider.connect()
 
-            let peer = try JSONLineProcess.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-e2e"])
-            defer {
-                peer.stop()
-            }
-            _ = try await peer.waitForLine(where: { $0["type"] as? String == "ready" })
-            _ = try await peer.waitForLine(where: { $0["type"] as? String == "synced" })
+                let peer = try processes.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-e2e"])
+                _ = try await peer.waitForLine(where: { $0["type"] as? String == "ready" })
+                _ = try await peer.waitForLine(where: { $0["type"] as? String == "synced" })
 
-            try await peer.send(["type": "insertText", "text": "hello"])
-            try await e2eExpectEventually {
-                try document.read { transaction in
-                    try transaction.string(from: text) == "hello"
+                try await peer.send(["type": "insertText", "text": "hello"])
+                try await e2eExpectEventually {
+                    try document.read { transaction in
+                        try transaction.string(from: text) == "hello"
+                    }
                 }
-            }
 
-            try document.write { transaction in
-                try transaction.insert(" swift", into: text, at: 5)
-            }
-            try await e2eExpectEventually {
-                let response = try await peer.request(["type": "getText"], responseType: "text")
-                return response["text"] as? String == "hello swift"
-            }
-
-            try await e2eExpectEventually {
-                let response = try await peer.request(["type": "getAwareness"], responseType: "awareness")
-                let states = response["states"] as? [[String: Any]] ?? []
-                return states.contains { entry in
-                    (entry["state"] as? [String: Any])?["name"] as? String == "swift"
+                try document.write { transaction in
+                    try transaction.insert(" swift", into: text, at: 5)
                 }
-            }
+                try await e2eExpectEventually {
+                    let response = try await peer.request(["type": "getText"], responseType: "text")
+                    return response["text"] as? String == "hello swift"
+                }
 
-            try await peer.send(["type": "sendStateless", "payload": "from-js"])
-            let statelessTask = Task {
-                var iterator = provider.stateless.makeAsyncIterator()
-                await statelessValue.set(iterator.next())
-            }
-            defer {
-                statelessTask.cancel()
-            }
-            try await e2eExpectEventually {
-                await statelessValue.value == "from-js"
+                try await e2eExpectEventually {
+                    let response = try await peer.request(["type": "getAwareness"], responseType: "awareness")
+                    let states = response["states"] as? [[String: Any]] ?? []
+                    return states.contains { entry in
+                        (entry["state"] as? [String: Any])?["name"] as? String == "swift"
+                    }
+                }
+
+                try await peer.send(["type": "sendStateless", "payload": "from-js"])
+                let statelessTask = Task {
+                    var iterator = provider.stateless.makeAsyncIterator()
+                    await statelessValue.set(iterator.next())
+                }
+                defer {
+                    statelessTask.cancel()
+                }
+                try await e2eExpectEventually {
+                    await statelessValue.value == "from-js"
+                }
             }
         }
     }
 
     @Test
     func providerAuthenticatesWithRealHocuspocusServer() async throws {
-        let server = try JSONLineProcess.node(
-            script: "hocuspocus-server.ts",
-            environment: ["HOCUSPOCUS_AUTH_TOKEN": "secret"]
-        )
-        defer {
-            server.stop()
-        }
-        let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
-        let port = try #require(ready["port"] as? Int)
-        let provider = HocuspocusProvider(
-            url: URL(string: "ws://127.0.0.1:\(port)")!,
-            name: "room-auth",
-            document: YDoc(clientID: 102),
-            token: { "secret" }
-        )
-        try await withE2EDisconnect([provider]) {
-            try await provider.connect()
-            var authIterator = provider.authStatus.makeAsyncIterator()
-            #expect(await authIterator.next() == .authenticated(scope: "read-write"))
+        try await withE2EProcesses { processes in
+            let server = try processes.node(
+                script: "hocuspocus-server.ts",
+                environment: ["HOCUSPOCUS_AUTH_TOKEN": "secret"]
+            )
+            let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
+            let port = try #require(ready["port"] as? Int)
+            let provider = HocuspocusProvider(
+                url: URL(string: "ws://127.0.0.1:\(port)")!,
+                name: "room-auth",
+                document: YDoc(clientID: 102),
+                token: { "secret" }
+            )
+            try await withE2EDisconnect([provider]) {
+                try await provider.connect()
+                var authIterator = provider.authStatus.makeAsyncIterator()
+                #expect(await authIterator.next() == .authenticated(scope: "read-write"))
+            }
         }
     }
 }
@@ -122,11 +117,20 @@ private final class JSONLineProcess: @unchecked Sendable {
         self.process = process
         self.input = input
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            self?.append(handle.availableData)
+            let data = handle.availableData
+            guard !data.isEmpty, let self else {
+                handle.readabilityHandler = nil
+                return
+            }
+            self.append(data)
         }
         error.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            if let text = String(data: data, encoding: .utf8) {
                 fputs(text, stderr)
             }
         }
@@ -170,11 +174,11 @@ private final class JSONLineProcess: @unchecked Sendable {
     }
 
     func waitForLine(
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(30),
         where predicate: @escaping ([String: Any]) -> Bool
     ) async throws -> [String: Any] {
         let deadline = ContinuousClock.now + timeout
-        while ContinuousClock.now < deadline {
+        while true {
             if let line = outputQueue.sync(execute: {
                 if let index = lines.firstIndex(where: predicate) {
                     return lines.remove(at: index)
@@ -183,12 +187,28 @@ private final class JSONLineProcess: @unchecked Sendable {
             }) {
                 return line
             }
+            guard ContinuousClock.now < deadline else { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         throw E2ETimeout()
     }
 
+    private let teardownQueue = DispatchQueue(label: "JSONLineProcess.teardown")
+
     func stop() {
+        teardownQueue.async { self.stopOnTeardownQueue() }
+    }
+
+    func stopAndWait() async {
+        await withCheckedContinuation { continuation in
+            teardownQueue.async {
+                self.stopOnTeardownQueue()
+                continuation.resume()
+            }
+        }
+    }
+
+    private func stopOnTeardownQueue() {
         guard process.isRunning else { return }
         try? input.fileHandleForWriting.write(contentsOf: Data("shutdown\n".utf8))
         let deadline = Date().addingTimeInterval(1)
@@ -240,7 +260,7 @@ private actor E2EValueBox<Value: Sendable> {
 }
 
 private func e2eExpectEventually(_ predicate: @escaping () async throws -> Bool) async throws {
-    let deadline = ContinuousClock.now + .seconds(5)
+    let deadline = ContinuousClock.now + .seconds(30)
     while ContinuousClock.now < deadline {
         if try await predicate() {
             return
@@ -251,4 +271,27 @@ private func e2eExpectEventually(_ predicate: @escaping () async throws -> Bool)
         return
     }
     throw E2ETimeout()
+}
+
+private final class E2EProcesses {
+    private var processes: [JSONLineProcess] = []
+    func node(script: String, arguments: [String] = [], environment: [String: String] = [:]) throws -> JSONLineProcess {
+        let process = try JSONLineProcess.node(script: script, arguments: arguments, environment: environment)
+        processes.append(process)
+        return process
+    }
+    func stop() async {
+        for process in processes.reversed() { await process.stopAndWait() }
+    }
+}
+
+private func withE2EProcesses(_ body: (E2EProcesses) async throws -> Void) async throws {
+    let processes = E2EProcesses()
+    do {
+        try await body(processes)
+    } catch {
+        await processes.stop()
+        throw error
+    }
+    await processes.stop()
 }

@@ -249,6 +249,10 @@ try undoManager.redo()  // restores "Hello"
 
 ### Awareness (presence / cursors)
 
+Awareness starts with a null local state. Set a non-null state before connecting to Hocuspocus, even `[:]`, to keep an idle connection alive through awareness renewals. Null or disabled awareness sends no renewals, so an idle Hocuspocus server may close the connection with code 4408. The default remains null; use `clearLocalState()` to return to it.
+
+`observeUpdate` and `observeChange` deliver callbacks serially outside the awareness lock. Nested events are delivered breadth-first; JavaScript delivers them depth-first. State updates happen immediately, but delivery may be delayed or run on another thread, so callbacks should read current state. A callback must not wait for a thread that is waiting for its own awareness events.
+
 ```swift
 let doc = YDoc()
 let awareness = YAwareness(document: doc)
@@ -264,13 +268,19 @@ let remoteAwareness = YAwareness(document: doc)
 try remoteAwareness.applyUpdate(update)
 
 // Observe state changes
-let observation = try awareness.observe { event in
-    let states = try? awareness.clientStates()
+let observation = try awareness.observeChange { event in
+    let states = try? awareness.states()
     print("online clients:", states?.count ?? 0)
 }
 ```
 
 ### Sync protocol (y-protocols)
+
+`YSyncProtocol.start(awareness:)` and `handle(_:awareness:)` synchronously wait for document contention with a 5 ms retry delay and a one-second deadline per document operation. Only `YError.transactionConflict` is retried; other errors propagate immediately. Calls made inside a transaction or its commit observer can prevent that transaction from finishing, so they throw `transactionConflict` at the deadline instead of hanging. Awareness access stays synchronized independently; retries never hold the awareness lock.
+
+Custom providers can use `handle(_:awareness:origin:)` to tag inbound awareness events with a provider-specific origin and suppress their echoes. For example, `try YSyncProtocol.handle(receivedData, awareness: awareness, origin: providerOrigin)` returns the response payload. The origin applies to awareness events, not document updates.
+
+`handle` decodes the entire batched payload before applying messages. A malformed later protocol message rejects the batch without applying earlier messages, whereas the native handler applied the valid prefix first. Errors during application do not roll back earlier messages.
 
 ```swift
 // Initiating sync (client → server)

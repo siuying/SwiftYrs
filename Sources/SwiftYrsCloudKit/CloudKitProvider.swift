@@ -45,6 +45,15 @@ public struct CloudKitProviderOptions: Sendable {
 /// persistence/recovery (#66), compaction/GC (#67), and account handling (#68)
 /// layer onto the hooks here.
 public actor CloudKitProvider {
+    struct TestHooks: Sendable {
+        static let none = TestHooks()
+        let onTransactionConflict: (@Sendable () async -> Void)?
+
+        init(onTransactionConflict: (@Sendable () async -> Void)? = nil) {
+            self.onTransactionConflict = onTransactionConflict
+        }
+    }
+
     public let documentName: String
     public let doc: YDoc
     public nonisolated let synced: AsyncStream<Bool>
@@ -54,6 +63,7 @@ public actor CloudKitProvider {
 
     private let store: CloudKitSyncStore
     private let options: CloudKitProviderOptions
+    private let testHooks: TestHooks
     private let capture = ClientDiffCapture()
     private let recoveryPlanner = RecoveryPlanner()
     private nonisolated let syncedContinuation: AsyncStream<Bool>.Continuation
@@ -87,6 +97,17 @@ public actor CloudKitProvider {
         store: CloudKitSyncStore,
         options: CloudKitProviderOptions = .default
     ) throws {
+        try self.init(documentName: documentName, doc: doc, store: store, options: options, testHooks: .none)
+    }
+
+    init(
+        documentName: String,
+        doc: YDoc,
+        store: CloudKitSyncStore,
+        options: CloudKitProviderOptions = .default,
+        testHooks: TestHooks
+    ) throws {
+        self.testHooks = testHooks
         self.documentName = documentName
         self.document = try store.codec.documentKey(documentName)
         self.doc = doc
@@ -185,6 +206,12 @@ public actor CloudKitProvider {
             guard !Task.isCancelled else { return }
             await self?.debouncedFlush()
         }
+    }
+
+    // Exercises ingress even when native unsubscribe has already removed its callback.
+    func scheduleFlushForTesting() -> Bool {
+        scheduleFlush()
+        return debounceTask != nil
     }
 
     private func debouncedFlush() async {
@@ -327,6 +354,7 @@ public actor CloudKitProvider {
                 ) else { return nil }
                 return (update, current)
             } catch YError.transactionConflict {
+                await testHooks.onTransactionConflict?()
                 attempts += 1
                 guard attempts < options.maxTransactionRetries else {
                     throw CloudKitProviderError.transactionConflict
@@ -431,6 +459,7 @@ public actor CloudKitProvider {
                 try doc.apply(update)
                 return
             } catch YError.transactionConflict {
+                await testHooks.onTransactionConflict?()
                 attempts += 1
                 guard attempts < options.maxTransactionRetries else {
                     throw CloudKitProviderError.transactionConflict

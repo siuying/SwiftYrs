@@ -49,6 +49,10 @@ public enum YSyncMessage: Equatable {
     }
 
     public static func decodePayload(_ payload: Data) throws -> [YSyncMessage] {
+        try decodePayload(payload, includePayload: true)
+    }
+
+    static func decodePayload(_ payload: Data, includePayload: Bool) throws -> [YSyncMessage] {
         let data = try withUInt8Pointer(payload) { pointer, length in
             return try readingBuffer {
                 yrs_bridge_sync_decode_messages(
@@ -58,9 +62,8 @@ public enum YSyncMessage: Equatable {
                 )
             }
         }
-        let object = try JSONSerialization.jsonObject(with: data)
-        let entries = object as? [[String: Any]] ?? []
-        return try entries.map { try message(from: $0) }
+        let entries = try JSONDecoder().decode([DecodedMessage].self, from: data)
+        return try entries.map { try message(from: $0, includePayload: includePayload) }
     }
 
     public static func joinedPayload(_ messages: [YSyncMessage]) -> Data {
@@ -84,65 +87,126 @@ public enum YSyncMessage: Equatable {
         }
     }
 
-    private static func message(from entry: [String: Any]) throws -> YSyncMessage {
-        let kind = entry["kind"] as? String
-        switch kind {
+    private struct DecodedMessage: Decodable {
+        let kind: String
+        let stateVector: [UInt8]?
+        let update: [UInt8]?
+        let reason: String?
+        let tag: UInt8?
+        let data: [UInt8]?
+    }
+
+    private static func message(from entry: DecodedMessage, includePayload: Bool) throws -> YSyncMessage {
+        switch entry.kind {
         case "syncStep1":
-            let stateVector = YStateVector(try byteData(entry["stateVector"]))
-            return .syncStep1(stateVector, payload: try syncStep1(stateVector).payload)
+            let stateVector = YStateVector(try byteData(entry.stateVector))
+            return .syncStep1(stateVector, payload: includePayload ? try syncStep1(stateVector).payload : Data())
         case "syncStep2":
-            let update = YUpdate.v1(try byteData(entry["update"]))
-            return .syncStep2(update, payload: try syncStep2(update).payload)
+            let update = YUpdate.v1(try byteData(entry.update))
+            return .syncStep2(update, payload: includePayload ? try syncStep2(update).payload : Data())
         case "update":
-            let update = YUpdate.v1(try byteData(entry["update"]))
-            return .update(update, payload: try YSyncMessage.update(update).payload)
+            let update = YUpdate.v1(try byteData(entry.update))
+            return .update(update, payload: includePayload ? try YSyncMessage.update(update).payload : Data())
         case "awareness":
-            let update = YAwarenessUpdate(try byteData(entry["update"]))
-            return .awareness(update, payload: try awareness(update).payload)
+            let update = YAwarenessUpdate(try byteData(entry.update))
+            return .awareness(update, payload: includePayload ? try awareness(update).payload : Data())
         case "awarenessQuery":
-            return try awarenessQuery()
+            return includePayload ? try awarenessQuery() : .awarenessQuery(payload: Data())
         case "auth":
-            return .auth(reason: entry["reason"] as? String, payload: Data())
+            return .auth(reason: entry.reason, payload: Data())
         case "custom":
-            let tag = (entry["tag"] as? NSNumber)?.uint8Value ?? 0
-            let data = try byteData(entry["data"])
-            return .custom(tag: tag, data: data, payload: Data())
+            let data = try byteData(entry.data)
+            return .custom(tag: entry.tag ?? 0, data: data, payload: Data())
         default:
             throw YError.decodeFailure
         }
     }
 
-    private static func byteData(_ value: Any?) throws -> Data {
-        guard let values = value as? [Any] else {
+    private static func byteData(_ value: [UInt8]?) throws -> Data {
+        guard let value else {
             throw YError.decodeFailure
         }
-        let bytes = try values.map { value -> UInt8 in
-            if let byte = value as? UInt8 {
-                return byte
-            }
-            if let byte = (value as? NSNumber)?.uint8Value {
-                return byte
-            }
-            throw YError.decodeFailure
-        }
-        return Data(bytes)
+        return Data(value)
     }
 }
 
 public enum YSyncProtocol {
-    public static func start(awareness: YAwareness) throws -> Data {
-        try readingBuffer { yrs_bridge_sync_start(awareness.handle, &$0) }
+    private static let transactionRetryDelay: Duration = .milliseconds(5)
+    private static let transactionRetryTimeout: Duration = .seconds(1)
+
+    struct RetryPolicy {
+        var now: () -> Duration
+        var wait: (Duration) -> Void = { delay in
+            let components = delay.components
+            Thread.sleep(forTimeInterval: Double(components.seconds) + Double(components.attoseconds) / 1e18)
+        }
+        var onConflict: () -> Void = {}
+
+        static func live() -> RetryPolicy {
+            let start = ContinuousClock.now
+            return RetryPolicy(now: { start.duration(to: .now) })
+        }
     }
 
+    /// Waits up to one second for document contention, then throws `YError.transactionConflict`.
+    public static func start(awareness: YAwareness) throws -> Data {
+        try start(awareness: awareness, retry: .live())
+    }
+
+    static func start(awareness: YAwareness, retry: RetryPolicy) throws -> Data {
+        let stateVector = try retryDocumentOperation(retry: retry) { try awareness.document.stateVector() }
+        let step1 = try YSyncMessage.syncStep1(stateVector)
+        let presence = try YSyncMessage.awareness(awareness.encodeUpdate())
+        return YSyncMessage.joinedPayload([step1, presence])
+    }
+
+    /// Waits up to one second per document operation, then throws `YError.transactionConflict`.
     public static func handle(_ payload: Data, awareness: YAwareness) throws -> Data {
-        try withUInt8Pointer(payload) { pointer, length in
-            return try readingBuffer {
-                yrs_bridge_sync_handle(
-                    awareness.handle,
-                    pointer,
-                    length,
-                    &$0
-                )
+        try handle(payload, awareness: awareness, origin: nil)
+    }
+
+    /// Tags inbound awareness events with `origin` so providers can suppress echoes.
+    /// Waits up to one second per document operation, then throws `YError.transactionConflict`.
+    public static func handle(_ payload: Data, awareness: YAwareness, origin: String?) throws -> Data {
+        try handle(payload, awareness: awareness, origin: origin, retry: .live())
+    }
+
+    static func handle(_ payload: Data, awareness: YAwareness, origin: String? = nil, retry: RetryPolicy) throws -> Data {
+        let messages = try YSyncMessage.decodePayload(payload, includePayload: false)
+        var responses: [YSyncMessage] = []
+        for message in messages {
+            switch message {
+            case let .syncStep1(stateVector, _):
+                let update = try retryDocumentOperation(retry: retry) {
+                    try awareness.document.encodeStateAsUpdateV1(from: stateVector)
+                }
+                responses.append(try .syncStep2(update))
+            case let .syncStep2(update, _), let .update(update, _):
+                try retryDocumentOperation(retry: retry) { try awareness.document.apply(update) }
+            case let .awareness(update, _):
+                try awareness.applyUpdate(update, origin: origin)
+            case .awarenessQuery:
+                responses.append(try .awareness(awareness.encodeUpdate()))
+            case let .auth(reason, _):
+                if reason != nil { throw YError.decodeFailure }
+            case .custom:
+                throw YError.decodeFailure
+            }
+        }
+        return YSyncMessage.joinedPayload(responses)
+    }
+
+    private static func retryDocumentOperation<T>(retry: RetryPolicy, _ operation: () throws -> T) throws -> T {
+        let deadline = retry.now() + transactionRetryTimeout
+        while true {
+            do {
+                return try operation()
+            } catch YError.transactionConflict {
+                retry.onConflict()
+                let remaining = deadline - retry.now()
+                guard remaining > .zero else { throw YError.transactionConflict }
+                retry.wait(min(transactionRetryDelay, remaining))
+                guard retry.now() < deadline else { throw YError.transactionConflict }
             }
         }
     }

@@ -47,7 +47,7 @@ let hocuspocusTargets: [Target] = [
     ),
     .testTarget(
         name: "SwiftYrsHocuspocusTests",
-        dependencies: ["SwiftYrsHocuspocus"],
+        dependencies: ["SwiftYrsHocuspocus", "SwiftYrsTestSupport"],
         exclude: [
             "hocuspocus-peer.ts",
             "hocuspocus-server.ts",
@@ -71,6 +71,7 @@ let webRTCTargets: [Target] = [
         name: "SwiftYrsWebRTCTests",
         dependencies: [
             "SwiftYrsWebRTC",
+            "SwiftYrsTestSupport",
             .product(name: "StreamWebRTC", package: "stream-video-swift-webrtc"),
         ],
         exclude: [
@@ -115,6 +116,7 @@ let package = Package(
     dependencies: packageDependencies,
     targets: [
         ffiTarget,
+        .target(name: "SwiftYrsTestSupport", path: "Tests/Support"),
         .target(
             name: "SwiftYrs",
             dependencies: ["YrsBridgeFFI"]
@@ -135,13 +137,14 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftYrsTests",
-            dependencies: ["SwiftYrs"],
+            dependencies: ["SwiftYrs", "SwiftYrsTestSupport"],
             resources: [.process("Fixtures")]
         ),
         .testTarget(
             name: "SwiftYrsCloudKitTests",
             dependencies: [
                 "SwiftYrsCloudKit",
+                "SwiftYrsTestSupport",
                 .product(name: "SQLite", package: "SQLite.swift"),
             ],
             resources: [.process("Fixtures")]

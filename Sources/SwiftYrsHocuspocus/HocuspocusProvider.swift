@@ -22,6 +22,8 @@ protocol HocuspocusWebSocket: Sendable {
     func close()
 }
 
+/// A non-null local awareness state, including `[:]`, keeps idle connections alive.
+/// With null or disabled awareness, an idle server may close the connection with 4408.
 public actor HocuspocusProvider {
     public static let productName = "SwiftYrsHocuspocus"
     // Match CloudKitProvider's transaction retry policy.
@@ -31,19 +33,31 @@ public actor HocuspocusProvider {
     struct TestHooks: Sendable {
         static let none = TestHooks()
 
-        let onTransactionConflict: (@Sendable () -> Void)?
-        let onSyncMessageHandled: (@Sendable (Int) -> Void)?
+        let onTransactionConflict: (@Sendable () async -> Void)?
+        let onSyncMessageHandled: (@Sendable (Int) async -> Void)?
+        let onAwarenessForwarded: (@Sendable () -> Void)?
+        let onDocumentForwarded: (@Sendable () -> Void)?
+        let awarenessCheckWait: (@Sendable () async throws -> Void)?
+        let onAwarenessCheck: (@Sendable (Bool) -> Void)?
         let onSyncStatusEmitted: (@Sendable () -> Void)?
         let transactionRetryWait: (@Sendable () async throws -> Void)?
 
         init(
-            onTransactionConflict: (@Sendable () -> Void)? = nil,
-            onSyncMessageHandled: (@Sendable (Int) -> Void)? = nil,
+            onTransactionConflict: (@Sendable () async -> Void)? = nil,
+            onSyncMessageHandled: (@Sendable (Int) async -> Void)? = nil,
+            onAwarenessForwarded: (@Sendable () -> Void)? = nil,
+            onDocumentForwarded: (@Sendable () -> Void)? = nil,
+            awarenessCheckWait: (@Sendable () async throws -> Void)? = nil,
+            onAwarenessCheck: (@Sendable (Bool) -> Void)? = nil,
             onSyncStatusEmitted: (@Sendable () -> Void)? = nil,
             transactionRetryWait: (@Sendable () async throws -> Void)? = nil
         ) {
             self.onTransactionConflict = onTransactionConflict
             self.onSyncMessageHandled = onSyncMessageHandled
+            self.onAwarenessForwarded = onAwarenessForwarded
+            self.onDocumentForwarded = onDocumentForwarded
+            self.awarenessCheckWait = awarenessCheckWait
+            self.onAwarenessCheck = onAwarenessCheck
             self.onSyncStatusEmitted = onSyncStatusEmitted
             self.transactionRetryWait = transactionRetryWait
         }
@@ -72,8 +86,10 @@ public actor HocuspocusProvider {
     private var receiveTask: Task<Void, Never>?
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
+    private var awarenessTask: Task<Void, Never>?
+    private var awarenessTaskID: UUID?
     private let documentObservationGate = RemoteApplyGate()
-    private let awarenessObservationGate = RemoteApplyGate()
+    private let awarenessOrigin = UUID().uuidString
     private var retryAttempt = 0
     private var disconnectRequested = false
 
@@ -140,6 +156,7 @@ public actor HocuspocusProvider {
         let statelessPair = AsyncStream.makeStream(of: String.self)
         self.stateless = statelessPair.stream
         self.statelessContinuation = statelessPair.continuation
+        Task { [weak self] in await self?.startAwarenessMaintenance() }
     }
 
     public func connect() async throws {
@@ -160,6 +177,10 @@ public actor HocuspocusProvider {
         webSocket?.close()
         webSocket = nil
         connectionStatusContinuation.yield(.disconnected)
+    }
+
+    deinit {
+        awarenessTask?.cancel()
     }
 
     public func sendStateless(_ payload: String) async {
@@ -198,9 +219,11 @@ public actor HocuspocusProvider {
             ).encoded())
         }
 
+        guard !disconnectRequested else { return }
         receiveTask = Task { [weak self] in
             await self?.receiveLoop()
         }
+        startAwarenessMaintenance()
     }
 
     private func receiveLoop() async {
@@ -228,6 +251,7 @@ public actor HocuspocusProvider {
         }
         webSocket?.close()
         webSocket = nil
+        clearRemoteAwarenessStates()
         connectionStatusContinuation.yield(.disconnected)
         guard retryAttempt < maxRetries else {
             return
@@ -252,6 +276,7 @@ public actor HocuspocusProvider {
 
     private func startObservingIfNeeded() throws {
         if documentObservation == nil {
+            let onForwarded = testHooks.onDocumentForwarded
             documentObservation = try document.observeUpdates { [weak self, documentObservationGate] event in
                 guard !documentObservationGate.isApplyingRemote else {
                     return
@@ -259,28 +284,59 @@ public actor HocuspocusProvider {
                 guard case let .update(update) = event else {
                     return
                 }
+                onForwarded?()
                 Task { [weak self] in
                     await self?.sendLocalUpdate(update)
                 }
             }
         }
         if awarenessObservation == nil, let awareness {
-            awarenessObservation = try awareness.observeUpdate { [weak self, awarenessObservationGate, awareness] event in
-                guard !awarenessObservationGate.isApplyingRemote else {
-                    return
-                }
+            let onForwarded = testHooks.onAwarenessForwarded
+            awarenessObservation = try awareness.observeUpdate { [weak self, awareness, awarenessOrigin] event in
                 guard case let .awarenessUpdate(change) = event else {
                     return
                 }
+                guard change.origin != awarenessOrigin else { return }
                 let clientIDs = change.changed
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }
+                onForwarded?()
                 Task { [weak self] in
                     await self?.sendAwareness(update)
                 }
             }
         }
+    }
+
+    private func startAwarenessMaintenance() {
+        guard awarenessTask == nil, let awareness else { return }
+        let id = UUID()
+        awarenessTaskID = id
+        let interval = awareness.timing.checkInterval
+        let wait = testHooks.awarenessCheckWait
+        let checked = testHooks.onAwarenessCheck
+        awarenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    if let wait { try await wait() }
+                    else { try await Task.sleep(for: interval) }
+                } catch { return }
+                let active = await self?.checkAwarenessTimeouts(id: id) == true
+                checked?(active)
+                guard active else { return }
+            }
+        }
+    }
+
+    private func checkAwarenessTimeouts(id: UUID) -> Bool {
+        guard awarenessTaskID == id, !Task.isCancelled else { return false }
+        do {
+            try awareness?.checkTimeouts()
+        } catch {
+            logger.error("failed to check awareness timeouts: \(error, privacy: .public)")
+        }
+        return true
     }
 
     private func handle(_ data: Data) async throws {
@@ -320,10 +376,11 @@ public actor HocuspocusProvider {
                 for (index, message) in syncMessages.enumerated() {
                     let result = try syncEngine.handle(message)
                     didSync = didSync || result.didSync
-                    testHooks.onSyncMessageHandled?(index)
+                    // This hook suspends mid-frame only in tests; production uses .none.
+                    await testHooks.onSyncMessageHandled?(index)
                 }
             } catch YError.transactionConflict {
-                testHooks.onTransactionConflict?()
+                await testHooks.onTransactionConflict?()
                 attempts += 1
                 guard attempts < Self.maxTransactionAttempts else {
                     // Reconnect after exhaustion so a full resync can recover this frame.
@@ -417,13 +474,11 @@ public actor HocuspocusProvider {
                     }
                 }
             },
-            applyAwarenessUpdate: { [awareness, awarenessObservationGate] update in
+            applyAwarenessUpdate: { [awareness, awarenessOrigin] update in
                 guard let awareness else {
                     return
                 }
-                try awarenessObservationGate.withApplyingRemote {
-                    try awareness.applyUpdate(update)
-                }
+                try awareness.applyUpdate(update, origin: awarenessOrigin)
             }
         )
     }
@@ -446,18 +501,15 @@ public actor HocuspocusProvider {
         guard let awareness else {
             return
         }
-        try awarenessObservationGate.withApplyingRemote {
-            try awareness.applyUpdate(update)
-        }
+        try awareness.applyUpdate(update, origin: awarenessOrigin)
     }
 
     private func clearRemoteAwarenessStates() {
         guard let awareness, let states = try? awareness.states() else {
             return
         }
-        for state in states where state.clientID != awareness.clientID {
-            awareness.removeState(for: state.clientID)
-        }
+        let clientIDs = states.map(\.clientID).filter { $0 != awareness.clientID }
+        awareness.removeStates(for: clientIDs, origin: awarenessOrigin)
     }
 }
 

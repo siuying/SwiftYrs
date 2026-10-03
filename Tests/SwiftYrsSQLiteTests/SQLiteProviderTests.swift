@@ -141,7 +141,7 @@ func metadataIsScopedByDocumentNameAndDoesNotMutateTheDocument() throws {
 }
 
 @Test
-func compactionRewritesUpdatesToSnapshotAndKeepsAcceptingUpdates() throws {
+func compactionRewritesUpdatesToSnapshotAndKeepsAcceptingUpdates() async throws {
     let databaseURL = try temporaryDatabaseURL()
     let connection = try Connection(databaseURL.path)
     let store = try SQLiteStore(connection)
@@ -153,7 +153,7 @@ func compactionRewritesUpdatesToSnapshotAndKeepsAcceptingUpdates() throws {
     try provider.setMetadata(Data("value".utf8), forKey: "key")
     try insert("a", into: doc, named: "body")
     try insert("b", into: doc, named: "body")
-    try waitUntil {
+    try await waitUntil {
         try updateRowCount(store, documentName: "compact") == 1
     }
     #expect(try updateKinds(store, documentName: "compact") == ["snapshot"])
@@ -414,16 +414,16 @@ private func waitUntil(
     // Compaction runs on a background utility-QoS queue, which a loaded CI
     // runner can defer well past a couple of seconds; the loop returns as soon
     // as the condition holds, so the generous ceiling only adds headroom.
-    timeout: TimeInterval = 10,
-    interval: TimeInterval = 0.01,
+    timeout: Duration = .seconds(30),
+    interval: Duration = .milliseconds(10),
     condition: () throws -> Bool
-) throws {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
         if try condition() {
             return
         }
-        Thread.sleep(forTimeInterval: interval)
+        try await Task.sleep(for: interval)
     }
     #expect(try condition())
 }

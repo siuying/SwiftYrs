@@ -84,7 +84,8 @@ jobs:
       # Subdocument handles are boxed `Doc` clones released independently of
       # the parent (ADR-0024), so their lifecycle tests run under address
       # sanitizer as well.
-      - name: Run subdocument tests under address sanitizer
-        run: swift test --sanitize=address --filter "ubdoc"
+      # Also cover native callback delivery racing observation cancellation.
+      - name: Run subdocument and observation lifetime tests under address sanitizer
+        run: swift test --sanitize=address --filter "ubdoc|documentObservationCancellationSkipsNativeCallbacksAlreadyQueuedForDelivery"
         env:
           SWIFTYRS_USE_LOCAL_ARTIFACT: "1"

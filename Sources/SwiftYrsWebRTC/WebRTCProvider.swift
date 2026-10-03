@@ -17,6 +17,23 @@ func webRTCDebug(_ message: @autoclosure () -> String) {
 /// borrows y-webrtc's vocabulary but is a Swift `actor` with an explicit async
 /// lifecycle — see ADR-0021 (shape) and ADR-0020 (the simple-peer seam).
 public actor WebRTCProvider {
+    struct TestHooks: Sendable {
+        static let none = TestHooks()
+        let awarenessCheckWait: (@Sendable () async throws -> Void)?
+        let onAwarenessCheck: (@Sendable (Bool) -> Void)?
+        let onSyncMessageHandled: (@Sendable (Data) -> Void)?
+
+        init(
+            awarenessCheckWait: (@Sendable () async throws -> Void)? = nil,
+            onAwarenessCheck: (@Sendable (Bool) -> Void)? = nil,
+            onSyncMessageHandled: (@Sendable (Data) -> Void)? = nil
+        ) {
+            self.awarenessCheckWait = awarenessCheckWait
+            self.onAwarenessCheck = onAwarenessCheck
+            self.onSyncMessageHandled = onSyncMessageHandled
+        }
+    }
+
     public struct Options: Sendable {
         /// Controls whether document updates received from WebRTC peers are
         /// applied to this provider's document.
@@ -91,7 +108,6 @@ public actor WebRTCProvider {
     private let signalingURLs: [URL]
     private let options: Options
     private let peerConnectionFactory = WebRTCFactory.makePeerConnectionFactory()
-    private let ownsAwareness: Bool
     private let peerId = UUID().uuidString.lowercased()
     private let signalingCipher: SignalingCipher?
 
@@ -106,7 +122,11 @@ public actor WebRTCProvider {
     private var documentObservation: Observation?
     private var awarenessObservation: Observation?
     private var reannounceTask: Task<Void, Never>?
+    private var awarenessTask: Task<Void, Never>?
+    private var awarenessTaskID: UUID?
+    private let testHooks: TestHooks
     private var started = false
+    private var destroyed = false
     private var connectionStatus: WebRTCConnectionStatus = .disconnected
     private var lastSynced = false
 
@@ -116,7 +136,6 @@ public actor WebRTCProvider {
         var glareToken: Double?
         var synced = false
         var channelOpen = false
-        var awarenessClientIDs: Set<UInt64> = []
         init(conn: WebRTCConn, generation: UInt64) {
             self.conn = conn
             self.generation = generation
@@ -124,10 +143,18 @@ public actor WebRTCProvider {
     }
 
     public init(_ roomName: String, doc: YDoc, signaling: [URL], options: Options = .init()) {
+        self.init(roomName, doc: doc, signaling: signaling, options: options, testHooks: .none)
+    }
+
+    init(
+        _ roomName: String, doc: YDoc, signaling: [URL], options: Options = .init(),
+        testHooks: TestHooks
+    ) {
         self.roomName = roomName
         self.doc = doc
         self.signalingURLs = signaling
         self.options = options
+        self.testHooks = testHooks
         self.inboundUpdatePolicy = options.inboundUpdatePolicy
         self.maxPeers = options.maxPeers
         if let password = options.password {
@@ -140,10 +167,8 @@ public actor WebRTCProvider {
         }
         if let awareness = options.awareness {
             self.awareness = awareness
-            self.ownsAwareness = false
         } else {
             self.awareness = YAwareness(document: doc)
-            self.ownsAwareness = true
         }
 
         let statusPair = AsyncStream.makeStream(of: WebRTCConnectionStatus.self)
@@ -155,15 +180,17 @@ public actor WebRTCProvider {
         let peersPair = AsyncStream.makeStream(of: PeersEvent.self)
         peers = peersPair.stream
         peersContinuation = peersPair.continuation
+        Task { [weak self] in await self?.startAwarenessMaintenance() }
     }
 
     // MARK: - Lifecycle
 
     public func connect() async throws {
-        guard !started else { return }
+        guard !started, !destroyed else { return }
         started = true
         emitStatus(.connecting)
         try startObserving()
+        startAwarenessMaintenance()
         signalingConnections = signalingURLs.map { url in
             SignalingConnection(
                 url: url,
@@ -187,6 +214,9 @@ public actor WebRTCProvider {
     /// awaited, terminal teardown use `destroy()`.
     public func disconnect() {
         guard started else { return }
+        if let payload = localAwarenessRemoval() {
+            broadcast(payload)
+        }
         beginTearDown()
         for connection in signalingConnections {
             Task { await connection.stop() }
@@ -194,12 +224,14 @@ public actor WebRTCProvider {
         finishTearDown()
     }
 
-    /// Terminal teardown: clears owned awareness, awaits signaling stop before
+    /// Terminal teardown: clears local awareness, awaits signaling stop before
     /// closing peers, then finishes the event streams so iterators end.
     public func destroy() async {
-        guard started else { return }
-        if ownsAwareness {
-            await clearOwnedAwareness()
+        guard !destroyed else { return }
+        destroyed = true
+        stopAwarenessMaintenance()
+        if let payload = localAwarenessRemoval() {
+            await broadcastAndFlush(payload)
         }
         beginTearDown()
         // Stop signaling before closing peer connections so the receive loop
@@ -220,6 +252,16 @@ public actor WebRTCProvider {
         started = false
         reannounceTask?.cancel()
         reannounceTask = nil
+    }
+
+    private func stopAwarenessMaintenance() {
+        awarenessTaskID = nil
+        awarenessTask?.cancel()
+        awarenessTask = nil
+    }
+
+    deinit {
+        awarenessTask?.cancel()
     }
 
     /// Releases everything that does not need to outlive a stop: signaling
@@ -405,6 +447,10 @@ public actor WebRTCProvider {
         conns[remotePeerId]?.generation
     }
 
+    func peerConnection(for remotePeerId: String) -> WebRTCConn? {
+        conns[remotePeerId]?.conn
+    }
+
     private var hasPeerCapacity: Bool {
         options.maxPeers.map { conns.count < $0 } ?? true
     }
@@ -441,7 +487,6 @@ public actor WebRTCProvider {
         // objects on the provider-actor thread. See WebRTCConn.close.
         current.conn.close()
         conns[remotePeerId] = nil
-        removeAwarenessStatesIntroduced(by: current)
         emitPeers(added: [], removed: [remotePeerId])
         recomputeSynced()
     }
@@ -462,8 +507,7 @@ public actor WebRTCProvider {
                 record.synced = true
                 recomputeSynced()
             }
-            record.awarenessClientIDs.formUnion(result.awarenessAddedClientIDs)
-            record.awarenessClientIDs.subtract(result.awarenessRemovedClientIDs)
+            testHooks.onSyncMessageHandled?(message.payload)
         } catch {
             webRTCLogger.error("failed to handle sync message from peer: \(error, privacy: .public)")
         }
@@ -486,16 +530,9 @@ public actor WebRTCProvider {
                 }
             },
             applyAwarenessUpdate: { [awareness] update in
-                try awareness.applyUpdate(update)
+                try awareness.applyUpdate(update, origin: "SwiftYrsWebRTC")
             }
         )
-    }
-
-    private func removeAwarenessStatesIntroduced(by record: PeerRecord) {
-        for clientID in record.awarenessClientIDs {
-            awareness.removeState(for: clientID)
-        }
-        record.awarenessClientIDs.removeAll()
     }
 
     // MARK: - Observation & broadcast
@@ -517,6 +554,36 @@ public actor WebRTCProvider {
         }
     }
 
+    private func startAwarenessMaintenance() {
+        guard awarenessTask == nil, !destroyed else { return }
+        let id = UUID()
+        awarenessTaskID = id
+        let interval = awareness.timing.checkInterval
+        let wait = testHooks.awarenessCheckWait
+        let checked = testHooks.onAwarenessCheck
+        awarenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    if let wait { try await wait() }
+                    else { try await Task.sleep(for: interval) }
+                } catch { return }
+                let active = await self?.checkAwarenessTimeouts(id: id) == true
+                checked?(active)
+                guard active else { return }
+            }
+        }
+    }
+
+    private func checkAwarenessTimeouts(id: UUID) -> Bool {
+        guard !destroyed, awarenessTaskID == id, !Task.isCancelled else { return false }
+        do {
+            try awareness.checkTimeouts()
+        } catch {
+            webRTCLogger.error("failed to check awareness timeouts: \(error, privacy: .public)")
+        }
+        return true
+    }
+
     private func broadcastDocumentUpdate(_ update: YUpdate) {
         guard let payload = try? YSyncMessage.update(update).payload else { return }
         broadcast(payload)
@@ -527,12 +594,14 @@ public actor WebRTCProvider {
         broadcast(payload)
     }
 
-    private func clearOwnedAwareness() async {
+    private func localAwarenessRemoval() -> Data? {
+        awarenessObservation?.cancel()
+        awarenessObservation = nil
+        guard (try? awareness.localState()) != nil else { return nil }
         let clientID = awareness.clientID
-        awareness.clearLocalState()
-        guard let update = try? awareness.encodeUpdate(for: [clientID]),
-              let payload = try? YSyncMessage.awareness(update).payload else { return }
-        await broadcastAndFlush(payload)
+        awareness.removeState(for: clientID, origin: "disconnect")
+        guard let update = try? awareness.encodeUpdate(for: [clientID]) else { return nil }
+        return try? YSyncMessage.awareness(update).payload
     }
 
     private func broadcastAndFlush(_ payload: Data) async {
