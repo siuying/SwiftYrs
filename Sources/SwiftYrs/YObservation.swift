@@ -9,17 +9,50 @@ private final class ObservationCallbackBox {
     }
 }
 
+// Native delivery can retain a callback after its subscription is removed.
+// Monotonic opaque tokens let such callbacks safely miss the registry instead
+// of dereferencing a released Swift context or a reused allocation address.
+private final class ObservationCallbacks: @unchecked Sendable {
+    static let shared = ObservationCallbacks()
+    private let lock = NSLock()
+    private var nextToken: UInt = 1
+    private var callbacks: [UInt: ObservationCallbackBox] = [:]
+
+    func insert(_ callback: @escaping (YEvent) -> Void) -> UnsafeMutableRawPointer {
+        lock.withLock {
+            precondition(nextToken < UInt.max)
+            let token = nextToken
+            nextToken += 1
+            callbacks[token] = ObservationCallbackBox(callback: callback)
+            return UnsafeMutableRawPointer(bitPattern: token)!
+        }
+    }
+
+    func lookup(_ context: UnsafeMutableRawPointer) -> ObservationCallbackBox? {
+        lock.withLock { callbacks[UInt(bitPattern: context)] }
+    }
+
+    func remove(_ context: UnsafeMutableRawPointer) {
+        // Release captured objects outside the registry lock; their deinitializers
+        // may cancel other observations.
+        let removed = lock.withLock { callbacks.removeValue(forKey: UInt(bitPattern: context)) }
+        withExtendedLifetime(removed) {}
+    }
+}
+
 private let observationCallback: YrsBridgeEventCallback = { context, data, length in
     guard let context else {
         return
     }
-    let box = Unmanaged<ObservationCallbackBox>.fromOpaque(context).takeUnretainedValue()
+    guard let box = ObservationCallbacks.shared.lookup(context) else { return }
     box.callback(YEvent(data: Data(bytes: data, count: Int(length))))
 }
 
 public final class Observation: @unchecked Sendable {
     private var handle: OpaquePointer?
     private var context: UnsafeMutableRawPointer?
+    // Releasing callback captures can re-enter cancel() on this observation.
+    private let cancellationLock = NSRecursiveLock()
     private let synchronizationLock: NSRecursiveLock?
     private let onCancel: (() -> Void)?
 
@@ -38,15 +71,16 @@ public final class Observation: @unchecked Sendable {
     public func cancel() {
         synchronizationLock?.lock()
         defer { synchronizationLock?.unlock() }
+        cancellationLock.lock()
+        defer { cancellationLock.unlock() }
         guard let handle else {
             return
         }
-        yrs_bridge_observation_destroy(handle)
         self.handle = nil
-        if let context {
-            Unmanaged<ObservationCallbackBox>.fromOpaque(context).release()
-            self.context = nil
-        }
+        let context = self.context
+        self.context = nil
+        if let context { ObservationCallbacks.shared.remove(context) }
+        yrs_bridge_observation_destroy(handle)
         onCancel?()
     }
 
@@ -68,10 +102,9 @@ func registerObservation(
     onCancel: (() -> Void)? = nil,
     _ callback: @escaping (YEvent) -> Void
 ) throws -> Observation {
-    let box = ObservationCallbackBox(callback: callback)
-    let context = Unmanaged.passRetained(box).toOpaque()
+    let context = ObservationCallbacks.shared.insert(callback)
     guard let observationHandle = observe(handle, context, observationCallback) else {
-        Unmanaged<ObservationCallbackBox>.fromOpaque(context).release()
+        ObservationCallbacks.shared.remove(context)
         throw YError.nullPointer
     }
     return Observation(handle: observationHandle, context: context, synchronizationLock: synchronizationLock, onCancel: onCancel)

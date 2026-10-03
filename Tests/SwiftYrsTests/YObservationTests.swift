@@ -224,3 +224,74 @@ func asyncObservationStreamYieldsEventsAndTerminates() async throws {
     let event = await task.value
     #expect(event?.shared?.target == .text)
 }
+
+@Test
+func documentObservationCancellationSkipsNativeCallbacksAlreadyQueuedForDelivery() async throws {
+    // Relies on yrs unsubscribe not blocking while native delivery is in flight.
+    let doc = YDoc()
+    let entered = AsyncStream.makeStream(of: Void.self)
+    let completed = AsyncStream.makeStream(of: Result<Void, Error>.self)
+    let cancelled = AsyncStream.makeStream(of: Void.self)
+    let release = DispatchSemaphore(value: 0)
+    let received = ObservationTestCounter()
+    let callback: (YEvent) -> Void = { _ in
+        received.increment()
+        entered.continuation.yield(())
+        release.wait()
+    }
+    let first = try doc.observeUpdates(callback)
+    let second = try doc.observeUpdates(callback)
+    defer {
+        release.signal()
+        release.signal()
+        first.cancel()
+        second.cancel()
+    }
+    Thread {
+        completed.continuation.yield(Result {
+            let text = try doc.text(named: "body")
+            try doc.write { try $0.insert("one", into: text, at: 0) }
+        })
+    }.start()
+    _ = try await observationSignal(entered.stream)
+    Thread {
+        first.cancel()
+        second.cancel()
+        cancelled.continuation.yield(())
+    }.start()
+    _ = try await observationSignal(cancelled.stream)
+    release.signal()
+    try await observationSignal(completed.stream).get()
+    #expect(received.value() == 1)
+    let later = ObservationTestCounter()
+    let replacement = try doc.observeUpdates { _ in later.increment() }
+    defer { replacement.cancel() }
+    let text = try doc.text(named: "body")
+    try doc.write { try $0.insert("two", into: text, at: 3) }
+    #expect(later.value() == 1)
+}
+
+private final class ObservationTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.withLock { count += 1 } }
+    func value() -> Int { lock.withLock { count } }
+}
+
+private struct ObservationTestTimeout: Error {}
+
+private func observationSignal<Element: Sendable>(_ stream: AsyncStream<Element>) async throws -> Element {
+    try await withThrowingTaskGroup(of: Element.self) { group in
+        group.addTask {
+            var iterator = stream.makeAsyncIterator()
+            guard let value = await iterator.next() else { throw CancellationError() }
+            return value
+        }
+        group.addTask {
+            try await Task.sleep(for: .seconds(30))
+            throw ObservationTestTimeout()
+        }
+        defer { group.cancelAll() }
+        return try await group.next()!
+    }
+}
