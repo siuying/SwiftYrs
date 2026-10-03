@@ -130,22 +130,40 @@ public enum YSyncMessage: Equatable {
 }
 
 public enum YSyncProtocol {
+    /// Throws `YError.transactionConflict` if a document write transaction is active.
     public static func start(awareness: YAwareness) throws -> Data {
-        try awareness.withAccess { try readingBuffer { yrs_bridge_sync_start(awareness.handle, &$0) } }
+        let step1 = try YSyncMessage.syncStep1(awareness.document.stateVector())
+        let presence = try YSyncMessage.awareness(awareness.encodeUpdate())
+        return YSyncMessage.joinedPayload([step1, presence])
     }
 
+    /// Document messages use nonblocking transactions and may throw `YError.transactionConflict`.
     public static func handle(_ payload: Data, awareness: YAwareness) throws -> Data {
-        try awareness.withAccess {
-            try withUInt8Pointer(payload) { pointer, length in
-                return try readingBuffer {
-                    yrs_bridge_sync_handle(
-                        awareness.handle,
-                        pointer,
-                        length,
-                        &$0
-                    )
-                }
+        try handle(payload, awareness: awareness, origin: nil)
+    }
+
+    /// Tags inbound awareness events with `origin` so providers can suppress echoes.
+    /// Document messages use nonblocking transactions and may throw `YError.transactionConflict`.
+    public static func handle(_ payload: Data, awareness: YAwareness, origin: String?) throws -> Data {
+        let messages = try YSyncMessage.decodePayload(payload)
+        var responses: [YSyncMessage] = []
+        for message in messages {
+            switch message {
+            case let .syncStep1(stateVector, _):
+                let update = try awareness.document.encodeStateAsUpdateV1(from: stateVector)
+                responses.append(try .syncStep2(update))
+            case let .syncStep2(update, _), let .update(update, _):
+                try awareness.document.apply(update)
+            case let .awareness(update, _):
+                try awareness.applyUpdate(update, origin: origin)
+            case .awarenessQuery:
+                responses.append(try .awareness(awareness.encodeUpdate()))
+            case let .auth(reason, _):
+                if reason != nil { throw YError.decodeFailure }
+            case .custom:
+                throw YError.decodeFailure
             }
         }
+        return YSyncMessage.joinedPayload(responses)
     }
 }

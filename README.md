@@ -251,6 +251,8 @@ try undoManager.redo()  // restores "Hello"
 
 Awareness starts with a null local state. Set a non-null state before connecting to Hocuspocus, even `[:]`, to keep an idle connection alive through awareness renewals. Null or disabled awareness sends no renewals, so an idle Hocuspocus server may close the connection with code 4408. The default remains null; use `clearLocalState()` to return to it.
 
+`observeUpdate` and `observeChange` deliver callbacks serially outside the awareness lock. Nested events are delivered breadth-first; JavaScript delivers them depth-first. State updates happen immediately, but delivery may be delayed or run on another thread, so callbacks should read current state. A callback must not wait for a thread that is waiting for its own awareness events.
+
 ```swift
 let doc = YDoc()
 let awareness = YAwareness(document: doc)
@@ -266,8 +268,8 @@ let remoteAwareness = YAwareness(document: doc)
 try remoteAwareness.applyUpdate(update)
 
 // Observe state changes
-let observation = try awareness.observe { event in
-    let states = try? awareness.clientStates()
+let observation = try awareness.observeChange { event in
+    let states = try? awareness.states()
     print("online clients:", states?.count ?? 0)
 }
 ```

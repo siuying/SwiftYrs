@@ -31,7 +31,7 @@ public final class YAwareness {
     }
 
     public let timing: Timing
-    private let document: YDoc
+    let document: YDoc
     let handle: OpaquePointer
     private let now: @Sendable () -> Duration
     private let lock = NSRecursiveLock()
@@ -66,12 +66,12 @@ public final class YAwareness {
                 guard let self, case let .awarenessUpdate(change) = event else { return }
                 let timestamp = self.now()
                 for id in change.added + change.updated {
-                    if (try? self.state(for: id)) != nil {
+                    if self.hasState(for: id) {
                         self.lastUpdated[id] = timestamp
                     }
                 }
                 for id in change.removed {
-                    if (try? self.state(for: id)) == nil {
+                    if !self.hasState(for: id) {
                         self.lastUpdated.removeValue(forKey: id)
                     }
                 }
@@ -125,6 +125,11 @@ public final class YAwareness {
             let data = try readingBuffer { yrs_bridge_awareness_state_json(handle, clientID, &$0) }
             return try decodeOptionalJSON(from: data)
         }
+    }
+
+    private func hasState(for clientID: UInt64) -> Bool {
+        let data = try? readingBuffer { yrs_bridge_awareness_state_json(handle, clientID, &$0) }
+        return data?.isEmpty == false
     }
 
     public func states() throws -> [YAwarenessClientState] {
@@ -215,10 +220,16 @@ public final class YAwareness {
         }
     }
 
+    /// Delivers updates serially outside the awareness lock. Nested events are
+    /// breadth-first, unlike JavaScript's depth-first delivery. State updates happen immediately,
+    /// but delivery may be delayed or run on another thread; callbacks should read current state.
     public func observeUpdate(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
         try observe(yrs_bridge_awareness_observe_update, callback)
     }
 
+    /// Delivers changes serially outside the awareness lock. Nested events are
+    /// breadth-first, unlike JavaScript's depth-first delivery. State updates happen immediately,
+    /// but delivery may be delayed or run on another thread; callbacks should read current state.
     public func observeChange(_ callback: @escaping (YEvent) -> Void) throws -> Observation {
         try observe(yrs_bridge_awareness_observe_change, callback)
     }

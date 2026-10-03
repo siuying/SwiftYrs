@@ -8,6 +8,10 @@ Yrs stores clocks and timestamps, but the existing Shim ABI exposes neither time
 
 Native callbacks capture events and origins under the lock. User callbacks are delivered serially after releasing it and after native observer delivery has completed, so they may re-enter on the same thread or access awareness from another thread. Concurrent mutations can finish while another thread delivers callbacks; their events join that delivery queue. Cancellation invalidates queued callbacks without waiting for a callback already in flight. No awareness lock is held across user callbacks or an await. Inbound Hocuspocus updates carry an origin unique to the provider instance so delayed callbacks suppress echoes without suppressing concurrent local updates or forwarding by other providers sharing awareness.
 
+State updates happen immediately, while nested events use breadth-first delivery rather than JavaScript's depth-first delivery; callbacks may arrive late on another thread and should read current state. The single deliverer can deadlock if a callback waits for a thread that is waiting for its own awareness events.
+
+`YSyncProtocol` dispatches decoded messages in Swift without holding the awareness lock across document transactions. Document messages use the existing nonblocking `YDoc` APIs and report `YError.transactionConflict` on contention; awareness messages use the synchronized apply and encode paths. Custom providers can tag inbound awareness events through `handle(_:awareness:origin:)` to suppress echoes.
+
 If a peer times out our local state at its current clock, Yrs silently increments our clock without emitting an update. Presence is restored at the next renewal, at most 18 seconds later with the default cadence. Local state remains null by default; only non-null local state, including an empty dictionary, supplies idle Hocuspocus keepalive traffic.
 
 Sources inspected for this decision:

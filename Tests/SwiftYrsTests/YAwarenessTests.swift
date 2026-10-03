@@ -192,6 +192,31 @@ func awarenessExpiresRemoteStatesWithTimeoutOriginAndPreservesClocks() throws {
     #expect(awarenessChange(try #require(events.last))?.origin == nil)
 }
 
+@Test(arguments: ["true", "5"])
+func awarenessExpiresRemoteScalarJSONState(json: String) throws {
+    let clock = AwarenessTestClock()
+    let local = YAwareness(document: YDoc(clientID: 1), now: { clock.now() })
+    let peer = YAwareness(document: YDoc(clientID: 2))
+    try peer.setLocalStateJSON(Data(json.utf8))
+    try local.applyUpdate(peer.encodeUpdate())
+    #expect(try local.states().map(\.clientID) == [2])
+    var changes: [YAwarenessChange] = []
+    let observation = try local.observeChange { event in
+        if case let .awarenessChange(change) = event { changes.append(change) }
+    }
+    defer { observation.cancel() }
+
+    clock.set(.milliseconds(29_999))
+    try local.checkTimeouts()
+    #expect(changes.isEmpty)
+    clock.set(.seconds(30))
+    try local.checkTimeouts()
+    #expect(try local.states().isEmpty)
+    #expect(changes.count == 1)
+    #expect(changes.first?.removed == [2])
+    #expect(changes.first?.origin == YAwarenessChange.timeoutOrigin)
+}
+
 @Test
 func awarenessOnlyAcceptedRemoteUpdatesRefreshLifetime() throws {
     let clock = AwarenessTestClock()
