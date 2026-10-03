@@ -1,4 +1,5 @@
 import Foundation
+import SwiftYrsTestSupport
 import Testing
 import SwiftYrs
 
@@ -282,7 +283,7 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
     let observation = try local.observeUpdate { _ in received.increment() }
     defer { observation.cancel() }
     let writer = Task {
-        try await onAwarenessThread {
+        try await onTestThread {
             for version in 1...iterations {
                 try local.setLocalState(["version": version])
                 #expect(try (local.localState() as? [String: Any])?["version"] as? Int == version)
@@ -290,7 +291,7 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
         }
     }
     let receiver = Task {
-        try await onAwarenessThread {
+        try await onTestThread {
             for version in 1...iterations {
                 try remote.setLocalState(["version": version])
                 try local.applyUpdate(remote.encodeUpdate())
@@ -299,7 +300,7 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
         }
     }
     let otherProvider = Task {
-        try await onAwarenessThread {
+        try await onTestThread {
             for _ in 1...iterations {
                 try local.checkTimeouts()
                 _ = try local.encodeUpdate()
@@ -307,7 +308,7 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
         }
     }
     let subscriptions = Task {
-        try await onAwarenessThread {
+        try await onTestThread {
             for _ in 1...iterations {
                 let observation = try local.observeUpdate { _ in }
                 observation.cancel()
@@ -326,7 +327,7 @@ func awarenessConcurrentRenewalNeverOverwritesLatestLocalState() async throws {
 
 @Test
 func awarenessCallbacksCanReenterFromAnotherThread() async throws {
-    try await onAwarenessThread {
+    try await onTestThread {
         let awareness = YAwareness(document: YDoc(clientID: 1))
         let queue = DispatchQueue(label: "awareness-callback-reentry")
         var reentered = false
@@ -489,8 +490,3 @@ func awarenessTimeoutUpdateCallbackCanRestorePeerUntilNextTimeout(usingSyncProto
     #expect(try local.state(for: 2) == nil)
 }
 
-private func onAwarenessThread(_ operation: @escaping @Sendable () throws -> Void) async throws {
-    try await withCheckedThrowingContinuation { continuation in
-        Thread { continuation.resume(with: Result(catching: operation)) }.start()
-    }
-}
