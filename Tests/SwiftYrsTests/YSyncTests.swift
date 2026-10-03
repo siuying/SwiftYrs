@@ -122,7 +122,7 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
     let writerResult = SyncAttemptResult()
     let syncResult = SyncAttemptResult()
 
-    DispatchQueue.global().async {
+    Thread {
         defer { writerFinished.signal() }
         writerResult.record {
             try doc.write { _ in
@@ -134,20 +134,20 @@ func syncProtocolDoesNotHoldAwarenessLockDuringDocumentAccess(operation: String)
             }
             return Data()
         }
-    }
+    }.start()
     guard transactionHeld.wait(timeout: .now() + 5) == .success else {
         setPresence.signal()
         Issue.record("Writer did not acquire its transaction")
         return
     }
-    DispatchQueue.global().async {
+    Thread {
         defer { syncFinished.signal() }
         syncResult.record {
             syncStarted.signal()
             if operation == "start" { return try YSyncProtocol.start(awareness: awareness) }
             return try YSyncProtocol.handle(payload, awareness: awareness)
         }
-    }
+    }.start()
 
     #expect(syncStarted.wait(timeout: .now() + 5) == .success)
     Thread.sleep(forTimeInterval: 0.03)
@@ -184,7 +184,7 @@ func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObser
     let result = SyncAttemptResult()
     let finished = DispatchSemaphore(value: 0)
     let began = ContinuousClock.now
-    DispatchQueue.global().async {
+    Thread {
         defer { finished.signal() }
         let sync = {
             if starting { return try YSyncProtocol.start(awareness: awareness) }
@@ -202,7 +202,7 @@ func syncProtocolSameThreadContentionThrowsAfterDeadline(starting: Bool, inObser
         } catch {
             result.record { throw error }
         }
-    }
+    }.start()
     let completed = finished.wait(timeout: .now() + 3) == .success
     #expect(completed, "Re-entrant sync must time out rather than deadlock")
     guard completed else { return }

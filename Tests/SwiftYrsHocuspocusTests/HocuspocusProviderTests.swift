@@ -1216,7 +1216,7 @@ private final class HeldWriteTransaction: @unchecked Sendable {
         let releaseSignal = self.releaseSignal
         let startedSignal = self.startedSignal
         let endedSignal = self.endedSignal
-        DispatchQueue.global().async {
+        Thread {
             do {
                 try document.write { _ in
                     started.yield(())
@@ -1230,7 +1230,7 @@ private final class HeldWriteTransaction: @unchecked Sendable {
             }
             ended.yield(())
             endedSignal.signal()
-        }
+        }.start()
         return true
     }
 

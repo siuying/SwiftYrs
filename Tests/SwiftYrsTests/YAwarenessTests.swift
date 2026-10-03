@@ -354,14 +354,20 @@ func awarenessCancellationSkipsQueuedCallbacksWithoutWaitingForDelivery() async 
         changes.cancel()
         updates.cancel()
     }
-    let writer = Task.detached {
-        try awareness.setLocalState(["name": "Ada"])
-    }
+    let completed = AsyncStream.makeStream(of: Result<Void, Error>.self)
+    Thread {
+        completed.continuation.yield(Result {
+            try awareness.setLocalState(["name": "Ada"])
+        })
+        completed.continuation.finish()
+    }.start()
     var iterator = entered.stream.makeAsyncIterator()
     _ = await iterator.next()
     updates.cancel()
     release.signal()
-    try await writer.value
+    var completion = completed.stream.makeAsyncIterator()
+    let result = try #require(await completion.next())
+    try result.get()
     #expect(received.count() == 0)
 }
 
