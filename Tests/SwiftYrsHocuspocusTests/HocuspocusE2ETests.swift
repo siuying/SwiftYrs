@@ -87,6 +87,44 @@ struct HocuspocusE2ETests {
             }
         }
     }
+
+    @Test
+    func destroyDeliversAwarenessRemovalBeforeClose() async throws {
+        try await withE2EProcesses { processes in
+            let server = try processes.node(
+                script: "hocuspocus-server.ts",
+                environment: ["HOCUSPOCUS_TRACE": "1"]
+            )
+            let ready = try await server.waitForLine("server ready", where: { $0["type"] as? String == "ready" })
+            let port = try #require(ready["port"] as? Int)
+
+            let document = YDoc(clientID: 130)
+            let awareness = YAwareness(document: document)
+            try awareness.setLocalState(["name": "leaving"])
+            let provider = HocuspocusProvider(
+                url: URL(string: "ws://127.0.0.1:\(port)")!,
+                name: "room-destroy", document: document, awareness: awareness
+            )
+            try await withE2EDisconnect([provider]) {
+                try await provider.connect()
+                _ = try await server.waitForLine("initial awareness", where: { awarenessFrame($0, clientID: 130) { $0 != "null" } })
+
+                await provider.destroy()
+                let close = try await server.waitForLine("close", where: { $0["type"] as? String == "close" })
+                let removal = try await server.waitForLine("null awareness", where: { awarenessFrame($0, clientID: 130) { $0 == "null" } })
+                let removalSequence = try #require(removal["sequence"] as? Int)
+                let closeSequence = try #require(close["sequence"] as? Int)
+                #expect(removalSequence < closeSequence)
+            }
+        }
+    }
+}
+
+private func awarenessFrame(_ line: [String: Any], clientID: Int, state: (String) -> Bool) -> Bool {
+    guard line["type"] as? String == "awarenessFrame", let clients = line["clients"] as? [[String: Any]] else {
+        return false
+    }
+    return clients.contains { $0["clientID"] as? Int == clientID && ($0["state"] as? String).map(state) == true }
 }
 
 /// Runs `body`, then awaits `disconnect()` on every provider before returning or rethrowing.
@@ -174,6 +212,7 @@ private final class JSONLineProcess: @unchecked Sendable {
     }
 
     func waitForLine(
+        _ stage: String = "line",
         timeout: Duration = .seconds(30),
         where predicate: @escaping ([String: Any]) -> Bool
     ) async throws -> [String: Any] {
@@ -190,7 +229,7 @@ private final class JSONLineProcess: @unchecked Sendable {
             guard ContinuousClock.now < deadline else { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw E2ETimeout()
+        throw E2ETimeout(stage: stage)
     }
 
     private let teardownQueue = DispatchQueue(label: "JSONLineProcess.teardown")
@@ -245,7 +284,9 @@ private final class JSONLineProcess: @unchecked Sendable {
     }
 }
 
-private struct E2ETimeout: Error {}
+private struct E2ETimeout: Error {
+    var stage = "condition"
+}
 
 private actor E2EValueBox<Value: Sendable> {
     private var storage: Value?

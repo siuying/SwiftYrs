@@ -27,6 +27,17 @@ public func nextTestEvent<Value: Sendable>(_ stream: AsyncStream<Value>) async t
     try await withTestTimeout { try await nextValue(stream) }
 }
 
+// Awaits a task through a stream, so the watchdog can interrupt the wait.
+// The forwarding task ends when `task` does; tests release held work on failure.
+public func testTaskValue<Value: Sendable>(_ task: Task<Value, Never>) async throws -> Value {
+    let result = AsyncStream.makeStream(of: Value.self)
+    Task {
+        result.continuation.yield(await task.value)
+        result.continuation.finish()
+    }
+    return try await nextTestEvent(result.stream)
+}
+
 public func testCompletion(_ stream: AsyncStream<Void>) async -> Bool {
     do { _ = try await nextTestEvent(stream); return true }
     catch { return false }

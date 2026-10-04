@@ -274,6 +274,19 @@ let observation = try awareness.observeChange { event in
 }
 ```
 
+### Hocuspocus
+
+`HocuspocusProvider` syncs one document over a Hocuspocus WebSocket. `disconnect()` is temporary: it closes the socket immediately, discards queued messages and keeps local awareness, so `connect()` can resume with the same presence. When the session ends, await `destroy()` instead. It clears local awareness, even when it is already null, and stops processing inbound messages. It then waits up to 5 seconds for queued messages and that final awareness update to be handed to the socket, then closes the socket and finishes the event streams. If the socket is stuck, it drops the remaining messages at the deadline instead of hanging. This is an awaited write attempt. It does not confirm that the server or peers applied the update; the server may still report the departure through its own cleanup of the closed connection. Concurrent calls wait for the same teardown. Later calls do nothing, and a destroyed provider cannot reconnect.
+
+`sendStateless(_:)` returns after its message is written to the socket, or after the connection drops it. While a slow socket has writes pending, queued awareness updates are coalesced to the latest state. If more than 1024 messages are waiting, the provider drops the queue and reconnects; sync on reconnect restores document state.
+
+```swift
+let provider = HocuspocusProvider(url: url, name: "room", document: doc, awareness: awareness)
+try await provider.connect()
+// ...
+await provider.destroy()
+```
+
 ### Sync protocol (y-protocols)
 
 `YSyncProtocol.start(awareness:)` and `handle(_:awareness:)` synchronously wait for document contention with a 5 ms retry delay and a one-second deadline per document operation. Only `YError.transactionConflict` is retried; other errors propagate immediately. Calls made inside a transaction or its commit observer can prevent that transaction from finishing, so they throw `transactionConflict` at the deadline instead of hanging. Awareness access stays synchronized independently; retries never hold the awareness lock.
