@@ -1,0 +1,15 @@
+# Hocuspocus destroy flushes the awareness removal before closing
+
+`HocuspocusProvider.destroy()` is an awaitable, terminal teardown that follows `destroy()` in @hocuspocus/provider 4.7.0. It stops awareness checks and inbound processing, cancels the document and awareness observers, and clears local awareness with origin `"provider destroy"`. It then waits for every outstanding outbound message and the final awareness update to be written before closing the socket. Afterwards it finishes the event streams. Repeated calls, `disconnect()` and `connect()` do nothing once destroyed. `disconnect()` stays a temporary disconnect. It closes immediately, discards queued messages and keeps local presence for the next `connect()`, as a bare `disconnect()` does in JavaScript.
+
+All outbound frames go through one ordered send chain on the actor. Each write starts after the previous one finishes, so awaiting the last write also awaits every earlier one. Document and awareness observers run outside the actor. They encode frames into a locked buffer synchronously and then schedule a flush, so `destroy()` can send every frame observed before it was called, ahead of the removal. Before this change, observers sent from untracked tasks and `disconnect()` cleared the socket at once, so a final removal could be dropped. Peers then learned of the departure only from the server's connection-close cleanup or the 30-second timeout.
+
+`destroy()` clears local awareness even when it is already null. The clear advances the local clock and sends a `null` update at that clock, consistent with the repeated-null behaviour in ADR-0026. JavaScript `destroy()` calls `removeAwarenessStates`, which does nothing for an absent local state, and detaches its update listener before `awareness.destroy()` sets null again. So JavaScript sends nothing in that case. The extra Swift update leaves receivers in the same state. y-protocols 1.0.7 receivers that already know the client still report it as removed, just as for any repeated local null.
+
+`URLSessionWebSocketTask` writes the close frame after completed sends on the same connection. The end-to-end test traces raw frames on a real Hocuspocus server and checks that the `null` awareness frame arrives before the close. Hocuspocus server 4.x removes a closed connection's awareness clients as soon as the close arrives, even if earlier messages are still waiting on asynchronous hooks. So the server may broadcast its own cleanup removal before it applies the client's `null` update, as it can for the JavaScript provider.
+
+Sources inspected for this decision:
+
+- [Hocuspocus provider 4.7.0 HocuspocusProvider.ts](https://unpkg.com/@hocuspocus/provider@4.7.0/src/HocuspocusProvider.ts), `destroy()` and `disconnect()`.
+- [y-protocols 1.0.7 awareness.js](https://unpkg.com/y-protocols@1.0.7/awareness.js), `removeAwarenessStates` and `Awareness.destroy()`.
+- [Hocuspocus server 4.7.0 Connection.ts](https://unpkg.com/@hocuspocus/server@4.7.0/src/Connection.ts), which removes a closed connection's awareness clients.

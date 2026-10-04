@@ -41,6 +41,7 @@ public actor HocuspocusProvider {
         let onAwarenessCheck: (@Sendable (Bool) -> Void)?
         let onSyncStatusEmitted: (@Sendable () -> Void)?
         let transactionRetryWait: (@Sendable () async throws -> Void)?
+        let onSocketSend: (@Sendable (Data) async -> Void)?
 
         init(
             onTransactionConflict: (@Sendable () async -> Void)? = nil,
@@ -50,7 +51,8 @@ public actor HocuspocusProvider {
             awarenessCheckWait: (@Sendable () async throws -> Void)? = nil,
             onAwarenessCheck: (@Sendable (Bool) -> Void)? = nil,
             onSyncStatusEmitted: (@Sendable () -> Void)? = nil,
-            transactionRetryWait: (@Sendable () async throws -> Void)? = nil
+            transactionRetryWait: (@Sendable () async throws -> Void)? = nil,
+            onSocketSend: (@Sendable (Data) async -> Void)? = nil
         ) {
             self.onTransactionConflict = onTransactionConflict
             self.onSyncMessageHandled = onSyncMessageHandled
@@ -60,6 +62,7 @@ public actor HocuspocusProvider {
             self.onAwarenessCheck = onAwarenessCheck
             self.onSyncStatusEmitted = onSyncStatusEmitted
             self.transactionRetryWait = transactionRetryWait
+            self.onSocketSend = onSocketSend
         }
     }
 
@@ -90,8 +93,11 @@ public actor HocuspocusProvider {
     private var awarenessTaskID: UUID?
     private let documentObservationGate = RemoteApplyGate()
     private let awarenessOrigin = UUID().uuidString
+    private let pendingFrames = PendingFrames()
+    private var sendTail: Task<Void, Error>?
     private var retryAttempt = 0
     private var disconnectRequested = false
+    private var destroyed = false
 
     public init(
         url: URL,
@@ -159,13 +165,19 @@ public actor HocuspocusProvider {
         Task { [weak self] in await self?.startAwarenessMaintenance() }
     }
 
+    /// Does nothing after `destroy()`.
     public func connect() async throws {
+        guard !destroyed else { return }
         disconnectRequested = false
         retryAttempt = 0
         try await openWebSocket()
     }
 
+    /// Temporarily disconnects, keeping local awareness for a later `connect()`.
+    /// Queued outbound messages are discarded and the socket closes immediately;
+    /// use `destroy()` to tell peers that this client left.
     public func disconnect() {
+        guard !destroyed else { return }
         disconnectRequested = true
         receiveTask?.cancel()
         receiveTask = nil
@@ -174,9 +186,52 @@ public actor HocuspocusProvider {
         awarenessObservation?.cancel()
         awarenessObservation = nil
         clearRemoteAwarenessStates()
+        pendingFrames.removeAll()
+        sendTail = nil
         webSocket?.close()
         webSocket = nil
         connectionStatusContinuation.yield(.disconnected)
+    }
+
+    /// Terminal teardown, matching `destroy()` in @hocuspocus/provider 4.7.
+    /// Clears local awareness with origin `"provider destroy"`, even when it is
+    /// already null, then awaits outstanding sends and that final awareness
+    /// update before closing the socket. Event streams finish afterwards, and
+    /// later calls, including `connect()`, do nothing.
+    public func destroy() async {
+        guard !destroyed else { return }
+        destroyed = true
+        disconnectRequested = true
+        stopAwarenessMaintenance()
+        receiveTask?.cancel()
+        receiveTask = nil
+        documentObservation?.cancel()
+        documentObservation = nil
+        awarenessObservation?.cancel()
+        awarenessObservation = nil
+        flushPendingFrames()
+        let webSocket = self.webSocket
+        self.webSocket = nil
+        if let awareness {
+            awareness.clearLocalState(origin: "provider destroy")
+            if let webSocket {
+                do {
+                    let update = try awareness.encodeUpdate(for: [awareness.clientID])
+                    enqueueSend(HocuspocusMessage.awareness(documentName: name, update).encoded(), on: webSocket)
+                } catch {
+                    logger.error("failed to encode awareness removal: \(error, privacy: .public)")
+                }
+            }
+        }
+        clearRemoteAwarenessStates()
+        _ = await sendTail?.result
+        sendTail = nil
+        webSocket?.close()
+        connectionStatusContinuation.yield(.disconnected)
+        connectionStatusContinuation.finish()
+        isSyncedContinuation.finish()
+        authStatusContinuation.finish()
+        statelessContinuation.finish()
     }
 
     deinit {
@@ -187,11 +242,7 @@ public actor HocuspocusProvider {
         guard let webSocket else {
             return
         }
-        do {
-            try await webSocket.send(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded())
-        } catch {
-            logger.error("failed to send stateless message: \(error, privacy: .public)")
-        }
+        try? await send(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded(), on: webSocket)
     }
 
     private func openWebSocket() async throws {
@@ -213,10 +264,10 @@ public actor HocuspocusProvider {
         )
         try await sendEngineMessages(initialMessages, on: webSocket)
         if let awareness, try awareness.localState() != nil {
-            try await webSocket.send(HocuspocusMessage.awareness(
+            try await send(HocuspocusMessage.awareness(
                 documentName: name,
                 awareness.encodeUpdate(for: [awareness.clientID])
-            ).encoded())
+            ).encoded(), on: webSocket)
         }
 
         guard !disconnectRequested else { return }
@@ -251,6 +302,7 @@ public actor HocuspocusProvider {
         }
         webSocket?.close()
         webSocket = nil
+        sendTail = nil
         clearRemoteAwarenessStates()
         connectionStatusContinuation.yield(.disconnected)
         guard retryAttempt < maxRetries else {
@@ -277,7 +329,7 @@ public actor HocuspocusProvider {
     private func startObservingIfNeeded() throws {
         if documentObservation == nil {
             let onForwarded = testHooks.onDocumentForwarded
-            documentObservation = try document.observeUpdates { [weak self, documentObservationGate] event in
+            documentObservation = try document.observeUpdates { [weak self, documentObservationGate, pendingFrames, name] event in
                 guard !documentObservationGate.isApplyingRemote else {
                     return
                 }
@@ -285,14 +337,20 @@ public actor HocuspocusProvider {
                     return
                 }
                 onForwarded?()
+                do {
+                    pendingFrames.append(try HocuspocusMessage.sync(documentName: name, YSyncMessage.update(update)).encoded())
+                } catch {
+                    logger.error("failed to encode local update: \(error, privacy: .public)")
+                    return
+                }
                 Task { [weak self] in
-                    await self?.sendLocalUpdate(update)
+                    await self?.flushPendingFrames()
                 }
             }
         }
         if awarenessObservation == nil, let awareness {
             let onForwarded = testHooks.onAwarenessForwarded
-            awarenessObservation = try awareness.observeUpdate { [weak self, awareness, awarenessOrigin] event in
+            awarenessObservation = try awareness.observeUpdate { [weak self, awareness, awarenessOrigin, pendingFrames, name] event in
                 guard case let .awarenessUpdate(change) = event else {
                     return
                 }
@@ -302,15 +360,16 @@ public actor HocuspocusProvider {
                     return
                 }
                 onForwarded?()
+                pendingFrames.append(HocuspocusMessage.awareness(documentName: name, update).encoded())
                 Task { [weak self] in
-                    await self?.sendAwareness(update)
+                    await self?.flushPendingFrames()
                 }
             }
         }
     }
 
     private func startAwarenessMaintenance() {
-        guard awarenessTask == nil, let awareness else { return }
+        guard awarenessTask == nil, !destroyed, let awareness else { return }
         let id = UUID()
         awarenessTaskID = id
         let interval = awareness.timing.checkInterval
@@ -329,8 +388,14 @@ public actor HocuspocusProvider {
         }
     }
 
+    private func stopAwarenessMaintenance() {
+        awarenessTaskID = nil
+        awarenessTask?.cancel()
+        awarenessTask = nil
+    }
+
     private func checkAwarenessTimeouts(id: UUID) -> Bool {
-        guard awarenessTaskID == id, !Task.isCancelled else { return false }
+        guard !destroyed, awarenessTaskID == id, !Task.isCancelled else { return false }
         do {
             try awareness?.checkTimeouts()
         } catch {
@@ -421,33 +486,44 @@ public actor HocuspocusProvider {
 
     private func sendAuthToken(on webSocket: any HocuspocusWebSocket) async throws {
         let value = try await token?() ?? ""
-        try await webSocket.send(HocuspocusMessage.auth(
+        try await send(HocuspocusMessage.auth(
             documentName: name,
             .token(value, version: Self.productName)
-        ).encoded())
+        ).encoded(), on: webSocket)
     }
 
-    private func sendLocalUpdate(_ update: YUpdate) async {
-        guard let webSocket else {
-            return
-        }
-        do {
-            let syncMessage = try YSyncMessage.update(update)
-            try await webSocket.send(HocuspocusMessage.sync(documentName: name, syncMessage).encoded())
-        } catch {
-            logger.error("failed to send local update: \(error, privacy: .public)")
+    /// Hands frames captured by observers to the send chain. Frames observed
+    /// while disconnected are dropped; reconnect sync covers document state.
+    private func flushPendingFrames() {
+        let frames = pendingFrames.takeAll()
+        guard let webSocket else { return }
+        for frame in frames {
+            enqueueSend(frame, on: webSocket)
         }
     }
 
-    private func sendAwareness(_ update: YAwarenessUpdate) async {
-        guard let webSocket else {
-            return
+    private func send(_ frame: Data, on webSocket: any HocuspocusWebSocket) async throws {
+        try await enqueueSend(frame, on: webSocket).value
+    }
+
+    /// Writes run one at a time in enqueue order, so awaiting the tail awaits
+    /// every earlier write.
+    @discardableResult
+    private func enqueueSend(_ frame: Data, on webSocket: any HocuspocusWebSocket) -> Task<Void, Error> {
+        let previous = sendTail
+        let onSocketSend = testHooks.onSocketSend
+        let task = Task {
+            _ = await previous?.result
+            await onSocketSend?(frame)
+            do {
+                try await webSocket.send(frame)
+            } catch {
+                logger.error("failed to send message: \(error, privacy: .public)")
+                throw error
+            }
         }
-        do {
-            try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
-        } catch {
-            logger.error("failed to send awareness update: \(error, privacy: .public)")
-        }
+        sendTail = task
+        return task
     }
 
     private func sendKnownAwarenessStates() async throws {
@@ -490,9 +566,9 @@ public actor HocuspocusProvider {
         for message in messages {
             switch message {
             case let .awareness(update, _):
-                try await webSocket.send(HocuspocusMessage.awareness(documentName: name, update).encoded())
+                try await send(HocuspocusMessage.awareness(documentName: name, update).encoded(), on: webSocket)
             default:
-                try await webSocket.send(HocuspocusMessage.sync(documentName: name, message).encoded())
+                try await send(HocuspocusMessage.sync(documentName: name, message).encoded(), on: webSocket)
             }
         }
     }
@@ -535,6 +611,29 @@ private final class RemoteApplyGate: @unchecked Sendable {
             lock.withLock { applyingRemote = false }
         }
         return try body()
+    }
+}
+
+/// Frames encoded by observer callbacks, which run outside the actor. Appending
+/// synchronously keeps their order and lets `destroy()` send every frame
+/// observed before it was called.
+private final class PendingFrames: @unchecked Sendable {
+    private let lock = NSLock()
+    private var frames: [Data] = []
+
+    func append(_ frame: Data) {
+        lock.withLock { frames.append(frame) }
+    }
+
+    func takeAll() -> [Data] {
+        lock.withLock {
+            defer { frames.removeAll() }
+            return frames
+        }
+    }
+
+    func removeAll() {
+        lock.withLock { frames.removeAll() }
     }
 }
 

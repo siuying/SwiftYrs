@@ -274,6 +274,17 @@ let observation = try awareness.observeChange { event in
 }
 ```
 
+### Hocuspocus
+
+`HocuspocusProvider` syncs one document over a Hocuspocus WebSocket. `disconnect()` is temporary: it closes the socket immediately, discards queued messages and keeps local awareness, so `connect()` can resume with the same presence. When the session ends, await `destroy()` instead. It clears local awareness, even when it is already null, waits until outstanding messages and that final awareness update have been written, then closes the socket and finishes the event streams. Peers see the client leave from its own `null` update, without waiting for the server to clean up the closed connection. Later calls do nothing, and a destroyed provider cannot reconnect.
+
+```swift
+let provider = HocuspocusProvider(url: url, name: "room", document: doc, awareness: awareness)
+try await provider.connect()
+// ...
+await provider.destroy()
+```
+
 ### Sync protocol (y-protocols)
 
 `YSyncProtocol.start(awareness:)` and `handle(_:awareness:)` synchronously wait for document contention with a 5 ms retry delay and a one-second deadline per document operation. Only `YError.transactionConflict` is retried; other errors propagate immediately. Calls made inside a transaction or its commit observer can prevent that transaction from finishing, so they throw `transactionConflict` at the deadline instead of hanging. Awareness access stays synchronized independently; retries never hold the awareness lock.
