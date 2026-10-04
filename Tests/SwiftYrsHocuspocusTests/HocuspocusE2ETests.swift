@@ -95,7 +95,7 @@ struct HocuspocusE2ETests {
                 script: "hocuspocus-server.ts",
                 environment: ["HOCUSPOCUS_TRACE": "1"]
             )
-            let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
+            let ready = try await server.waitForLine("server ready", where: { $0["type"] as? String == "ready" })
             let port = try #require(ready["port"] as? Int)
 
             let document = YDoc(clientID: 130)
@@ -107,11 +107,11 @@ struct HocuspocusE2ETests {
             )
             try await withE2EDisconnect([provider]) {
                 try await provider.connect()
-                _ = try await server.waitForLine(where: { awarenessFrame($0, clientID: 130) { $0 != "null" } })
+                _ = try await server.waitForLine("initial awareness", where: { awarenessFrame($0, clientID: 130) { $0 != "null" } })
 
                 await provider.destroy()
-                let close = try await server.waitForLine(where: { $0["type"] as? String == "close" })
-                let removal = try await server.waitForLine(where: { awarenessFrame($0, clientID: 130) { $0 == "null" } })
+                let close = try await server.waitForLine("close", where: { $0["type"] as? String == "close" })
+                let removal = try await server.waitForLine("null awareness", where: { awarenessFrame($0, clientID: 130) { $0 == "null" } })
                 let removalSequence = try #require(removal["sequence"] as? Int)
                 let closeSequence = try #require(close["sequence"] as? Int)
                 #expect(removalSequence < closeSequence)
@@ -212,6 +212,7 @@ private final class JSONLineProcess: @unchecked Sendable {
     }
 
     func waitForLine(
+        _ stage: String = "line",
         timeout: Duration = .seconds(30),
         where predicate: @escaping ([String: Any]) -> Bool
     ) async throws -> [String: Any] {
@@ -228,7 +229,7 @@ private final class JSONLineProcess: @unchecked Sendable {
             guard ContinuousClock.now < deadline else { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        throw E2ETimeout()
+        throw E2ETimeout(stage: stage)
     }
 
     private let teardownQueue = DispatchQueue(label: "JSONLineProcess.teardown")
@@ -283,7 +284,9 @@ private final class JSONLineProcess: @unchecked Sendable {
     }
 }
 
-private struct E2ETimeout: Error {}
+private struct E2ETimeout: Error {
+    var stage = "condition"
+}
 
 private actor E2EValueBox<Value: Sendable> {
     private var storage: Value?

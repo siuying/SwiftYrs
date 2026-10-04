@@ -27,6 +27,7 @@ protocol HocuspocusWebSocket: Sendable {
 public actor HocuspocusProvider {
     public static let productName = "SwiftYrsHocuspocus"
     static let defaultOutboundCapacity = 1024
+    static let defaultTeardownDeadline: Duration = .seconds(5)
     // Match CloudKitProvider's transaction retry policy.
     private static let maxTransactionAttempts = 8
     private static let transactionRetryDelay: Duration = .milliseconds(5)
@@ -43,10 +44,12 @@ public actor HocuspocusProvider {
         let onSyncStatusEmitted: (@Sendable () -> Void)?
         let transactionRetryWait: (@Sendable () async throws -> Void)?
         let onSocketSend: (@Sendable (Data) async -> Void)?
+        let onFrameQueued: (@Sendable (Data) -> Void)?
         let onFrameDiscarded: (@Sendable (Data) -> Void)?
         let onInboundFrame: (@Sendable (Bool) -> Void)?
         let onObserverDrainWait: (@Sendable () -> Void)?
         let onDestroyJoined: (@Sendable () -> Void)?
+        let teardownDeadlineWait: (@Sendable () async -> Void)?
 
         init(
             onTransactionConflict: (@Sendable () async -> Void)? = nil,
@@ -58,10 +61,12 @@ public actor HocuspocusProvider {
             onSyncStatusEmitted: (@Sendable () -> Void)? = nil,
             transactionRetryWait: (@Sendable () async throws -> Void)? = nil,
             onSocketSend: (@Sendable (Data) async -> Void)? = nil,
+            onFrameQueued: (@Sendable (Data) -> Void)? = nil,
             onFrameDiscarded: (@Sendable (Data) -> Void)? = nil,
             onInboundFrame: (@Sendable (Bool) -> Void)? = nil,
             onObserverDrainWait: (@Sendable () -> Void)? = nil,
-            onDestroyJoined: (@Sendable () -> Void)? = nil
+            onDestroyJoined: (@Sendable () -> Void)? = nil,
+            teardownDeadlineWait: (@Sendable () async -> Void)? = nil
         ) {
             self.onTransactionConflict = onTransactionConflict
             self.onSyncMessageHandled = onSyncMessageHandled
@@ -72,10 +77,12 @@ public actor HocuspocusProvider {
             self.onSyncStatusEmitted = onSyncStatusEmitted
             self.transactionRetryWait = transactionRetryWait
             self.onSocketSend = onSocketSend
+            self.onFrameQueued = onFrameQueued
             self.onFrameDiscarded = onFrameDiscarded
             self.onInboundFrame = onInboundFrame
             self.onObserverDrainWait = onObserverDrainWait
             self.onDestroyJoined = onDestroyJoined
+            self.teardownDeadlineWait = teardownDeadlineWait
         }
     }
 
@@ -99,6 +106,7 @@ public actor HocuspocusProvider {
     private let authStatusContinuation: AsyncStream<AuthStatus>.Continuation
     private let statelessContinuation: AsyncStream<String>.Continuation
     private let outboundCapacity: Int
+    private let teardownDeadline: Duration
     private var connection: Connection?
     private var connectionGeneration: UInt64 = 0
     private var observedFrames: ObservedFrames?
@@ -159,6 +167,7 @@ public actor HocuspocusProvider {
         maxDelay: Duration = .seconds(30),
         testHooks: TestHooks = .none,
         outboundCapacity: Int = HocuspocusProvider.defaultOutboundCapacity,
+        teardownDeadline: Duration = HocuspocusProvider.defaultTeardownDeadline,
         webSocketFactory: @escaping @Sendable (URL) -> any HocuspocusWebSocket
     ) {
         self.url = url
@@ -171,6 +180,7 @@ public actor HocuspocusProvider {
         self.maxDelay = maxDelay
         self.testHooks = testHooks
         self.outboundCapacity = outboundCapacity
+        self.teardownDeadline = teardownDeadline
         self.webSocketFactory = webSocketFactory
 
         let connectionStatusPair = AsyncStream.makeStream(of: ConnectionStatus.self)
@@ -220,7 +230,9 @@ public actor HocuspocusProvider {
     /// Clears local awareness with origin `"provider destroy"`, even when it is
     /// already null, then awaits outstanding writes, including that final
     /// awareness update, before closing the socket. Event streams finish
-    /// afterwards. Concurrent callers wait for the same teardown, and later
+    /// afterwards. If the writes have not finished within 5 seconds, it logs,
+    /// discards them and closes the socket anyway, so a stuck socket cannot hang
+    /// the caller. Concurrent callers wait for the same teardown, and later
     /// calls, including `connect()`, do nothing.
     public func destroy() async {
         if let destroyTask {
@@ -237,8 +249,20 @@ public actor HocuspocusProvider {
         awarenessTask?.cancel()
     }
 
+    /// Returns once the message is written to the socket, or dropped because
+    /// the connection closed first. Does nothing while disconnected.
     public func sendStateless(_ payload: String) async {
-        enqueue(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded())
+        guard connection != nil else { return }
+        let receipt = SendReceipt()
+        enqueue(HocuspocusMessage.stateless(documentName: name, payload: payload).encoded(), receipt: receipt)
+        switch await receipt.wait() {
+        case .written:
+            break
+        case .discarded:
+            logger.notice("stateless message dropped because the connection closed")
+        case let .failed(error):
+            logger.error("failed to send stateless message: \(error, privacy: .public)")
+        }
     }
 
     private var isDestroyed: Bool { destroyTask != nil }
@@ -279,8 +303,10 @@ public actor HocuspocusProvider {
         }
         clearRemoteAwarenessStates()
         if let connection {
-            frames.forEach(connection.sender.enqueue)
-            await connection.sender.finish()
+            if await !drain(connection.sender, appending: frames) {
+                logger.notice("destroy gave up waiting for outbound writes after \(self.teardownDeadline, privacy: .public); closing the socket")
+                connection.sender.discard()
+            }
             connection.socket.close()
         }
         connectionStatusContinuation.yield(.disconnected)
@@ -288,6 +314,29 @@ public actor HocuspocusProvider {
         isSyncedContinuation.finish()
         authStatusContinuation.finish()
         statelessContinuation.finish()
+    }
+
+    /// Returns false if the sender has not finished by the teardown deadline.
+    private func drain(_ sender: OutboundSender, appending frames: [OutboundFrame]) async -> Bool {
+        let outcome = AsyncStream.makeStream(of: Bool.self)
+        // On timeout, the caller's `discard()` releases this waiter.
+        Task {
+            await sender.finish(appending: frames)
+            outcome.continuation.yield(true)
+        }
+        let deadline = Task { [teardownDeadline, wait = testHooks.teardownDeadlineWait] in
+            if let wait {
+                await wait()
+            } else {
+                do { try await Task.sleep(for: teardownDeadline) } catch { return }
+            }
+            outcome.continuation.yield(false)
+        }
+        var iterator = outcome.stream.makeAsyncIterator()
+        let drained = await iterator.next() ?? false
+        deadline.cancel()
+        outcome.continuation.finish()
+        return drained
     }
 
     private func openWebSocket() async throws {
@@ -337,6 +386,7 @@ public actor HocuspocusProvider {
             socket: socket,
             capacity: outboundCapacity,
             onSocketSend: testHooks.onSocketSend,
+            onQueued: testHooks.onFrameQueued,
             onDiscard: testHooks.onFrameDiscarded,
             onFailure: { [weak self] _ in
                 Task { [weak self] in
@@ -456,11 +506,11 @@ public actor HocuspocusProvider {
                 guard !clientIDs.isEmpty, let update = try? awareness.encodeUpdate(for: clientIDs) else {
                     return
                 }
-                onForwarded?()
                 observedFrames.append(OutboundFrame(
                     data: HocuspocusMessage.awareness(documentName: name, update).encoded(),
                     kind: .awareness(Set(clientIDs))
                 ))
+                onForwarded?()
                 Task { [weak self] in
                     await self?.flushObservedFrames()
                 }
@@ -616,9 +666,9 @@ public actor HocuspocusProvider {
     }
 
     /// Queues a frame after frames already observed, keeping observation order.
-    private func enqueue(_ data: Data, kind: OutboundFrame.Kind = .message) {
+    private func enqueue(_ data: Data, kind: OutboundFrame.Kind = .message, receipt: SendReceipt? = nil) {
         flushObservedFrames()
-        connection?.sender.enqueue(OutboundFrame(data: data, kind: kind))
+        connection?.sender.enqueue(OutboundFrame(data: data, kind: kind, receipt: receipt))
     }
 
     private func sendKnownAwarenessStates() throws {

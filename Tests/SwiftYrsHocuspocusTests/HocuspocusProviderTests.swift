@@ -1540,12 +1540,14 @@ func droppingConnectionDiscardsQueuedAndHeldWrites(unexpected: Bool) async throw
     let queued = HocuspocusMessage.stateless(documentName: "room-1", payload: "queued").encoded()
     let gate = AsyncSendGate()
     let discarded = AsyncStream.makeStream(of: Data.self)
+    let queuedFrames = AsyncStream.makeStream(of: Data.self)
     let socket = FakeHocuspocusWebSocket()
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: YDoc(clientID: 146), maxRetries: 0,
         testHooks: .init(
             onSocketSend: { frame in if frame == held { await gate.suspend() } },
+            onFrameQueued: { queuedFrames.continuation.yield($0) },
             onFrameDiscarded: { discarded.continuation.yield($0) }
         ),
         webSocketFactory: { _ in socket }
@@ -1556,9 +1558,10 @@ func droppingConnectionDiscardsQueuedAndHeldWrites(unexpected: Bool) async throw
     #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
     for _ in 0..<2 { _ = try await socket.requireSentMessage() }
 
-    await provider.sendStateless("held")
+    let heldSend = Task { await provider.sendStateless("held") }
     try await gate.waitForEntry()
-    await provider.sendStateless("queued")
+    let queuedSend = Task { await provider.sendStateless("queued") }
+    try await nextQueuedFrame(queuedFrames.stream, matching: queued)
     if unexpected {
         socket.failReceive()
     } else {
@@ -1566,9 +1569,11 @@ func droppingConnectionDiscardsQueuedAndHeldWrites(unexpected: Bool) async throw
     }
     #expect(try await nextTestEvent(provider.connectionStatus) == .disconnected)
     #expect(try await nextTestEvent(discarded.stream) == queued)
+    try await testTaskValue(queuedSend)
     #expect(socket.closeCount() == 1)
     gate.open()
     #expect(try await nextTestEvent(discarded.stream) == held)
+    try await testTaskValue(heldSend)
     #expect(socket.sentMessageCount() == 0)
     await provider.destroy()
 }
@@ -1618,13 +1623,16 @@ func slowSocketCoalescesQueuedAwarenessToLatestState() async throws {
     let gate = AsyncSendGate()
     let armed = LockedCounter()
     let forwarded = AsyncStream.makeStream(of: Void.self)
+    let queuedFrames = AsyncStream.makeStream(of: Data.self)
+    let marker = HocuspocusMessage.stateless(documentName: "room-1", payload: "marker").encoded()
     let socket = FakeHocuspocusWebSocket()
     let provider = HocuspocusProvider(
         url: URL(string: "wss://example.com/collaboration")!,
         name: "room-1", document: document, awareness: awareness,
         testHooks: .init(
             onAwarenessForwarded: { forwarded.continuation.yield(()) },
-            onSocketSend: { _ in if armed.value() == 1, armed.increment() == 2 { await gate.suspend() } }
+            onSocketSend: { _ in if armed.value() == 1, armed.increment() == 2 { await gate.suspend() } },
+            onFrameQueued: { queuedFrames.continuation.yield($0) }
         ),
         webSocketFactory: { _ in socket }
     )
@@ -1640,8 +1648,10 @@ func slowSocketCoalescesQueuedAwarenessToLatestState() async throws {
         try awareness.setLocalState(["n": n])
         _ = try await nextTestEvent(forwarded.stream)
     }
-    await provider.sendStateless("marker")
+    let markerSend = Task { await provider.sendStateless("marker") }
+    try await nextQueuedFrame(queuedFrames.stream, matching: marker)
     gate.open()
+    try await testTaskValue(markerSend)
 
     var states: [Int] = []
     for _ in 0..<2 {
@@ -1688,7 +1698,7 @@ func slowSocketBacklogBeyondCapacityReconnectsAndResyncs() async throws {
     #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
     for _ in 0..<2 { _ = try await firstSocket.requireSentMessage() }
 
-    await provider.sendStateless("held")
+    let heldSend = Task { await provider.sendStateless("held") }
     try await gate.waitForEntry()
     for index in 0..<5 {
         try document.write { transaction in try transaction.insert("\(index)", into: text, at: 0) }
@@ -1709,8 +1719,172 @@ func slowSocketBacklogBeyondCapacityReconnectsAndResyncs() async throws {
     repeat { dropped.append(try await nextTestEvent(discarded.stream)) } while dropped.last != held
     // Five document updates and the trigger; the held write is discarded last.
     #expect(dropped.count == 7)
+    try await testTaskValue(heldSend)
     #expect(firstSocket.sentMessageCount() == 0)
     await provider.destroy()
+}
+
+
+@Test
+func destroyDrainsFullQueueWithoutOverflowing() async throws {
+    let document = YDoc(clientID: 73)
+    let text = try document.text(named: "body")
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    try awareness.setLocalState(["name": "leaving"])
+    let held = HocuspocusMessage.stateless(documentName: "room-1", payload: "held").encoded()
+    let gate = AsyncSendGate()
+    let queuedFrames = AsyncStream.makeStream(of: Data.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness, maxRetries: 0,
+        testHooks: .init(
+            onSocketSend: { frame in if frame == held { await gate.suspend() } },
+            onFrameQueued: { queuedFrames.continuation.yield($0) }
+        ),
+        outboundCapacity: 3,
+        webSocketFactory: { _ in socket }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    for _ in 0..<3 { _ = try await socket.requireSentMessage() }
+
+    let heldSend = Task { await provider.sendStateless("held") }
+    try await gate.waitForEntry()
+    for index in 0..<2 {
+        try document.write { transaction in try transaction.insert("\(index)", into: text, at: 0) }
+    }
+    let filler = HocuspocusMessage.stateless(documentName: "room-1", payload: "filler").encoded()
+    let fillerSend = Task { await provider.sendStateless("filler") }
+    // The filler flushes both observed updates first, filling the queue to capacity.
+    try await nextQueuedFrame(queuedFrames.stream, matching: filler)
+    let removal = HocuspocusMessage.awareness(
+        documentName: "room-1", YAwarenessUpdate(Data([1, 73, 2, 4] + Array("null".utf8)))
+    ).encoded()
+    let destroyed = Task { await provider.destroy() }
+    // Teardown queues the removal behind the full queue while the write is held.
+    try await nextQueuedFrame(queuedFrames.stream, matching: removal)
+    gate.open()
+    try await testTaskValue(destroyed)
+    try await testTaskValue(heldSend)
+    try await testTaskValue(fillerSend)
+
+    #expect(socket.closeCount() == 1)
+    #expect(try await socket.requireSentMessage() == held)
+    var updates = 0
+    for _ in 0..<2 {
+        if case .sync(_, .update) = try HocuspocusMessage.decode(try await socket.requireSentMessage()) { updates += 1 }
+    }
+    #expect(updates == 2)
+    #expect(try await socket.requireSentMessage() == filler)
+    #expect(try await socket.requireSentMessage() == removal)
+    #expect(socket.sentMessageCount() == 0)
+}
+
+@Test
+func sendStatelessReturnsAfterWriteSoDisconnectKeepsMessage() async throws {
+    let message = HocuspocusMessage.stateless(documentName: "room-1", payload: "bye").encoded()
+    let gate = AsyncSendGate()
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: YDoc(clientID: 74),
+        testHooks: .init(onSocketSend: { frame in if frame == message { await gate.suspend() } }),
+        webSocketFactory: { _ in socket }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    for _ in 0..<2 { _ = try await socket.requireSentMessage() }
+
+    let session = Task { () -> Int in
+        await provider.sendStateless("bye")
+        await provider.disconnect()
+        return socket.closeCount()
+    }
+    try await gate.waitForEntry()
+    #expect(socket.closeCount() == 0)
+    gate.open()
+    #expect(try await testTaskValue(session) == 1)
+    #expect(try await socket.requireSentMessage() == message)
+    #expect(socket.sentMessageCount() == 0)
+}
+
+@Test
+func sendStatelessReturnsWhenWriteFails() async throws {
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: YDoc(clientID: 75), maxRetries: 0,
+        webSocketFactory: { _ in socket }
+    )
+    try await provider.connect()
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connecting)
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
+    for _ in 0..<2 { _ = try await socket.requireSentMessage() }
+
+    socket.failSends()
+    try await testTaskValue(Task { await provider.sendStateless("lost") })
+    #expect(try await nextTestEvent(provider.connectionStatus) == .disconnected)
+    #expect(socket.closeCount() == 1)
+    #expect(socket.sentMessageCount() == 0)
+    await provider.destroy()
+}
+
+
+@Test
+func destroyReturnsAtTeardownDeadlineWhenWriteNeverCompletes() async throws {
+    let document = YDoc(clientID: 76)
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    try awareness.setLocalState(["name": "leaving"])
+    let stuck = HocuspocusMessage.stateless(documentName: "room-1", payload: "stuck").encoded()
+    let removal = HocuspocusMessage.awareness(
+        documentName: "room-1", YAwarenessUpdate(Data([1, 76, 2, 4] + Array("null".utf8)))
+    ).encoded()
+    // The stuck write is released only when the test ends.
+    let writeGate = AsyncSendGate()
+    let deadlineGate = AsyncSendGate()
+    let queuedFrames = AsyncStream.makeStream(of: Data.self)
+    let discarded = AsyncStream.makeStream(of: Data.self)
+    let joined = AsyncStream.makeStream(of: Void.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(
+            onSocketSend: { frame in if frame == stuck { await writeGate.suspend() } },
+            onFrameQueued: { queuedFrames.continuation.yield($0) },
+            onFrameDiscarded: { discarded.continuation.yield($0) },
+            onDestroyJoined: { joined.continuation.yield(()) },
+            teardownDeadlineWait: { await deadlineGate.suspend() }
+        ),
+        webSocketFactory: { _ in socket }
+    )
+    defer {
+        deadlineGate.open()
+        writeGate.open()
+    }
+    try await provider.connect()
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connecting)
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
+    for _ in 0..<3 { _ = try await socket.requireSentMessage() }
+
+    let stuckSend = Task { await provider.sendStateless("stuck") }
+    try await writeGate.waitForEntry()
+    let first = Task { await provider.destroy() }
+    try await nextQueuedFrame(queuedFrames.stream, matching: removal)
+    try await deadlineGate.waitForEntry()
+    let second = Task { await provider.destroy() }
+    _ = try await nextTestEvent(joined.stream)
+    #expect(socket.closeCount() == 0)
+
+    deadlineGate.open()
+    try await testTaskValue(first)
+    try await testTaskValue(second)
+    #expect(socket.closeCount() == 1)
+    #expect(try await nextTestEvent(discarded.stream) == removal)
+    try await testTaskValue(stuckSend)
+    #expect(try await withTestTimeout { await finishedStatuses(provider) } == [.disconnected])
+    #expect(socket.sentMessageCount() == 0)
 }
 
 }
@@ -1723,10 +1897,16 @@ private final class FakeHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sen
     private var receiveContinuations: [CheckedContinuation<Data, Error>] = []
     private var pendingError: Error?
     private var closes = 0
+    private var failingSends = false
 
     func resume() {}
 
-    func send(_ data: Data) {
+    func failSends() {
+        queue.sync { failingSends = true }
+    }
+
+    func send(_ data: Data) throws {
+        if queue.sync(execute: { failingSends }) { throw TestWebSocketError() }
         let continuation: CheckedContinuation<Data, Error>? = queue.sync {
             if !sendContinuations.isEmpty {
                 return sendContinuations.removeFirst().continuation
@@ -2053,4 +2233,9 @@ private func finishedStatuses(_ provider: HocuspocusProvider) async -> [Connecti
     var statuses: [ConnectionStatus] = []
     for await status in provider.connectionStatus { statuses.append(status) }
     return statuses
+}
+
+// Skips frames queued earlier, such as a held write, until `frame` is queued.
+private func nextQueuedFrame(_ stream: AsyncStream<Data>, matching frame: Data) async throws {
+    while try await nextTestEvent(stream) != frame {}
 }

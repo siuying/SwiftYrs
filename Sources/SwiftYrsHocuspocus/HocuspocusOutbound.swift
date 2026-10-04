@@ -13,13 +13,49 @@ struct OutboundFrame: Sendable {
 
     let data: Data
     let kind: Kind
+    var receipt: SendReceipt? = nil
+}
+
+/// Resolves once when its frame is written, discarded or fails to write.
+final class SendReceipt: @unchecked Sendable {
+    enum Outcome: Sendable, Equatable {
+        case written
+        case discarded
+        case failed(String)
+    }
+
+    private let lock = NSLock()
+    private var outcome: Outcome?
+    private var waiters: [CheckedContinuation<Outcome, Never>] = []
+
+    func complete(_ outcome: Outcome) {
+        let waiters: [CheckedContinuation<Outcome, Never>] = lock.withLock {
+            guard self.outcome == nil else { return [] }
+            self.outcome = outcome
+            defer { self.waiters.removeAll() }
+            return self.waiters
+        }
+        waiters.forEach { $0.resume(returning: outcome) }
+    }
+
+    func wait() async -> Outcome {
+        await withCheckedContinuation { continuation in
+            let resolved: Outcome? = lock.withLock {
+                if let outcome { return outcome }
+                waiters.append(continuation)
+                return nil
+            }
+            if let resolved { continuation.resume(returning: resolved) }
+        }
+    }
 }
 
 /// Writes one connection's frames in order, one at a time. Disconnecting
 /// discards queued frames; destroying finishes them. Queued awareness frames
-/// are coalesced, and exceeding `capacity` queued frames fails the connection
-/// so that reconnect sync recovers the document instead of buffering without
-/// limit.
+/// are coalesced. Exceeding `capacity` queued frames while open fails the
+/// connection, so that reconnect sync recovers the document instead of
+/// buffering without limit. Frames added by `finish(appending:)` bypass the
+/// capacity, because teardown cannot reconnect.
 final class OutboundSender: @unchecked Sendable {
     enum Failure: Sendable {
         case overflow
@@ -36,23 +72,27 @@ final class OutboundSender: @unchecked Sendable {
     private let socket: any HocuspocusWebSocket
     private let capacity: Int
     private let onSocketSend: (@Sendable (Data) async -> Void)?
+    private let onQueued: (@Sendable (Data) -> Void)?
     private let onDiscard: (@Sendable (Data) -> Void)?
     private let onFailure: @Sendable (Failure) -> Void
     private var queue: [OutboundFrame] = []
     private var state = State.open
     private var writing = false
+    private var inFlight: OutboundFrame?
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(
         socket: any HocuspocusWebSocket,
         capacity: Int,
         onSocketSend: (@Sendable (Data) async -> Void)?,
+        onQueued: (@Sendable (Data) -> Void)? = nil,
         onDiscard: (@Sendable (Data) -> Void)?,
         onFailure: @escaping @Sendable (Failure) -> Void
     ) {
         self.socket = socket
         self.capacity = capacity
         self.onSocketSend = onSocketSend
+        self.onQueued = onQueued
         self.onDiscard = onDiscard
         self.onFailure = onFailure
     }
@@ -65,12 +105,7 @@ final class OutboundSender: @unchecked Sendable {
                 dropped = [frame]
                 return false
             }
-            if case let .awareness(clients) = frame.kind {
-                queue.removeAll { queued in
-                    guard case let .awareness(queuedClients) = queued.kind else { return false }
-                    return queuedClients.isSubset(of: clients)
-                }
-            }
+            coalesceQueuedAwareness(for: frame)
             guard queue.count < capacity else {
                 dropped = queue + [frame]
                 queue.removeAll()
@@ -80,11 +115,10 @@ final class OutboundSender: @unchecked Sendable {
                 return false
             }
             queue.append(frame)
-            guard !writing else { return false }
-            writing = true
-            return true
+            return claimWriter()
         }
-        dropped.forEach { onDiscard?($0.data) }
+        if dropped.isEmpty { onQueued?(frame.data) }
+        drop(dropped)
         if overflowed {
             logger.error("outbound queue exceeded \(self.capacity) frames; reconnecting")
             onFailure(.overflow)
@@ -94,24 +128,46 @@ final class OutboundSender: @unchecked Sendable {
         }
     }
 
-    /// Drops queued frames. A write already handed to the socket may complete,
-    /// but nothing else is written.
+    /// Drops queued frames and resolves every receipt, including the one for
+    /// a write already handed to the socket, which may still complete. Nothing
+    /// else is written, and `finish` callers stop waiting.
     func discard() {
-        let dropped: [OutboundFrame] = lock.withLock {
+        let (dropped, inFlight, waiters): ([OutboundFrame], OutboundFrame?, [CheckedContinuation<Void, Never>]) = lock.withLock {
             state = .closed
-            defer { queue.removeAll() }
-            resumeIdleWaitersIfIdle()
-            return queue
+            defer {
+                queue.removeAll()
+                idleWaiters.removeAll()
+            }
+            return (queue, self.inFlight, idleWaiters)
         }
-        dropped.forEach { onDiscard?($0.data) }
+        drop(dropped)
+        inFlight?.receipt?.complete(.discarded)
+        waiters.forEach { $0.resume() }
     }
 
-    /// Stops accepting frames and waits until queued frames are written or the
-    /// sender is closed.
-    func finish() async {
+    /// Stops accepting frames, appends `frames` without the capacity limit and
+    /// waits until everything queued is written or the sender is closed.
+    func finish(appending frames: [OutboundFrame]) async {
+        var rejected: [OutboundFrame] = []
+        let startWriter: Bool = lock.withLock {
+            guard state == .open else {
+                rejected = frames
+                return false
+            }
+            state = .finishing
+            for frame in frames {
+                coalesceQueuedAwareness(for: frame)
+                queue.append(frame)
+            }
+            return claimWriter()
+        }
+        if rejected.isEmpty { frames.forEach { onQueued?($0.data) } }
+        drop(rejected)
+        if startWriter {
+            Task { await self.drain() }
+        }
         await withCheckedContinuation { continuation in
             let idle = lock.withLock {
-                if state == .open { state = .finishing }
                 guard writing else { return true }
                 idleWaiters.append(continuation)
                 return false
@@ -124,13 +180,15 @@ final class OutboundSender: @unchecked Sendable {
         while let frame = nextFrame() {
             await onSocketSend?(frame.data)
             guard isWritable() else {
-                onDiscard?(frame.data)
+                drop([frame])
                 continue
             }
             do {
                 try await socket.send(frame.data)
+                frame.receipt?.complete(.written)
             } catch {
                 logger.error("failed to send message: \(error, privacy: .public)")
+                frame.receipt?.complete(.failed(String(describing: error)))
                 fail()
             }
         }
@@ -138,12 +196,15 @@ final class OutboundSender: @unchecked Sendable {
 
     private func nextFrame() -> OutboundFrame? {
         lock.withLock {
+            inFlight = nil
             guard state != .closed, !queue.isEmpty else {
                 writing = false
                 resumeIdleWaitersIfIdle()
                 return nil
             }
-            return queue.removeFirst()
+            let frame = queue.removeFirst()
+            inFlight = frame
+            return frame
         }
     }
 
@@ -158,8 +219,38 @@ final class OutboundSender: @unchecked Sendable {
             defer { queue.removeAll() }
             return wasClosed ? [] : queue
         }
-        dropped.forEach { onDiscard?($0.data) }
+        drop(dropped)
         onFailure(.write)
+    }
+
+    private func drop(_ frames: [OutboundFrame]) {
+        for frame in frames {
+            onDiscard?(frame.data)
+            frame.receipt?.complete(.discarded)
+        }
+    }
+
+    // Call with `lock` held.
+    private func coalesceQueuedAwareness(for frame: OutboundFrame) {
+        guard case let .awareness(clients) = frame.kind else { return }
+        let replaced = queue.filter { queued in
+            guard case let .awareness(queuedClients) = queued.kind else { return false }
+            return queuedClients.isSubset(of: clients)
+        }
+        guard !replaced.isEmpty else { return }
+        queue.removeAll { queued in
+            guard case let .awareness(queuedClients) = queued.kind else { return false }
+            return queuedClients.isSubset(of: clients)
+        }
+        // Replaced frames are superseded rather than written.
+        replaced.forEach { $0.receipt?.complete(.discarded) }
+    }
+
+    // Call with `lock` held. Returns true when the caller must start the writer.
+    private func claimWriter() -> Bool {
+        guard !writing, !queue.isEmpty else { return false }
+        writing = true
+        return true
     }
 
     // Call with `lock` held. The writer clears `writing` once the queue is
