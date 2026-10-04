@@ -1243,6 +1243,7 @@ func destroyAwaitsFinalAwarenessWriteBeforeClosing(localStateIsNil: Bool) async 
         }),
         webSocketFactory: { _ in socket }
     )
+    defer { gate.open() }
     try await provider.connect()
     for _ in 0..<(localStateIsNil ? 2 : 3) { _ = try await socket.requireSentMessage() }
 
@@ -1251,7 +1252,7 @@ func destroyAwaitsFinalAwarenessWriteBeforeClosing(localStateIsNil: Bool) async 
     #expect(socket.closeCount() == 0)
     #expect(socket.sentMessageCount() == 0)
     gate.open()
-    try await withTestTimeout { await destroyed.value }
+    try await testTaskValue(destroyed)
     #expect(socket.closeCount() == 1)
     #expect(try await socket.requireSentMessage() == removal)
     #expect(socket.sentMessageCount() == 0)
@@ -1352,13 +1353,12 @@ func destroyAfterSocketIsGoneAndRepeatedDestroyCloseOnce() async throws {
         name: "room-1", document: document, awareness: awareness, maxRetries: 0,
         webSocketFactory: { _ in droppedSocket }
     )
-    var statuses = dropped.connectionStatus.makeAsyncIterator()
     try await dropped.connect()
-    #expect(await statuses.next() == .connecting)
-    #expect(await statuses.next() == .connected)
+    #expect(try await nextTestEvent(dropped.connectionStatus) == .connecting)
+    #expect(try await nextTestEvent(dropped.connectionStatus) == .connected)
     for _ in 0..<3 { _ = try await droppedSocket.requireSentMessage() }
     droppedSocket.failReceive()
-    #expect(await statuses.next() == .disconnected)
+    #expect(try await nextTestEvent(dropped.connectionStatus) == .disconnected)
     await dropped.destroy()
     await dropped.destroy()
     #expect(droppedSocket.closeCount() == 1)
@@ -1383,6 +1383,334 @@ func destroyAfterSocketIsGoneAndRepeatedDestroyCloseOnce() async throws {
     #expect(try awareness.localState() == nil)
     #expect(socket.closeCount() == 1)
     #expect(socket.sentMessageCount() == 0)
+}
+
+
+@Test
+func handshakeSuspendedInTokenRetrievalWritesNothingAfterDestroy() async throws {
+    let tokenGate = AsyncSendGate()
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: YDoc(clientID: 140),
+        token: { await tokenGate.suspend(); return "late" },
+        webSocketFactory: { _ in socket }
+    )
+    defer { tokenGate.open() }
+    let connecting = Task { () -> Bool in
+        do { try await provider.connect(); return true } catch { return false }
+    }
+    try await tokenGate.waitForEntry()
+    await provider.destroy()
+    #expect(socket.closeCount() == 1)
+    tokenGate.open()
+    #expect(try await testTaskValue(connecting))
+    #expect(socket.sentMessageCount() == 0)
+}
+
+@Test
+func staleHandshakeContinuationDoesNotWriteToNewConnection() async throws {
+    let tokenGate = AsyncSendGate()
+    let tokenCalls = LockedCounter()
+    let firstSocket = FakeHocuspocusWebSocket()
+    let secondSocket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([firstSocket, secondSocket])
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: YDoc(clientID: 141),
+        token: {
+            if tokenCalls.increment() == 1 { await tokenGate.suspend() }
+            return "token"
+        },
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    defer { tokenGate.open() }
+    let stale = Task { () -> Bool in
+        do { try await provider.connect(); return true } catch { return false }
+    }
+    try await tokenGate.waitForEntry()
+    await provider.disconnect()
+    try await provider.connect()
+    for _ in 0..<2 { _ = try await secondSocket.requireSentMessage() }
+
+    tokenGate.open()
+    #expect(try await testTaskValue(stale))
+    await provider.sendStateless("marker")
+    #expect(try HocuspocusMessage.decode(try await secondSocket.requireSentMessage()) == .stateless(
+        documentName: "room-1", payload: "marker"
+    ))
+    #expect(firstSocket.sentMessageCount() == 0)
+    #expect(secondSocket.sentMessageCount() == 0)
+    await provider.destroy()
+}
+
+@Test
+func inboundFrameReceivedDuringDestroyIsNotApplied() async throws {
+    let document = YDoc(clientID: 70)
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    try awareness.setLocalState(["name": "leaving"])
+    let removal = HocuspocusMessage.awareness(
+        documentName: "room-1", YAwarenessUpdate(Data([1, 70, 2, 4] + Array("null".utf8)))
+    ).encoded()
+    let gate = AsyncSendGate()
+    let inbound = AsyncStream.makeStream(of: Bool.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(
+            onSocketSend: { frame in if frame == removal { await gate.suspend() } },
+            onInboundFrame: { inbound.continuation.yield($0) }
+        ),
+        webSocketFactory: { _ in socket }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    for _ in 0..<3 { _ = try await socket.requireSentMessage() }
+
+    let destroyed = Task { await provider.destroy() }
+    try await gate.waitForEntry()
+    let remote = YAwareness(document: YDoc(clientID: 71))
+    try remote.setLocalState(["name": "late"])
+    socket.receive(HocuspocusMessage.awareness(documentName: "room-1", try remote.encodeUpdate()).encoded())
+    socket.receive(HocuspocusMessage.stateless(documentName: "room-1", payload: "late").encoded())
+    #expect(try await nextTestEvent(inbound.stream) == false)
+    #expect(try awareness.state(for: 71) == nil)
+    gate.open()
+    try await testTaskValue(destroyed)
+    #expect(try await socket.requireSentMessage() == removal)
+    #expect(try awareness.state(for: 71) == nil)
+}
+
+@Test
+func destroyWaitsForObserverCallbackAlreadyRunning() async throws {
+    let document = YDoc(clientID: 144)
+    let text = try document.text(named: "body")
+    let callbackGate = TestThreadGate()
+    let armed = LockedCounter()
+    let drainWait = AsyncStream.makeStream(of: Void.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document,
+        testHooks: .init(
+            onDocumentForwarded: { if armed.value() > 0 { callbackGate.enterAndWait() } },
+            onObserverDrainWait: { drainWait.continuation.yield(()) }
+        ),
+        webSocketFactory: { _ in socket }
+    )
+    defer { callbackGate.open() }
+    try await provider.connect()
+    for _ in 0..<2 { _ = try await socket.requireSentMessage() }
+
+    _ = armed.increment()
+    let written = AsyncStream.makeStream(of: Void.self)
+    Thread {
+        do {
+            try document.write { transaction in try transaction.insert("late", into: text, at: 0) }
+        } catch {
+            Issue.record("Failed to write: \(error)")
+        }
+        written.continuation.yield(())
+    }.start()
+    try await callbackGate.waitForEntry()
+
+    let destroyed = Task { await provider.destroy() }
+    _ = try await nextTestEvent(drainWait.stream)
+    #expect(socket.closeCount() == 0)
+    callbackGate.open()
+    try await testTaskValue(destroyed)
+    _ = try await nextTestEvent(written.stream)
+    #expect(socket.closeCount() == 1)
+    let message = try HocuspocusMessage.decode(try await socket.requireSentMessage())
+    guard case let .sync(_, .update(update, _)) = message else {
+        Issue.record("Expected the observed update before close, got \(message)")
+        return
+    }
+    let peer = YDoc(clientID: 145)
+    let peerText = try peer.text(named: "body")
+    try peer.write { transaction in try transaction.apply(update) }
+    #expect(try peer.read { transaction in try transaction.string(from: peerText) } == "late")
+    #expect(socket.sentMessageCount() == 0)
+}
+
+@Test(arguments: [false, true])
+func droppingConnectionDiscardsQueuedAndHeldWrites(unexpected: Bool) async throws {
+    let held = HocuspocusMessage.stateless(documentName: "room-1", payload: "held").encoded()
+    let queued = HocuspocusMessage.stateless(documentName: "room-1", payload: "queued").encoded()
+    let gate = AsyncSendGate()
+    let discarded = AsyncStream.makeStream(of: Data.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: YDoc(clientID: 146), maxRetries: 0,
+        testHooks: .init(
+            onSocketSend: { frame in if frame == held { await gate.suspend() } },
+            onFrameDiscarded: { discarded.continuation.yield($0) }
+        ),
+        webSocketFactory: { _ in socket }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connecting)
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
+    for _ in 0..<2 { _ = try await socket.requireSentMessage() }
+
+    await provider.sendStateless("held")
+    try await gate.waitForEntry()
+    await provider.sendStateless("queued")
+    if unexpected {
+        socket.failReceive()
+    } else {
+        await provider.disconnect()
+    }
+    #expect(try await nextTestEvent(provider.connectionStatus) == .disconnected)
+    #expect(try await nextTestEvent(discarded.stream) == queued)
+    #expect(socket.closeCount() == 1)
+    gate.open()
+    #expect(try await nextTestEvent(discarded.stream) == held)
+    #expect(socket.sentMessageCount() == 0)
+    await provider.destroy()
+}
+
+@Test
+func concurrentDestroyCallersWaitForTeardown() async throws {
+    let document = YDoc(clientID: 72)
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    try awareness.setLocalState(["name": "leaving"])
+    let removal = HocuspocusMessage.awareness(
+        documentName: "room-1", YAwarenessUpdate(Data([1, 72, 2, 4] + Array("null".utf8)))
+    ).encoded()
+    let gate = AsyncSendGate()
+    let joined = AsyncStream.makeStream(of: Void.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(
+            onSocketSend: { frame in if frame == removal { await gate.suspend() } },
+            onDestroyJoined: { joined.continuation.yield(()) }
+        ),
+        webSocketFactory: { _ in socket }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    for _ in 0..<3 { _ = try await socket.requireSentMessage() }
+
+    let first = Task { await provider.destroy() }
+    try await gate.waitForEntry()
+    let second = Task { () -> Int in
+        await provider.destroy()
+        return socket.closeCount()
+    }
+    _ = try await nextTestEvent(joined.stream)
+    #expect(socket.closeCount() == 0)
+    gate.open()
+    #expect(try await testTaskValue(second) == 1)
+    try await testTaskValue(first)
+    #expect(try await socket.requireSentMessage() == removal)
+}
+
+@Test
+func slowSocketCoalescesQueuedAwarenessToLatestState() async throws {
+    let document = YDoc(clientID: 148)
+    let awareness = YAwareness(document: document, timing: .init(checkInterval: .seconds(3600)))
+    let gate = AsyncSendGate()
+    let armed = LockedCounter()
+    let forwarded = AsyncStream.makeStream(of: Void.self)
+    let socket = FakeHocuspocusWebSocket()
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, awareness: awareness,
+        testHooks: .init(
+            onAwarenessForwarded: { forwarded.continuation.yield(()) },
+            onSocketSend: { _ in if armed.value() == 1, armed.increment() == 2 { await gate.suspend() } }
+        ),
+        webSocketFactory: { _ in socket }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    for _ in 0..<2 { _ = try await socket.requireSentMessage() }
+
+    _ = armed.increment()
+    try awareness.setLocalState(["n": 0])
+    _ = try await nextTestEvent(forwarded.stream)
+    try await gate.waitForEntry()
+    for n in 1...50 {
+        try awareness.setLocalState(["n": n])
+        _ = try await nextTestEvent(forwarded.stream)
+    }
+    await provider.sendStateless("marker")
+    gate.open()
+
+    var states: [Int] = []
+    for _ in 0..<2 {
+        let message = try HocuspocusMessage.decode(try await socket.requireSentMessage())
+        guard case let .awareness(_, update) = message else {
+            Issue.record("Expected awareness, got \(message)")
+            return
+        }
+        let peer = YAwareness(document: YDoc(clientID: 149))
+        try peer.applyUpdate(update)
+        states.append(try #require((peer.state(for: 148) as? [String: Any])?["n"] as? Int))
+    }
+    #expect(states == [0, 50])
+    #expect(try HocuspocusMessage.decode(try await socket.requireSentMessage()) == .stateless(
+        documentName: "room-1", payload: "marker"
+    ))
+    #expect(socket.sentMessageCount() == 0)
+    await provider.destroy()
+}
+
+@Test
+func slowSocketBacklogBeyondCapacityReconnectsAndResyncs() async throws {
+    let document = YDoc(clientID: 150)
+    let text = try document.text(named: "body")
+    let held = HocuspocusMessage.stateless(documentName: "room-1", payload: "held").encoded()
+    let gate = AsyncSendGate()
+    let discarded = AsyncStream.makeStream(of: Data.self)
+    let firstSocket = FakeHocuspocusWebSocket()
+    let secondSocket = FakeHocuspocusWebSocket()
+    let socketFactory = FakeSocketFactory([firstSocket, secondSocket])
+    let provider = HocuspocusProvider(
+        url: URL(string: "wss://example.com/collaboration")!,
+        name: "room-1", document: document, maxRetries: 1, initialDelay: .zero,
+        testHooks: .init(
+            onSocketSend: { frame in if frame == held { await gate.suspend() } },
+            onFrameDiscarded: { discarded.continuation.yield($0) }
+        ),
+        outboundCapacity: 4,
+        webSocketFactory: { _ in socketFactory.next() }
+    )
+    defer { gate.open() }
+    try await provider.connect()
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connecting)
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
+    for _ in 0..<2 { _ = try await firstSocket.requireSentMessage() }
+
+    await provider.sendStateless("held")
+    try await gate.waitForEntry()
+    for index in 0..<5 {
+        try document.write { transaction in try transaction.insert("\(index)", into: text, at: 0) }
+    }
+    await provider.sendStateless("trigger")
+    #expect(try await nextTestEvent(provider.connectionStatus) == .disconnected)
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connecting)
+    #expect(try await nextTestEvent(provider.connectionStatus) == .connected)
+    var reconnect: [HocuspocusMessage] = []
+    for _ in 0..<2 { reconnect.append(try HocuspocusMessage.decode(try await secondSocket.requireSentMessage())) }
+    #expect(reconnect.contains { message in
+        if case .sync(documentName: "room-1", .syncStep1) = message { return true }
+        return false
+    })
+    #expect(firstSocket.closeCount() == 1)
+    gate.open()
+    var dropped: [Data] = []
+    repeat { dropped.append(try await nextTestEvent(discarded.stream)) } while dropped.last != held
+    // Five document updates and the trigger; the held write is discarded last.
+    #expect(dropped.count == 7)
+    #expect(firstSocket.sentMessageCount() == 0)
+    await provider.destroy()
 }
 
 }

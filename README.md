@@ -276,7 +276,9 @@ let observation = try awareness.observeChange { event in
 
 ### Hocuspocus
 
-`HocuspocusProvider` syncs one document over a Hocuspocus WebSocket. `disconnect()` is temporary: it closes the socket immediately, discards queued messages and keeps local awareness, so `connect()` can resume with the same presence. When the session ends, await `destroy()` instead. It clears local awareness, even when it is already null, waits until outstanding messages and that final awareness update have been written, then closes the socket and finishes the event streams. Peers see the client leave from its own `null` update, without waiting for the server to clean up the closed connection. Later calls do nothing, and a destroyed provider cannot reconnect.
+`HocuspocusProvider` syncs one document over a Hocuspocus WebSocket. `disconnect()` is temporary: it closes the socket immediately, discards queued messages and keeps local awareness, so `connect()` can resume with the same presence. When the session ends, await `destroy()` instead. It clears local awareness, even when it is already null, and stops processing inbound messages. It then waits for queued messages and that final awareness update to be handed to the socket, and only then closes the socket and finishes the event streams. This is an awaited write attempt. It does not confirm that the server or peers applied the update; the server may still report the departure through its own cleanup of the closed connection. Concurrent calls wait for the same teardown. Later calls do nothing, and a destroyed provider cannot reconnect.
+
+While a slow socket has writes pending, queued awareness updates are coalesced to the latest state. If more than 1024 messages are waiting, the provider drops the queue and reconnects; sync on reconnect restores document state.
 
 ```swift
 let provider = HocuspocusProvider(url: url, name: "room", document: doc, awareness: awareness)

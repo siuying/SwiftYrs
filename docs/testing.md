@@ -41,11 +41,14 @@ CloudKit destruction, native unsubscribe may prevent the callback entirely, so
 there is no callback event to await; the test drives the same scheduling entry
 directly, checks that no debounce task exists, and attempts an explicit flush.
 
-Hocuspocus destroy tests suspend the final awareness write through the
-`onSocketSend` test hook and check that the socket is not closed while the write
-is suspended. With `HOCUSPOCUS_TRACE=1`, the test server prints received awareness
-frames and the close event in wire order, so the end-to-end test can compare
-their sequence numbers.
+Hocuspocus lifecycle tests suspend socket writes, token retrieval or an observer
+callback through test hooks, and release them in `defer` blocks. Tests await the
+suppressed event itself, such as a dropped inbound frame, a discarded frame, a
+joined `destroy()` call or destroy waiting for accepted callbacks.
+`testTaskValue` awaits a task through a stream so the shared watchdog can
+interrupt it. With `HOCUSPOCUS_TRACE=1`, the test server prints received
+awareness frames and the close event in wire order, so the end-to-end test can
+compare their sequence numbers.
 
 `withE2EProcesses` owns subprocess shutdown and awaits it on dedicated queues.
 Do not add fire-and-forget shutdown defers inside it. Pipe readability handlers
