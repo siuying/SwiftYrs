@@ -58,11 +58,14 @@ rl.on("line", line => {
 	const command = JSON.parse(trimmed);
 	switch (command.type) {
 	case "insertText":
-		text.insert(command.index ?? text.length, command.text);
+		text.insert(command.index ?? text.length, command.text.repeat(command.repeat ?? 1));
 		emit({ type: "ok" });
 		break;
 	case "getText":
 		emit({ type: "text", text: text.toString() });
+		break;
+	case "getTextLength":
+		emit({ type: "textLength", length: text.length });
 		break;
 	case "setAwareness":
 		awareness.setLocalState(command.state);

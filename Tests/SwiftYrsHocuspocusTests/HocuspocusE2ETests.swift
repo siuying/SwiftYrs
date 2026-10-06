@@ -88,6 +88,80 @@ struct HocuspocusE2ETests {
         }
     }
 
+    /// URLSessionWebSocketTask rejects messages over 1 MiB by default, so the
+    /// first sync of a large document must not depend on that default.
+    @Test
+    func providerSyncsDocumentLargerThanDefaultWebSocketMessageLimit() async throws {
+        try await withE2EProcesses { processes in
+            let server = try processes.node(script: "hocuspocus-server.ts")
+            let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
+            let port = try #require(ready["port"] as? Int)
+            let url = URL(string: "ws://127.0.0.1:\(port)")!
+            let length = 2 * 1024 * 1024
+
+            let peer = try processes.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-large"])
+            _ = try await peer.waitForLine(where: { $0["type"] as? String == "synced" })
+            _ = try await peer.request(["type": "insertText", "text": "x", "repeat": length], responseType: "ok")
+
+            let document = YDoc(clientID: 140)
+            let text = try document.text(named: "body")
+            let provider = HocuspocusProvider(url: url, name: "room-large", document: document)
+            try await withE2EDisconnect([provider]) {
+                try await provider.connect()
+                try await e2eExpectEventually {
+                    // The provider may still be applying the sync in a write transaction.
+                    do {
+                        return try document.read { transaction in
+                            try transaction.length(of: text) == UInt32(length)
+                        }
+                    } catch YError.transactionConflict {
+                        return false
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    func messageOverMaximumSizeSurfacesErrorInsteadOfReconnecting() async throws {
+        try await withE2EProcesses { processes in
+            let server = try processes.node(script: "hocuspocus-server.ts")
+            let ready = try await server.waitForLine(where: { $0["type"] as? String == "ready" })
+            let port = try #require(ready["port"] as? Int)
+            let url = URL(string: "ws://127.0.0.1:\(port)")!
+            let limit = 64 * 1024
+
+            let peer = try processes.node(script: "hocuspocus-peer.ts", arguments: [url.absoluteString, "room-too-large"])
+            _ = try await peer.waitForLine(where: { $0["type"] as? String == "synced" })
+            _ = try await peer.request(["type": "insertText", "text": "x", "repeat": 4 * limit], responseType: "ok")
+
+            let provider = HocuspocusProvider(
+                url: url,
+                name: "room-too-large",
+                document: YDoc(clientID: 141),
+                initialDelay: .milliseconds(10),
+                maxDelay: .milliseconds(10),
+                maximumMessageSize: limit
+            )
+            let statuses = E2EValueBox<[ConnectionStatus]>()
+            let statusTask = Task {
+                for await status in provider.connectionStatus {
+                    await statuses.set((await statuses.value ?? []) + [status])
+                }
+            }
+            defer { statusTask.cancel() }
+            try await withE2EDisconnect([provider]) {
+                try await provider.connect()
+                var errors = provider.errors.makeAsyncIterator()
+                #expect(await errors.next() == .messageTooLarge(limit: limit))
+
+                // Reconnecting would only download the same message again.
+                try await Task.sleep(for: .milliseconds(500))
+                #expect(await statuses.value == [.connecting, .connected, .disconnected])
+            }
+        }
+    }
+
     @Test
     func destroyDeliversAwarenessRemovalBeforeClose() async throws {
         try await withE2EProcesses { processes in

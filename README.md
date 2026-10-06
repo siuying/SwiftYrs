@@ -280,6 +280,8 @@ let observation = try awareness.observeChange { event in
 
 `sendStateless(_:)` returns after its message is written to the socket, or after the connection drops it. While a slow socket has writes pending, queued awareness updates are coalesced to the latest state. If more than 1024 messages are waiting, the provider drops the queue and reconnects; sync on reconnect restores document state.
 
+Incoming WebSocket messages may be up to `maximumMessageSize` bytes, 64 MiB by default; `URLSessionWebSocketTask` alone allows only 1 MiB, which the first sync of a large document exceeds. If the server sends a larger message, the provider yields `HocuspocusProviderError.messageTooLarge(limit:)` on `errors` and disconnects without reconnecting, because the same sync would fail again.
+
 ```swift
 let provider = HocuspocusProvider(url: url, name: "room", document: doc, awareness: awareness)
 try await provider.connect()
