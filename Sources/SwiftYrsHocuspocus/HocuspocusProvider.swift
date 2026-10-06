@@ -15,6 +15,14 @@ public enum AuthStatus: Equatable, Sendable {
     case denied(reason: String)
 }
 
+public enum HocuspocusProviderError: Error, Equatable, Sendable {
+    /// The server sent a message larger than the provider's
+    /// `maximumMessageSize`. The provider disconnects instead of reconnecting,
+    /// because the same sync would fail again; raise the limit and call
+    /// `connect()` to retry.
+    case messageTooLarge(limit: Int)
+}
+
 protocol HocuspocusWebSocket: Sendable {
     func resume()
     func send(_ data: Data) async throws
@@ -26,6 +34,9 @@ protocol HocuspocusWebSocket: Sendable {
 /// With null or disabled awareness, an idle server may close the connection with 4408.
 public actor HocuspocusProvider {
     public static let productName = "SwiftYrsHocuspocus"
+    /// URLSessionWebSocketTask's own default is 1 MiB, which a document's first
+    /// sync message easily exceeds.
+    public static let defaultMaximumMessageSize = 64 * 1024 * 1024
     static let defaultOutboundCapacity = 1024
     static let defaultTeardownDeadline: Duration = .seconds(5)
     // Match CloudKitProvider's transaction retry policy.
@@ -90,6 +101,8 @@ public actor HocuspocusProvider {
     public nonisolated let isSynced: AsyncStream<Bool>
     public nonisolated let authStatus: AsyncStream<AuthStatus>
     public nonisolated let stateless: AsyncStream<String>
+    /// Errors that stop the provider from reconnecting on its own.
+    public nonisolated let errors: AsyncStream<HocuspocusProviderError>
 
     private let url: URL
     private let name: String
@@ -105,6 +118,7 @@ public actor HocuspocusProvider {
     private let isSyncedContinuation: AsyncStream<Bool>.Continuation
     private let authStatusContinuation: AsyncStream<AuthStatus>.Continuation
     private let statelessContinuation: AsyncStream<String>.Continuation
+    private let errorsContinuation: AsyncStream<HocuspocusProviderError>.Continuation
     private let outboundCapacity: Int
     private let teardownDeadline: Duration
     private var connection: Connection?
@@ -139,7 +153,8 @@ public actor HocuspocusProvider {
         token: (@Sendable () async throws -> String)? = nil,
         maxRetries: Int = .max,
         initialDelay: Duration = .seconds(1),
-        maxDelay: Duration = .seconds(30)
+        maxDelay: Duration = .seconds(30),
+        maximumMessageSize: Int = HocuspocusProvider.defaultMaximumMessageSize
     ) {
         self.init(
             url: url,
@@ -151,7 +166,7 @@ public actor HocuspocusProvider {
             initialDelay: initialDelay,
             maxDelay: maxDelay,
             webSocketFactory: { url in
-                URLSessionHocuspocusWebSocket(url: url)
+                URLSessionHocuspocusWebSocket(url: url, maximumMessageSize: maximumMessageSize)
             }
         )
     }
@@ -198,6 +213,10 @@ public actor HocuspocusProvider {
         let statelessPair = AsyncStream.makeStream(of: String.self)
         self.stateless = statelessPair.stream
         self.statelessContinuation = statelessPair.continuation
+
+        let errorsPair = AsyncStream.makeStream(of: HocuspocusProviderError.self)
+        self.errors = errorsPair.stream
+        self.errorsContinuation = errorsPair.continuation
         Task { [weak self] in await self?.startAwarenessMaintenance() }
     }
 
@@ -314,6 +333,7 @@ public actor HocuspocusProvider {
         isSyncedContinuation.finish()
         authStatusContinuation.finish()
         statelessContinuation.finish()
+        errorsContinuation.finish()
     }
 
     /// Returns false if the sender has not finished by the teardown deadline.
@@ -425,6 +445,11 @@ public actor HocuspocusProvider {
             }
         } catch is CancellationError {
         } catch is StaleConnection {
+        } catch let error as HocuspocusProviderError {
+            guard isCurrent(generation) else { return }
+            logger.error("stopping without reconnecting: \(String(describing: error), privacy: .public)")
+            errorsContinuation.yield(error)
+            disconnect()
         } catch {
             await reconnectAfterUnexpectedDisconnect(generation: generation)
         }
@@ -759,8 +784,9 @@ private final class RemoteApplyGate: @unchecked Sendable {
 private final class URLSessionHocuspocusWebSocket: HocuspocusWebSocket, @unchecked Sendable {
     private let task: URLSessionWebSocketTask
 
-    init(url: URL) {
+    init(url: URL, maximumMessageSize: Int) {
         self.task = URLSession.shared.webSocketTask(with: url)
+        task.maximumMessageSize = maximumMessageSize
     }
 
     func resume() {
@@ -772,7 +798,12 @@ private final class URLSessionHocuspocusWebSocket: HocuspocusWebSocket, @uncheck
     }
 
     func receive() async throws -> Data {
-        let message = try await task.receive()
+        let message: URLSessionWebSocketTask.Message
+        do {
+            message = try await task.receive()
+        } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(EMSGSIZE) {
+            throw HocuspocusProviderError.messageTooLarge(limit: task.maximumMessageSize)
+        }
         switch message {
         case let .data(data):
             return data

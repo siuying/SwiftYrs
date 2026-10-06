@@ -6,6 +6,9 @@ import SwiftYrs
 /// surfaces decoded frames. Subscribe/announce on open is the provider's job,
 /// driven through `onOpen`.
 actor SignalingConnection {
+    /// URLSessionWebSocketTask's own default is 1 MiB.
+    static let maximumMessageSize = 64 * 1024 * 1024
+
     private let url: URL
     private let initialDelay: Duration
     private let maxDelay: Duration
@@ -71,6 +74,7 @@ actor SignalingConnection {
             let openObserver = WebSocketOpenObserver()
             let session = URLSession(configuration: .default, delegate: openObserver, delegateQueue: nil)
             let task = session.webSocketTask(with: url)
+            task.maximumMessageSize = Self.maximumMessageSize
             self.task = task
             task.resume()
             guard await Self.waitForOpen(openObserver) else {
@@ -121,6 +125,9 @@ actor SignalingConnection {
                 if let message = try? SignalingCodec.decode(data, cipher: cipher) {
                     await onMessage(message)
                 }
+            } catch let error as NSError where error.domain == NSPOSIXErrorDomain && error.code == Int(EMSGSIZE) {
+                webRTCLogger.error("signaling \(self.url.absoluteString, privacy: .public) message exceeded \(Self.maximumMessageSize) bytes")
+                return sawFrame
             } catch {
                 return sawFrame
             }
