@@ -280,7 +280,108 @@ func compactionKeepsRowsAnotherSessionAppended() throws {
     #expect(try reloadedString(at: databaseURL, documentName: "shared") == "ab")
 }
 
+@Test
+func closeWaitsForASynchronousCompactionAndRejectsLaterOnes() async throws {
+    let store = try SQLiteStore(Connection(temporaryDatabaseURL().path))
+    let options = try SQLiteProviderOptions(autoCompact: false)
+    let doc = YDoc()
+    let provider = SQLiteProvider(documentName: "manual", doc: doc, store: store, options: options)
+    let gate = Gate()
+    provider.testHooks.willCommitCompaction = { gate.pass() }
+    try provider.start()
+    try insert("a", into: doc, named: "body")
+
+    DispatchQueue.global().async {
+        try? provider.compact()
+    }
+    try await nextTestEvent(gate.entered)
+
+    let closed = Flag()
+    let close = Task { () -> String? in
+        defer { closed.set() }
+        return await errorDescription { try await provider.close() }
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!closed.isSet)
+
+    gate.open()
+    #expect(try await testTaskValue(close) == nil)
+    #expect(try updateKinds(store, documentName: "manual") == ["snapshot"])
+
+    // A compaction after close must not resurrect a removed document.
+    #expect(throws: SQLiteProviderError.destroyed) {
+        try provider.compact()
+    }
+    try store.removeDocument(named: "manual")
+    #expect(try updateRowCount(store, documentName: "manual") == 0)
+}
+
+@Test
+func concurrentClosesShareOneTeardown() async throws {
+    let store = try SQLiteStore(Connection(temporaryDatabaseURL().path))
+    let provider = SQLiteProvider(documentName: "shared-close", doc: YDoc(), store: store)
+    let gate = Gate()
+    provider.testHooks.willReleaseDocument = { gate.pass() }
+    try provider.start()
+
+    let first = Task { await errorDescription { try await provider.close() } }
+    try await nextTestEvent(gate.entered)
+    let secondClosed = Flag()
+    let second = Task { () -> String? in
+        defer { secondClosed.set() }
+        return await errorDescription { try await provider.close() }
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!secondClosed.isSet)
+
+    gate.open()
+    #expect(try await testTaskValue(second) == nil)
+    // When either call returns, the document name is already released.
+    let reloaded = SQLiteProvider(documentName: "shared-close", doc: YDoc(), store: store)
+    try reloaded.start()
+    defer { reloaded.destroy() }
+    #expect(try await testTaskValue(first) == nil)
+}
+
+@Test
+func aFailureAfterInsertingDoesNotDuplicateRows() async throws {
+    let store = try SQLiteStore(Connection(temporaryDatabaseURL().path))
+    let doc = YDoc()
+    let provider = SQLiteProvider(documentName: "count", doc: doc, store: store)
+    let failOnce = FailOnce()
+    provider.testHooks.willCountUpdates = { try failOnce.check() }
+    try provider.start()
+    defer { provider.destroy() }
+
+    try insert("a", into: doc, named: "body")
+    #expect(provider.pendingUpdateCount == 1)
+    #expect(try updateRowCount(store, documentName: "count") == 0)
+
+    try await provider.flush()
+
+    #expect(provider.pendingUpdateCount == 0)
+    #expect(try updateRowCount(store, documentName: "count") == 1)
+    #expect(try await nextWriteResults(provider, count: 2) == ["failed 1", "persisted 1"])
+}
+
 // MARK: - Helpers
+
+private struct InjectedFailure: Error {}
+
+private final class FailOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+
+    func check() throws {
+        let shouldFail = lock.withLock {
+            defer { failed = true }
+            return !failed
+        }
+        if shouldFail {
+            throw InjectedFailure()
+        }
+    }
+}
 
 private func nextWriteResults(_ provider: SQLiteProvider, count: Int) async throws -> [String] {
     var results: [String] = []

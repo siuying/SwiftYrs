@@ -167,6 +167,8 @@ public final class SQLiteProvider: @unchecked Sendable {
     private let writeResultsContinuation: AsyncStream<SQLiteWriteResult>.Continuation
     private var observation: Observation?
     private var destroyed = false
+    /// The teardown every `close()` call awaits.
+    private var closeTask: Task<Error?, Never>?
     private let lifecycleLock = NSLock()
 
     // Write state, guarded by `stateLock`.
@@ -178,6 +180,8 @@ public final class SQLiteProvider: @unchecked Sendable {
     /// so they are the only rows its compaction may replace.
     private var knownRowIDs: Set<Int64> = []
     private var autoCompactionScheduled = false
+    /// Set when `close()` starts; later `compact()` calls are rejected.
+    private var closing = false
 
     /// Serializes write attempts, so updates reach the store in observed order.
     private let writeLock = NSLock()
@@ -264,10 +268,27 @@ public final class SQLiteProvider: @unchecked Sendable {
     ///
     /// Rows another session wrote in the meantime are kept, even if that
     /// session compacted them, so a stale compaction cannot drop newer content.
+    /// Throws `SQLiteProviderError.destroyed` once `close()` has started.
     public func compact() throws {
         compactionLock.lock()
         defer { compactionLock.unlock() }
+        // Checked under the lock `close()` joins, so an admitted compaction
+        // always finishes before the document is released.
+        guard !stateLock.withLock({ closing }) else {
+            throw SQLiteProviderError.destroyed
+        }
+        try compactLocked()
+    }
 
+    /// Runs on the background queue, which `close()` drains, so it skips the
+    /// `closing` check.
+    private func compactOnBackgroundQueue() throws {
+        compactionLock.lock()
+        defer { compactionLock.unlock() }
+        try compactLocked()
+    }
+
+    private func compactLocked() throws {
         // Capture the rows before encoding: the snapshot then covers each of them.
         let replacedRowIDs = stateLock.withLock { knownRowIDs }
         let snapshot = try encodeSnapshot()
@@ -289,7 +310,27 @@ public final class SQLiteProvider: @unchecked Sendable {
     /// Runs `compact()` off the caller's thread, after any auto-compaction in
     /// progress, and returns once the snapshot is on disk.
     public func compactAndWait() async throws {
-        try await onBackgroundQueue { try self.compact() }
+        // Admitted and queued atomically with `closing`, so a compaction
+        // admitted before `close()` runs ahead of its flush.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let admitted = stateLock.withLock { () -> Bool in
+                guard !closing else {
+                    return false
+                }
+                backgroundQueue.async {
+                    do {
+                        try self.compactOnBackgroundQueue()
+                        continuation.resume()
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+                return true
+            }
+            if !admitted {
+                continuation.resume(throwing: SQLiteProviderError.destroyed)
+            }
+        }
     }
 
     /// Writes every update observed so far and waits for auto-compaction.
@@ -316,35 +357,37 @@ public final class SQLiteProvider: @unchecked Sendable {
         try store.removeMetadata(forKey: key, documentName: documentName)
     }
 
-    /// Stops observing the document, then waits for pending writes and any
-    /// compaction in progress before releasing the document name and
-    /// finishing the streams.
+    /// Stops observing the document, then waits for pending writes and for
+    /// compaction in progress, including a synchronous `compact()`, before
+    /// releasing the document name and finishing the streams.
     ///
     /// Throws `SQLiteFlushError` if updates are still unsaved. The provider is
     /// closed either way; the error carries the updates, so the caller can
-    /// store them another way. Later calls only wait for writes and compaction.
+    /// store them another way. Concurrent and later calls await the same
+    /// teardown and its result.
     public func close() async throws {
-        let wasStarted = stopIngress()
-        var flushError: Error?
-        do {
-            try await flush()
-        } catch {
-            flushError = error
+        let task = lifecycleLock.withLock { () -> Task<Error?, Never> in
+            if let closeTask {
+                return closeTask
+            }
+            let wasStarted = beginTeardownLocked()
+            stateLock.withLock { closing = true }
+            let task = Task { await self.performClose(wasStarted: wasStarted) }
+            closeTask = task
+            return task
         }
-        if let wasStarted {
-            finishTeardown(wasStarted: wasStarted)
-        }
-        if let flushError {
-            throw flushError
+        if let error = await task.value {
+            throw error
         }
     }
 
     /// Stops observing the document and releases the document name at once.
     /// It does not wait for writes or compaction; use `close()` for that.
     public func destroy() {
-        guard let wasStarted = stopIngress() else {
+        guard let wasStarted = lifecycleLock.withLock({ beginTeardownLocked() }) else {
             return
         }
+        cancelObservation()
         finishTeardown(wasStarted: wasStarted)
     }
 
@@ -352,22 +395,45 @@ public final class SQLiteProvider: @unchecked Sendable {
         destroy()
     }
 
-    /// Returns whether the provider was started, or nil if it was already destroyed.
-    private func stopIngress() -> Bool? {
-        lifecycleLock.lock()
+    /// Marks the provider destroyed and stops accepting updates. Call with
+    /// `lifecycleLock` held. Returns whether the provider was started, or nil
+    /// if it was already destroyed.
+    private func beginTeardownLocked() -> Bool? {
         guard !destroyed else {
-            lifecycleLock.unlock()
             return nil
         }
         destroyed = true
         let wasStarted = isStarted
         isStarted = false
-        lifecycleLock.unlock()
-
         stateLock.withLock { acceptingUpdates = false }
+        return wasStarted
+    }
+
+    private func cancelObservation() {
         observation?.cancel()
         observation = nil
-        return wasStarted
+    }
+
+    private func performClose(wasStarted: Bool?) async -> Error? {
+        if wasStarted != nil {
+            cancelObservation()
+        }
+        var flushError: Error?
+        do {
+            try await flush()
+        } catch {
+            flushError = error
+        }
+        // Join a synchronous compact() admitted before `closing` was set.
+        try? await onBackgroundQueue {
+            self.compactionLock.lock()
+            self.compactionLock.unlock()
+        }
+        if let wasStarted {
+            testHooks.willReleaseDocument?()
+            finishTeardown(wasStarted: wasStarted)
+        }
+        return flushError
     }
 
     private func finishTeardown(wasStarted: Bool) {
@@ -416,6 +482,9 @@ public final class SQLiteProvider: @unchecked Sendable {
         do {
             let (rowIDs, count) = try store.sync { connection in
                 var rowIDs: [Int64] = []
+                var count = 0
+                // Count inside the transaction: a failure after commit would
+                // retry rows that are already on disk.
                 try connection.transaction {
                     for pending in batch {
                         rowIDs.append(try SQLiteSchema.append(
@@ -425,8 +494,10 @@ public final class SQLiteProvider: @unchecked Sendable {
                             on: connection
                         ))
                     }
+                    try testHooks.willCountUpdates?()
+                    count = try SQLiteSchema.updateCount(documentName: documentName, on: connection)
                 }
-                return (rowIDs, try SQLiteSchema.updateCount(documentName: documentName, on: connection))
+                return (rowIDs, count)
             }
             let shouldCompact = stateLock.withLock { () -> Bool in
                 // Only this method removes pending updates, so the batch is still the prefix.
@@ -462,7 +533,7 @@ public final class SQLiteProvider: @unchecked Sendable {
             guard let self else { return }
             defer { self.stateLock.withLock { self.autoCompactionScheduled = false } }
             do {
-                try self.compact()
+                try self.compactOnBackgroundQueue()
             } catch {
                 self.errorsContinuation.yield(error)
             }
@@ -498,6 +569,8 @@ public final class SQLiteProvider: @unchecked Sendable {
 struct SQLiteProviderTestHooks {
     var willWriteUpdates: (@Sendable () -> Void)?
     var willCommitCompaction: (@Sendable () -> Void)?
+    var willCountUpdates: (@Sendable () throws -> Void)?
+    var willReleaseDocument: (@Sendable () -> Void)?
 }
 
 enum SQLiteSchema {
