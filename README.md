@@ -348,6 +348,28 @@ let resolved = try doc.read { txn in
 // resolved.index == 7  (shifted by the 2 inserted chars)
 ```
 
+### SQLite persistence
+
+`SwiftYrsSQLite` keeps a document in a SQLite database you open with SQLite.swift. `SQLiteProvider` loads the stored updates into the document on `start()` and appends each update the document emits. One `SQLiteStore` can serve many documents.
+
+Each update is written inside the document's update observer, so after a successful `write` returns, the update is on disk. If the write fails, the update stays pending in memory. The next observed update and every `flush()` retry the pending updates in order, oldest first, in one transaction, until they are written or the provider closes. `pendingUpdateCount` tells you how many are unsaved. `writeResults` yields one `SQLiteWriteResult` per attempt, `.persisted(sequence:)` or `.failed(sequence:error:)`, where the sequence numbers observed updates from 1. While nobody reads it, the stream keeps only the newest 256 results. The error from a failed attempt also goes to `errors`, as before.
+
+`flush()` returns once every update observed so far is on disk and any auto-compaction has finished. If updates are still unsaved, it throws `SQLiteFlushError`; its `unsavedUpdates` carry each update's sequence and bytes. For a durable close, await `close()` instead of calling `destroy()`. It stops observing the document, writes pending updates, waits for a compaction in progress, then releases the document name. If updates are still unsaved, it throws the same error after closing, so you can store the bytes another way. `destroy()` still releases at once without waiting.
+
+```swift
+let store = try SQLiteStore(Connection(path))
+let provider = SQLiteProvider(documentName: "notes", doc: doc, store: store)
+try provider.start()
+// ...
+do {
+    try await provider.close()
+} catch let error as SQLiteFlushError {
+    saveElsewhere(error.unsavedUpdates.map(\.update))
+}
+```
+
+Compaction replaces the stored rows with one snapshot of the document. It runs automatically once a document has `compactThreshold` rows (500 by default), or when you call `compact()` or `try await compactAndWait()`. A provider replaces only the rows it loaded or wrote, which its document already contains. Rows that another connection wrote in the meantime stay, even if that connection compacted them, so a stale compaction cannot overwrite newer content.
+
 ### Subdocuments
 
 A subdocument is a document nested in a parent's map — the shape behind a

@@ -151,7 +151,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SwiftYrsSQLiteTests",
-            dependencies: ["SwiftYrsSQLite"]
+            dependencies: ["SwiftYrsSQLite", "SwiftYrsTestSupport"]
         ),
     ] + hocuspocusTargets + webRTCTargets,
 )

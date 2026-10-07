@@ -181,14 +181,9 @@ func compactionPreservesRowsWrittenAfterCapturedBoundary() throws {
     let doc = YDoc()
     try insert("a", into: doc, named: "body")
     let snapshot = try doc.encodeStateAsUpdateV1()
-    let compactedThroughID = try store.sync { connection -> Int64? in
+    let capturedRowID = try store.sync { connection -> Int64 in
         try SQLiteSchema.create(on: connection)
-        try SQLiteSchema.append(snapshot, kind: .incremental, documentName: "race", on: connection)
-        return try SQLiteSchema.maxUpdateID(documentName: "race", on: connection)
-    }
-    guard let compactedThroughID else {
-        Issue.record("Expected an update row before compaction")
-        return
+        return try SQLiteSchema.append(snapshot, kind: .incremental, documentName: "race", on: connection)
     }
 
     try insert("b", into: doc, named: "body")
@@ -198,7 +193,7 @@ func compactionPreservesRowsWrittenAfterCapturedBoundary() throws {
         try SQLiteSchema.compact(
             documentName: "race",
             snapshot: snapshot,
-            compactedThroughID: compactedThroughID,
+            replacing: [capturedRowID],
             on: connection
         )
     }
@@ -303,14 +298,14 @@ func startupRejectsInvalidPersistedRows() throws {
     }
 }
 
-private func temporaryDatabaseURL() throws -> URL {
+func temporaryDatabaseURL() throws -> URL {
     let directory = FileManager.default.temporaryDirectory
         .appendingPathComponent("SwiftYrsSQLiteTests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory.appendingPathComponent("db.sqlite")
 }
 
-private func insert(_ value: String, into doc: YDoc, named name: String) throws {
+func insert(_ value: String, into doc: YDoc, named name: String) throws {
     let text = try doc.text(named: name)
     let length = try doc.read { transaction in
         try transaction.length(of: text)
@@ -320,7 +315,7 @@ private func insert(_ value: String, into doc: YDoc, named name: String) throws 
     }
 }
 
-private func string(in doc: YDoc, named name: String) throws -> String {
+func string(in doc: YDoc, named name: String) throws -> String {
     let text = try doc.text(named: name)
     return try doc.read { transaction in
         try transaction.string(from: text)
@@ -335,7 +330,7 @@ private func updateRowCount(_ connection: Connection, documentName: String) thro
     )
 }
 
-private func updateRowCount(_ store: SQLiteStore, documentName: String) throws -> Int {
+func updateRowCount(_ store: SQLiteStore, documentName: String) throws -> Int {
     try store.sync { connection in
         try updateRowCount(connection, documentName: documentName)
     }
@@ -350,7 +345,7 @@ private func updateKinds(_ connection: Connection, documentName: String) throws 
     }
 }
 
-private func updateKinds(_ store: SQLiteStore, documentName: String) throws -> [String] {
+func updateKinds(_ store: SQLiteStore, documentName: String) throws -> [String] {
     try store.sync { connection in
         try updateKinds(connection, documentName: documentName)
     }
