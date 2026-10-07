@@ -437,7 +437,7 @@ private func flushError(_ provider: SQLiteProvider) async throws -> SQLiteFlushE
 
 /// Makes every update insert fail inside SQLite, as a full disk or a
 /// read-only database would.
-private func failUpdateInserts(_ store: SQLiteStore) throws {
+func failUpdateInserts(_ store: SQLiteStore) throws {
     try store.sync { connection in
         try connection.execute(
             """
@@ -448,7 +448,7 @@ private func failUpdateInserts(_ store: SQLiteStore) throws {
     }
 }
 
-private func allowUpdateInserts(_ store: SQLiteStore) throws {
+func allowUpdateInserts(_ store: SQLiteStore) throws {
     try store.sync { connection in
         try connection.execute("DROP TRIGGER swiftyrs_test_fail_inserts")
     }
@@ -528,7 +528,7 @@ private final class Gate: @unchecked Sendable {
     }
 }
 
-private final class Flag: @unchecked Sendable {
+final class Flag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
 
@@ -537,7 +537,7 @@ private final class Flag: @unchecked Sendable {
     func set() { lock.withLock { value = true } }
 }
 
-private func errorDescription(_ body: () async throws -> Void) async -> String? {
+func errorDescription(_ body: () async throws -> Void) async -> String? {
     do {
         try await body()
         return nil

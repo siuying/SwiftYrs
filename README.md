@@ -368,6 +368,8 @@ do {
 }
 ```
 
+To make one particular update durable, use `flush(through:)`. The provider numbers each update its observer receives, from 1, starting after `start()`; `observedSequence` is the latest number. Observers on the same document see updates in the same order, but in no fixed order among themselves. So when your own observer sees an update, the provider may not have numbered it yet. To map your updates to sequences, read `observedSequence` when you register your observer, while no write is in progress, and count your updates from there. `flush(through: n)` waits until update `n` has been observed, then flushes. It throws `SQLiteProviderError.destroyed` if the provider closes before update `n` arrives, and `CancellationError` if you cancel the wait.
+
 Compaction replaces the stored rows with one snapshot of the document. It runs automatically once a document has `compactThreshold` rows (500 by default), or when you call `compact()` or `try await compactAndWait()`. A provider replaces only the rows it loaded or wrote, which its document already contains. Rows that another connection wrote in the meantime stay, even if that connection compacted them, so a stale compaction cannot overwrite newer content.
 
 ### Subdocuments

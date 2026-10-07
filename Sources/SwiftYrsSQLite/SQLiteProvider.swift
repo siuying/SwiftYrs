@@ -160,6 +160,21 @@ public final class SQLiteProvider: @unchecked Sendable {
         stateLock.withLock { pendingUpdates.count }
     }
 
+    /// The sequence number of the latest observed update, or 0 before the first.
+    ///
+    /// The provider numbers each `.update` event its own document observer
+    /// receives, from 1, in the order they arrive. Numbering starts with the
+    /// first update after `start()` registers that observer. The stored rows
+    /// `start()` applies are not numbered, and nothing is numbered once
+    /// `close()` or `destroy()` begins. Every update observer on the document
+    /// sees the same updates in the same order. A caller with its own observer
+    /// can therefore read this value when it registers that observer, while
+    /// no other write is in progress, and then count its own updates from
+    /// there.
+    public var observedSequence: UInt64 {
+        stateLock.withLock { nextSequence - 1 }
+    }
+
     var testHooks = SQLiteProviderTestHooks()
 
     private let syncedContinuation: AsyncStream<Bool>.Continuation
@@ -186,6 +201,9 @@ public final class SQLiteProvider: @unchecked Sendable {
     private var autoCompactionScheduled = false
     /// Set when `close()` starts; later `compact()` calls are rejected.
     private var closing = false
+    /// Set when teardown stops ingress; no later update is numbered.
+    private var observationEnded = false
+    private var sequenceWaiters: [SequenceWaiter] = []
 
     /// Serializes write attempts, so updates reach the store in observed order.
     private let writeLock = NSLock()
@@ -349,6 +367,22 @@ public final class SQLiteProvider: @unchecked Sendable {
         try await onBackgroundQueue {}
     }
 
+    /// Waits until the provider has observed the update numbered `sequence`,
+    /// then writes every update observed so far, as `flush()` does.
+    ///
+    /// See `observedSequence` for how updates are numbered. A sequence that
+    /// is already observed, including 0, flushes at once. A caller that
+    /// acknowledges a write only once it is durable can use this from its
+    /// own update observer, where the provider may not have seen the update
+    /// yet. Throws `SQLiteFlushError` if updates remain unsaved,
+    /// `SQLiteProviderError.destroyed` if `close()` or `destroy()` begins
+    /// before the update is observed, and `CancellationError` if the task is
+    /// cancelled while waiting.
+    public func flush(through sequence: UInt64) async throws {
+        try await waitUntilObserved(sequence)
+        try await flush()
+    }
+
     public func setMetadata(_ value: Data, forKey key: String) throws {
         try store.setMetadata(value, forKey: key, documentName: documentName)
     }
@@ -380,6 +414,7 @@ public final class SQLiteProvider: @unchecked Sendable {
             closeTask = task
             return task
         }
+        failSequenceWaiters()
         if let error = await task.value {
             throw error
         }
@@ -391,6 +426,7 @@ public final class SQLiteProvider: @unchecked Sendable {
         guard let wasStarted = lifecycleLock.withLock({ beginTeardownLocked() }) else {
             return
         }
+        failSequenceWaiters()
         cancelObservation()
         testHooks.willFinishDestroy?()
         finishTeardown(wasStarted: wasStarted)
@@ -410,8 +446,57 @@ public final class SQLiteProvider: @unchecked Sendable {
         destroyed = true
         let wasStarted = isStarted
         isStarted = false
-        stateLock.withLock { acceptingUpdates = false }
+        stateLock.withLock {
+            acceptingUpdates = false
+            observationEnded = true
+        }
         return wasStarted
+    }
+
+    /// Fails waiters for sequences that can no longer be observed. Runs after
+    /// `observationEnded` is set, so no waiter registers later.
+    private func failSequenceWaiters() {
+        let waiters = stateLock.withLock { () -> [SequenceWaiter] in
+            defer { sequenceWaiters = [] }
+            return sequenceWaiters
+        }
+        for waiter in waiters {
+            waiter.continuation.resume(throwing: SQLiteProviderError.destroyed)
+        }
+    }
+
+    private func waitUntilObserved(_ sequence: UInt64) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                // Nil means the waiter registered and resumes later.
+                let outcome = stateLock.withLock { () -> Swift.Result<Void, Error>? in
+                    if sequence < nextSequence {
+                        return .success(())
+                    }
+                    if observationEnded {
+                        return .failure(SQLiteProviderError.destroyed)
+                    }
+                    // Checked under the lock the cancellation handler takes.
+                    if Task.isCancelled {
+                        return .failure(CancellationError())
+                    }
+                    sequenceWaiters.append(SequenceWaiter(id: id, sequence: sequence, continuation: continuation))
+                    return nil
+                }
+                if let outcome {
+                    continuation.resume(with: outcome)
+                }
+            }
+        } onCancel: {
+            let waiter = stateLock.withLock { () -> SequenceWaiter? in
+                guard let index = sequenceWaiters.firstIndex(where: { $0.id == id }) else {
+                    return nil
+                }
+                return sequenceWaiters.remove(at: index)
+            }
+            waiter?.continuation.resume(throwing: CancellationError())
+        }
     }
 
     private func cancelObservation() {
@@ -476,13 +561,19 @@ public final class SQLiteProvider: @unchecked Sendable {
     }
 
     private func persistObservedUpdate(_ update: YUpdate) {
-        let accepted = stateLock.withLock { () -> Bool in
+        let (accepted, observedWaiters) = stateLock.withLock { () -> (Bool, [SequenceWaiter]) in
             guard acceptingUpdates else {
-                return false
+                return (false, [])
             }
             pendingUpdates.append(SQLitePendingUpdate(sequence: nextSequence, update: update))
             nextSequence += 1
-            return true
+            let observed = sequenceWaiters.filter { $0.sequence < nextSequence }
+            sequenceWaiters.removeAll { $0.sequence < nextSequence }
+            return (true, observed)
+        }
+        // The update is pending, so each waiter's flush writes it.
+        for waiter in observedWaiters {
+            waiter.continuation.resume()
         }
         if accepted {
             writePendingUpdates()
@@ -594,6 +685,12 @@ public final class SQLiteProvider: @unchecked Sendable {
             }
         }
     }
+}
+
+private struct SequenceWaiter {
+    let id: UUID
+    let sequence: UInt64
+    let continuation: CheckedContinuation<Void, Error>
 }
 
 struct SQLiteProviderTestHooks {
