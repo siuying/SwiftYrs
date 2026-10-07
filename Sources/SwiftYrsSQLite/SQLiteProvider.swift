@@ -169,6 +169,10 @@ public final class SQLiteProvider: @unchecked Sendable {
     private var destroyed = false
     /// The teardown every `close()` call awaits.
     private var closeTask: Task<Error?, Never>?
+    /// Set once `destroy()` or `close()` has released the document name and
+    /// finished the streams.
+    private var teardownFinished = false
+    private var teardownWaiters: [CheckedContinuation<Void, Never>] = []
     private let lifecycleLock = NSLock()
 
     // Write state, guarded by `stateLock`.
@@ -388,6 +392,7 @@ public final class SQLiteProvider: @unchecked Sendable {
             return
         }
         cancelObservation()
+        testHooks.willFinishDestroy?()
         finishTeardown(wasStarted: wasStarted)
     }
 
@@ -430,8 +435,11 @@ public final class SQLiteProvider: @unchecked Sendable {
             self.compactionLock.unlock()
         }
         if let wasStarted {
-            testHooks.willReleaseDocument?()
+            await testHooks.willReleaseDocument?()
             finishTeardown(wasStarted: wasStarted)
+        } else {
+            // destroy() started the teardown; return only once it has finished.
+            await waitForTeardown()
         }
         return flushError
     }
@@ -443,6 +451,28 @@ public final class SQLiteProvider: @unchecked Sendable {
         syncedContinuation.finish()
         errorsContinuation.finish()
         writeResultsContinuation.finish()
+        let waiters = lifecycleLock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            teardownFinished = true
+            defer { teardownWaiters = [] }
+            return teardownWaiters
+        }
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private func waitForTeardown() async {
+        await withCheckedContinuation { continuation in
+            let finished = lifecycleLock.withLock { () -> Bool in
+                if !teardownFinished {
+                    teardownWaiters.append(continuation)
+                }
+                return teardownFinished
+            }
+            if finished {
+                continuation.resume()
+            }
+        }
     }
 
     private func persistObservedUpdate(_ update: YUpdate) {
@@ -570,7 +600,8 @@ struct SQLiteProviderTestHooks {
     var willWriteUpdates: (@Sendable () -> Void)?
     var willCommitCompaction: (@Sendable () -> Void)?
     var willCountUpdates: (@Sendable () throws -> Void)?
-    var willReleaseDocument: (@Sendable () -> Void)?
+    var willReleaseDocument: (@Sendable () async -> Void)?
+    var willFinishDestroy: (@Sendable () -> Void)?
 }
 
 enum SQLiteSchema {

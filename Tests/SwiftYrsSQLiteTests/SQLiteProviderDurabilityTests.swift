@@ -321,7 +321,7 @@ func concurrentClosesShareOneTeardown() async throws {
     let store = try SQLiteStore(Connection(temporaryDatabaseURL().path))
     let provider = SQLiteProvider(documentName: "shared-close", doc: YDoc(), store: store)
     let gate = Gate()
-    provider.testHooks.willReleaseDocument = { gate.pass() }
+    provider.testHooks.willReleaseDocument = { await gate.suspend() }
     try provider.start()
 
     let first = Task { await errorDescription { try await provider.close() } }
@@ -341,6 +341,35 @@ func concurrentClosesShareOneTeardown() async throws {
     try reloaded.start()
     defer { reloaded.destroy() }
     #expect(try await testTaskValue(first) == nil)
+}
+
+@Test
+func closeWaitsForADestroyInProgress() async throws {
+    let store = try SQLiteStore(Connection(temporaryDatabaseURL().path))
+    let provider = SQLiteProvider(documentName: "destroy-close", doc: YDoc(), store: store)
+    let gate = Gate()
+    provider.testHooks.willFinishDestroy = { gate.pass() }
+    try provider.start()
+
+    // destroy() blocks its thread in the hook, so keep it off the cooperative pool.
+    DispatchQueue.global().async {
+        provider.destroy()
+    }
+    try await nextTestEvent(gate.entered)
+
+    let closed = Flag()
+    let close = Task { () -> String? in
+        defer { closed.set() }
+        return await errorDescription { try await provider.close() }
+    }
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(!closed.isSet)
+
+    gate.open()
+    #expect(try await testTaskValue(close) == nil)
+    let reloaded = SQLiteProvider(documentName: "destroy-close", doc: YDoc(), store: store)
+    try reloaded.start()
+    reloaded.destroy()
 }
 
 @Test
@@ -457,6 +486,7 @@ private final class Gate: @unchecked Sendable {
     private let semaphore = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var isOpen = false
+    private var suspended: [CheckedContinuation<Void, Never>] = []
 
     init() {
         (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
@@ -469,9 +499,32 @@ private final class Gate: @unchecked Sendable {
         semaphore.wait()
     }
 
+    /// Like `pass()`, but suspends instead of blocking a cooperative thread.
+    func suspend() async {
+        await withCheckedContinuation { continuation in
+            let shouldWait = lock.withLock { () -> Bool in
+                guard !isOpen else { return false }
+                suspended.append(continuation)
+                return true
+            }
+            if shouldWait {
+                enteredContinuation.yield()
+            } else {
+                continuation.resume()
+            }
+        }
+    }
+
     func open() {
-        lock.withLock { isOpen = true }
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            defer { suspended = [] }
+            return suspended
+        }
         semaphore.signal()
+        for waiter in waiters {
+            waiter.resume()
+        }
     }
 }
 
